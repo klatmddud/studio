@@ -1,0 +1,19 @@
+backbone:
+  name: resnet50
+  pretrained: DEFAULT
+  trainable_layers: 3
+
+neck:
+  out_channels: 256
+
+head:
+  score_thresh: 0.2
+  nms_thresh: 0.6
+  detections_per_img: 100
+  topk_candidates: 1000
+
+num_classes: 91
+
+transform:
+  min_size: 800
+  max_size: 1333
