@@ -1,0 +1,26 @@
+[project]
+name = "studio"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "pycocotools>=2.0.11",
+    "pyyaml>=6.0.3",
+    "seaborn>=0.13.2",
+    "torch>=2.11.0",
+    "torchlightning>=0.0.0",
+    "torchvision>=0.26.0",
+]
+
+[[tool.uv.index]]
+name="pytorch-cu128"
+url="https://download.pytorch.org/whl/cu128"
+explicit=true
+
+[tool.uv.sources]
+torch={index="pytorch-cu128"}
+torchvision={index="pytorch-cu128"}
+torchaudio={index="pytorch-cu128"}
+ultralytics={path="ultralytics"}
