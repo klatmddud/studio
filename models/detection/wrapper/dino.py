@@ -10,6 +10,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 import torch
 import torch.nn as nn
+from torchvision.ops import boxes as box_ops
+
+from modules.nn import MDMBObservation, cxcywh_to_xyxy, select_topk_indices
+from modules.nn.mdmb import MissedDetectionMemoryBank
 
 from ._base import BaseDetectionWrapper, load_cfg
 
@@ -17,6 +21,10 @@ from ._base import BaseDetectionWrapper, load_cfg
 TensorDict = dict[str, torch.Tensor]
 BackendBuilder = Callable[..., Any]
 Postprocessor = Callable[[Mapping[str, Any], torch.Tensor], Sequence[Mapping[str, Any]]]
+MDMBObserver = Callable[
+    [Any, list[TensorDict], MissedDetectionMemoryBank, "DINOWrapper"],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,7 @@ class DINOBackendComponents:
     criterion: nn.Module | Callable[[Mapping[str, Any], list[TensorDict]], Mapping[str, Any]] | None = None
     bbox_postprocessor: Postprocessor | None = None
     prepare_inputs: Callable[[list[torch.Tensor]], Any] | None = None
+    mdmb_observer: MDMBObserver | None = None
 
 
 class DINOWrapper(BaseDetectionWrapper):
@@ -51,6 +60,7 @@ class DINOWrapper(BaseDetectionWrapper):
         cfg: dict[str, Any],
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
+        mdmb: MissedDetectionMemoryBank | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> None:
@@ -62,6 +72,7 @@ class DINOWrapper(BaseDetectionWrapper):
         self.inference_cfg = cfg.get("inference", {})
         self.loss_cfg = cfg.get("loss", {})
         self.label_cfg = cfg.get("labels", {})
+        self.mdmb = mdmb
 
         builder = self._resolve_backend_builder(cfg, backend_builder)
         built = self._invoke_builder(
@@ -69,6 +80,7 @@ class DINOWrapper(BaseDetectionWrapper):
             cfg=cfg,
             pre_neck=pre_neck,
             post_neck=post_neck,
+            mdmb=mdmb,
             extra_kwargs=kwargs,
         )
 
@@ -79,6 +91,7 @@ class DINOWrapper(BaseDetectionWrapper):
             self.criterion = None
             self.bbox_postprocessor = None
             self.prepare_inputs = None
+            self.mdmb_observer = None
             return
 
         components = self._coerce_components(built)
@@ -90,6 +103,7 @@ class DINOWrapper(BaseDetectionWrapper):
         self.criterion = components.criterion
         self.bbox_postprocessor = components.bbox_postprocessor
         self.prepare_inputs = components.prepare_inputs
+        self.mdmb_observer = components.mdmb_observer
 
         if self.criterion is None:
             raise ValueError(
@@ -116,6 +130,7 @@ class DINOWrapper(BaseDetectionWrapper):
         outputs = self._call_backend_model(prepared_inputs, prepared_targets)
 
         if self.training:
+            self._observe_mdmb(outputs, prepared_targets)
             loss_dict = self._compute_losses(outputs, prepared_targets)
             if not loss_dict:
                 raise RuntimeError("DINO backend returned no trainable losses.")
@@ -130,6 +145,7 @@ class DINOWrapper(BaseDetectionWrapper):
         yaml_path: str | Path,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
+        mdmb: MissedDetectionMemoryBank | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> "DINOWrapper":
@@ -138,6 +154,7 @@ class DINOWrapper(BaseDetectionWrapper):
             load_cfg(yaml_path),
             pre_neck=pre_neck,
             post_neck=post_neck,
+            mdmb=mdmb,
             backend_builder=backend_builder,
             **kwargs,
         )
@@ -363,6 +380,16 @@ class DINOWrapper(BaseDetectionWrapper):
                 prepare_inputs=prepare_inputs,
             )
 
+        if isinstance(built, tuple) and len(built) == 5:
+            model, criterion, postprocessor, prepare_inputs, mdmb_observer = built
+            return DINOBackendComponents(
+                model=model,
+                criterion=criterion,
+                bbox_postprocessor=self._resolve_postprocessor(postprocessor),
+                prepare_inputs=prepare_inputs,
+                mdmb_observer=mdmb_observer,
+            )
+
         if isinstance(built, Mapping):
             model = built.get("model")
             criterion = built.get("criterion")
@@ -370,11 +397,13 @@ class DINOWrapper(BaseDetectionWrapper):
             if postprocessor is None and "postprocessors" in built:
                 postprocessor = built["postprocessors"]
             prepare_inputs = built.get("prepare_inputs")
+            mdmb_observer = built.get("mdmb_observer")
             return DINOBackendComponents(
                 model=model,
                 criterion=criterion,
                 bbox_postprocessor=self._resolve_postprocessor(postprocessor),
                 prepare_inputs=prepare_inputs,
+                mdmb_observer=mdmb_observer,
             )
 
         model = getattr(built, "model", None)
@@ -385,6 +414,7 @@ class DINOWrapper(BaseDetectionWrapper):
         if postprocessor is None:
             postprocessor = getattr(built, "postprocessors", None)
         prepare_inputs = getattr(built, "prepare_inputs", None)
+        mdmb_observer = getattr(built, "mdmb_observer", None)
         if model is None:
             raise TypeError(
                 "DINO backend builder returned an unsupported object. Expected nn.Module, "
@@ -395,6 +425,7 @@ class DINOWrapper(BaseDetectionWrapper):
             criterion=criterion,
             bbox_postprocessor=self._resolve_postprocessor(postprocessor),
             prepare_inputs=prepare_inputs,
+            mdmb_observer=mdmb_observer,
         )
 
     def _resolve_postprocessor(self, value: Any) -> Postprocessor | None:
@@ -414,6 +445,7 @@ class DINOWrapper(BaseDetectionWrapper):
         cfg: dict[str, Any],
         pre_neck: nn.Module | None,
         post_neck: nn.Module | None,
+        mdmb: MissedDetectionMemoryBank | None,
         extra_kwargs: dict[str, Any],
     ) -> Any:
         backend_cfg = cfg.get("backend", {})
@@ -426,6 +458,7 @@ class DINOWrapper(BaseDetectionWrapper):
             "num_classes": self.num_classes,
             "pre_neck": pre_neck,
             "post_neck": post_neck,
+            "mdmb": mdmb,
             **builder_kwargs,
         }
 
@@ -489,6 +522,181 @@ class DINOWrapper(BaseDetectionWrapper):
 
     def _collect_original_sizes(self, images: list[torch.Tensor]) -> list[tuple[int, int]]:
         return [(int(image.shape[-2]), int(image.shape[-1])) for image in images]
+
+    def _observe_mdmb(
+        self,
+        outputs: Any,
+        prepared_targets: list[TensorDict] | None,
+    ) -> None:
+        if self.mdmb is None or prepared_targets is None:
+            return
+        if self.mdmb_observer is not None:
+            self.mdmb_observer(outputs, prepared_targets, self.mdmb, self)
+            return
+        if not isinstance(outputs, Mapping):
+            return
+
+        pred_logits = outputs.get("pred_logits")
+        pred_boxes = outputs.get("pred_boxes")
+        if not isinstance(pred_logits, torch.Tensor) or not isinstance(pred_boxes, torch.Tensor):
+            return
+        if pred_logits.ndim != 3 or pred_boxes.ndim != 3:
+            return
+
+        query_features = self._extract_query_features(outputs, pred_logits)
+        matches = self._match_queries(outputs, prepared_targets)
+        observations: list[MDMBObservation] = []
+        max_candidates = self.mdmb.config.max_entries_per_image * 4
+
+        normalized_boxes = cxcywh_to_xyxy(pred_boxes.detach()).clamp_(min=0.0, max=1.0)
+        class_scores = torch.sigmoid(pred_logits.detach())
+        pred_scores, pred_label_indices = class_scores.max(dim=-1)
+        pred_label_ids = self._restore_label_ids(pred_label_indices)
+
+        for image_index, prepared_target in enumerate(prepared_targets):
+            gt_boxes_xyxy = prepared_target["boxes_xyxy"]
+            if gt_boxes_xyxy.numel() == 0:
+                continue
+
+            size = prepared_target["orig_size"]
+            height = int(size[0].item())
+            width = int(size[1].item())
+            scale = pred_boxes.new_tensor([width, height, width, height])
+            predicted_boxes_xyxy = normalized_boxes[image_index] * scale
+
+            iou_matrix = box_ops.box_iou(gt_boxes_xyxy, predicted_boxes_xyxy)
+            iou_max, nearest_gt = iou_matrix.max(dim=0)
+            gt_label_indices = prepared_target["labels"][nearest_gt]
+            gt_label_ids = prepared_target.get("labels_raw", self._restore_label_ids(gt_label_indices))
+            query_indices = torch.arange(pred_boxes.shape[1], device=pred_boxes.device)
+            gt_scores = class_scores[image_index][query_indices, gt_label_indices]
+
+            detected_mask = torch.zeros_like(iou_max, dtype=torch.bool)
+            matched_src, matched_tgt = matches[image_index]
+            if matched_src.numel() > 0:
+                matched_scores = class_scores[image_index][matched_src, prepared_target["labels"][matched_tgt]]
+                matched_ious = box_ops.box_iou(
+                    predicted_boxes_xyxy[matched_src],
+                    gt_boxes_xyxy[matched_tgt],
+                ).diagonal()
+                detected = (
+                    (pred_label_ids[image_index][matched_src] == gt_label_ids[matched_tgt])
+                    & (matched_scores >= self.mdmb.config.detection_score_threshold)
+                    & (matched_ious >= self.mdmb.config.iou_high)
+                )
+                detected_mask[matched_src] = detected
+
+            candidate_mask = (iou_max >= self.mdmb.config.iou_low) | detected_mask
+            candidate_indices = torch.where(candidate_mask)[0]
+            if candidate_indices.numel() == 0:
+                continue
+
+            priority = iou_max[candidate_indices] + gt_scores[candidate_indices]
+            keep_order = select_topk_indices(priority, k=max_candidates)
+            candidate_indices = candidate_indices[keep_order]
+            image_id = int(prepared_target["image_id"].item())
+
+            for candidate_index in candidate_indices.tolist():
+                detected = bool(detected_mask[candidate_index].item())
+                effective_iou = float(iou_max[candidate_index].item())
+                if detected:
+                    effective_iou = max(effective_iou, self.mdmb.config.iou_high)
+                observations.append(
+                    MDMBObservation(
+                        image_id=image_id,
+                        region_coords=normalized_boxes[image_index, candidate_index],
+                        iou_max=effective_iou,
+                        cls_score=float(gt_scores[candidate_index].item()),
+                        feature_vec=query_features[image_index, candidate_index],
+                        gt_class=int(gt_label_ids[nearest_gt[candidate_index]].item()),
+                        detected=detected,
+                        source="query",
+                    )
+                )
+
+        if observations:
+            self.mdmb.update(observations)
+
+    def _match_queries(
+        self,
+        outputs: Mapping[str, Any],
+        prepared_targets: list[TensorDict],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        matcher = getattr(self.criterion, "matcher", None)
+        if not callable(matcher):
+            return [
+                (
+                    torch.zeros((0,), dtype=torch.int64, device=prepared_targets[0]["boxes"].device),
+                    torch.zeros((0,), dtype=torch.int64, device=prepared_targets[0]["boxes"].device),
+                )
+                for _ in prepared_targets
+            ]
+        try:
+            raw_matches = matcher(
+                {
+                    "pred_logits": outputs["pred_logits"],
+                    "pred_boxes": outputs["pred_boxes"],
+                },
+                prepared_targets,
+            )
+        except Exception:
+            return [
+                (
+                    torch.zeros((0,), dtype=torch.int64, device=prepared_targets[0]["boxes"].device),
+                    torch.zeros((0,), dtype=torch.int64, device=prepared_targets[0]["boxes"].device),
+                )
+                for _ in prepared_targets
+            ]
+
+        matches: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for src_idx, tgt_idx in raw_matches:
+            matches.append(
+                (
+                    src_idx.to(dtype=torch.int64),
+                    tgt_idx.to(dtype=torch.int64),
+                )
+            )
+        return matches
+
+    def _extract_query_features(
+        self,
+        outputs: Mapping[str, Any],
+        pred_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, num_queries, _ = pred_logits.shape
+        for key in (
+            "query_features",
+            "decoder_features",
+            "pred_features",
+            "hidden_states",
+            "hs",
+        ):
+            candidate = outputs.get(key)
+            tensor = self._coerce_query_feature_tensor(candidate, batch_size, num_queries)
+            if tensor is not None:
+                return tensor
+        return pred_logits.detach()
+
+    def _coerce_query_feature_tensor(
+        self,
+        value: Any,
+        batch_size: int,
+        num_queries: int,
+    ) -> torch.Tensor | None:
+        if not isinstance(value, torch.Tensor):
+            return None
+        tensor = value.detach()
+        if tensor.ndim == 3:
+            if tensor.shape[0] == batch_size and tensor.shape[1] == num_queries:
+                return tensor
+        if tensor.ndim == 4:
+            if tensor.shape[0] == batch_size and tensor.shape[2] == num_queries:
+                return tensor[:, -1]
+            if tensor.shape[1] == batch_size and tensor.shape[2] == num_queries:
+                return tensor[-1]
+            if tensor.shape[0] == batch_size and tensor.shape[1] == num_queries:
+                return tensor[:, :, -1, :]
+        return None
 
     def _call_accepts_targets(self, module: nn.Module) -> bool:
         signature = inspect.signature(module.forward)

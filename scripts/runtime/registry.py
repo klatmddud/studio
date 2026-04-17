@@ -5,6 +5,7 @@ from typing import Any
 
 import torch.nn as nn
 
+from modules.nn import build_mdmb_from_yaml
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
 from .config import load_yaml_file
@@ -23,6 +24,9 @@ MODEL_BUILDERS = {
     "fasterrcnn": FasterRCNNWrapper,
     "fcos": FCOSWrapper,
 }
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
 
 
 def normalize_arch(raw_arch: str) -> str:
@@ -44,7 +48,8 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
-    return builder(model_config)
+    mdmb = _build_mdmb(normalized_arch)
+    return builder(model_config, mdmb=mdmb)
 
 
 def build_model_from_path(
@@ -61,3 +66,9 @@ def build_model_from_path(
     arch = infer_arch(model_config, resolved_path)
     model = build_model_from_config(model_config, arch)
     return model, model_config, arch, resolved_path
+
+
+def _build_mdmb(arch: str) -> nn.Module | None:
+    if not MDMB_CONFIG_PATH.is_file():
+        return None
+    return build_mdmb_from_yaml(MDMB_CONFIG_PATH, arch=arch)

@@ -81,6 +81,7 @@ def fit(
     mode = runtime_config["checkpoint"]["mode"]
 
     for epoch in range(start_epoch, total_epochs):
+        _call_model_hook(model, "mdmb", "start_epoch", epoch + 1)
         train_metrics = train_one_epoch(
             model=model,
             optimizer=optimizer,
@@ -93,11 +94,15 @@ def fit(
             epoch_index=epoch,
             total_epochs=total_epochs,
         )
+        _call_model_hook(model, "mdmb", "end_epoch", epoch + 1)
+        mdmb_summary = _get_mdmb_summary(model)
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
             "train": train_metrics,
         }
+        if mdmb_summary is not None:
+            record["mdmb"] = mdmb_summary
 
         should_eval = (
             val_loader is not None
@@ -347,7 +352,20 @@ def load_checkpoint(
     map_location: torch.device | str = "cpu",
 ) -> dict[str, Any]:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    state_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    missing_keys = [key for key in state_result.missing_keys if not _is_optional_mdmb_key(key)]
+    unexpected_keys = [
+        key for key in state_result.unexpected_keys if not _is_optional_mdmb_key(key)
+    ]
+    if missing_keys or unexpected_keys:
+        details = []
+        if missing_keys:
+            details.append(f"missing_keys={missing_keys}")
+        if unexpected_keys:
+            details.append(f"unexpected_keys={unexpected_keys}")
+        raise RuntimeError(
+            f"Checkpoint state_dict is incompatible with the current model: {'; '.join(details)}"
+        )
 
     if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -428,6 +446,11 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     if "loss" in train_metrics:
         parts.append(f"train_loss={train_metrics['loss']:.4f}")
 
+    mdmb_summary = record.get("mdmb")
+    if isinstance(mdmb_summary, dict):
+        parts.append(f"mdmb_entries={int(mdmb_summary.get('num_entries', 0))}")
+        parts.append(f"mdmb_chronic={int(mdmb_summary.get('num_chronic_misses', 0))}")
+
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -488,3 +511,31 @@ def _format_eta(seconds: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _call_model_hook(
+    model: torch.nn.Module,
+    attribute_name: str,
+    hook_name: str,
+    *args,
+) -> None:
+    attribute = getattr(model, attribute_name, None)
+    if attribute is None:
+        return
+    hook = getattr(attribute, hook_name, None)
+    if callable(hook):
+        hook(*args)
+
+
+def _is_optional_mdmb_key(key: str) -> bool:
+    return key == "mdmb._extra_state" or key.startswith("mdmb.")
+
+
+def _get_mdmb_summary(model: torch.nn.Module) -> dict[str, Any] | None:
+    mdmb = getattr(model, "mdmb", None)
+    if mdmb is None:
+        return None
+    summary = getattr(mdmb, "summary", None)
+    if not callable(summary):
+        return None
+    return summary()

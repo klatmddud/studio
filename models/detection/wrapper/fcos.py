@@ -2,11 +2,250 @@ from __future__ import annotations
 
 """FCOS wrapper: YAML config -> torchvision FCOS."""
 
+import weakref
+from collections import OrderedDict
+
+import torch
 import torch.nn as nn
 from torchvision.models.detection import FCOS
+from torchvision.ops import boxes as box_ops
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
+from modules.nn import MDMBObservation, normalize_xyxy_boxes, select_topk_indices
+from modules.nn.mdmb import MissedDetectionMemoryBank
+
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
+
+
+class MDMBFCOS(FCOS):
+    """FCOS variant that records point-level observations into MDMB during training."""
+
+    def __init__(self, *args, mdmb: MissedDetectionMemoryBank | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
+
+    def forward(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None = None,
+    ):
+        if self.training:
+            if targets is None:
+                torch._assert(False, "targets should not be none when in training mode")
+            else:
+                for target in targets:
+                    boxes = target["boxes"]
+                    torch._assert(isinstance(boxes, torch.Tensor), "Expected target boxes to be of type Tensor.")
+                    torch._assert(
+                        len(boxes.shape) == 2 and boxes.shape[-1] == 4,
+                        f"Expected target boxes to be a tensor of shape [N, 4], got {boxes.shape}.",
+                    )
+
+        original_image_sizes: list[tuple[int, int]] = []
+        for img in images:
+            value = img.shape[-2:]
+            torch._assert(
+                len(value) == 2,
+                f"expecting the last two dimensions of the Tensor to be H and W instead got {img.shape[-2:]}",
+            )
+            original_image_sizes.append((value[0], value[1]))
+
+        images, targets = self.transform(images, targets)
+
+        if targets is not None:
+            for target_idx, target in enumerate(targets):
+                boxes = target["boxes"]
+                degenerate_boxes = boxes[:, 2:] <= boxes[:, :2]
+                if degenerate_boxes.any():
+                    bb_idx = torch.where(degenerate_boxes.any(dim=1))[0][0]
+                    degen_bb: list[float] = boxes[bb_idx].tolist()
+                    torch._assert(
+                        False,
+                        f"All bounding boxes should have positive height and width. Found invalid box {degen_bb} for target at index {target_idx}.",
+                    )
+
+        features = self.backbone(images.tensors)
+        if isinstance(features, torch.Tensor):
+            features = OrderedDict([("0", features)])
+        feature_list = list(features.values())
+
+        head_outputs = self.head(feature_list)
+        anchors = self.anchor_generator(images, feature_list)
+        num_anchors_per_level = [x.size(2) * x.size(3) for x in feature_list]
+
+        losses = {}
+        detections: list[dict[str, torch.Tensor]] = []
+        if self.training:
+            if targets is None:
+                torch._assert(False, "targets should not be none when in training mode")
+            matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
+            losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
+            self._observe_mdmb(
+                feature_list=feature_list,
+                head_outputs=head_outputs,
+                anchors=anchors,
+                matched_idxs=matched_idxs,
+                targets=targets,
+                image_shapes=images.image_sizes,
+            )
+        else:
+            split_head_outputs: dict[str, list[torch.Tensor]] = {}
+            for key in head_outputs:
+                split_head_outputs[key] = list(head_outputs[key].split(num_anchors_per_level, dim=1))
+            split_anchors = [list(anchor.split(num_anchors_per_level)) for anchor in anchors]
+            detections = self.postprocess_detections(split_head_outputs, split_anchors, images.image_sizes)
+            detections = self.transform.postprocess(detections, images.image_sizes, original_image_sizes)
+
+        if torch.jit.is_scripting():
+            if not self._has_warned:
+                import warnings
+
+                warnings.warn("FCOS always returns a (Losses, Detections) tuple in scripting")
+                self._has_warned = True
+            return losses, detections
+        return self.eager_outputs(losses, detections)
+
+    def _match_anchors_to_targets(
+        self,
+        targets: list[dict[str, torch.Tensor]],
+        anchors: list[torch.Tensor],
+        num_anchors_per_level: list[int],
+    ) -> list[torch.Tensor]:
+        matched_idxs: list[torch.Tensor] = []
+        for anchors_per_image, targets_per_image in zip(anchors, targets, strict=True):
+            if targets_per_image["boxes"].numel() == 0:
+                matched_idxs.append(
+                    torch.full(
+                        (anchors_per_image.size(0),),
+                        -1,
+                        dtype=torch.int64,
+                        device=anchors_per_image.device,
+                    )
+                )
+                continue
+
+            gt_boxes = targets_per_image["boxes"]
+            gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) / 2
+            anchor_centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) / 2
+            anchor_sizes = anchors_per_image[:, 2] - anchors_per_image[:, 0]
+            pairwise_match = (anchor_centers[:, None, :] - gt_centers[None, :, :]).abs_().max(
+                dim=2
+            ).values < self.center_sampling_radius * anchor_sizes[:, None]
+
+            x, y = anchor_centers.unsqueeze(dim=2).unbind(dim=1)
+            x0, y0, x1, y1 = gt_boxes.unsqueeze(dim=0).unbind(dim=2)
+            pairwise_dist = torch.stack([x - x0, y - y0, x1 - x, y1 - y], dim=2)
+
+            pairwise_match &= pairwise_dist.min(dim=2).values > 0
+
+            lower_bound = anchor_sizes * 4
+            lower_bound[: num_anchors_per_level[0]] = 0
+            upper_bound = anchor_sizes * 8
+            upper_bound[-num_anchors_per_level[-1] :] = float("inf")
+            pairwise_dist = pairwise_dist.max(dim=2).values
+            pairwise_match &= (pairwise_dist > lower_bound[:, None]) & (pairwise_dist < upper_bound[:, None])
+
+            gt_areas = (gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])
+            pairwise_match = pairwise_match.to(torch.float32) * (1e8 - gt_areas[None, :])
+            min_values, matched_idx = pairwise_match.max(dim=1)
+            matched_idx[min_values < 1e-5] = -1
+            matched_idxs.append(matched_idx)
+        return matched_idxs
+
+    def _observe_mdmb(
+        self,
+        *,
+        feature_list: list[torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+    ) -> None:
+        mdmb = self._get_mdmb()
+        if mdmb is None:
+            return
+
+        flat_features = self._flatten_feature_points(feature_list)
+        cls_logits = head_outputs["cls_logits"].detach()
+        ctrness = head_outputs["bbox_ctrness"].detach().squeeze(dim=2)
+        combined_scores = torch.sqrt(torch.sigmoid(cls_logits) * torch.sigmoid(ctrness.unsqueeze(-1)))
+        pred_scores, pred_labels = combined_scores.max(dim=-1)
+
+        observations: list[MDMBObservation] = []
+        max_candidates = mdmb.config.max_entries_per_image * 4
+        for image_index, (
+            anchors_per_image,
+            matched_idxs_per_image,
+            target_per_image,
+            image_shape,
+        ) in enumerate(zip(anchors, matched_idxs, targets, image_shapes, strict=True)):
+            gt_boxes = target_per_image["boxes"]
+            gt_labels = target_per_image["labels"]
+            if gt_boxes.numel() == 0:
+                continue
+
+            iou_matrix = box_ops.box_iou(gt_boxes, anchors_per_image)
+            iou_max, nearest_gt = iou_matrix.max(dim=0)
+            gt_classes = gt_labels[nearest_gt]
+            point_indices = torch.arange(
+                anchors_per_image.shape[0],
+                device=anchors_per_image.device,
+            )
+            gt_scores = combined_scores[image_index][point_indices, gt_classes]
+
+            detected_mask = (
+                (matched_idxs_per_image >= 0)
+                & (pred_labels[image_index] == gt_classes)
+                & (pred_scores[image_index] >= mdmb.config.detection_score_threshold)
+            )
+            candidate_mask = (iou_max >= mdmb.config.iou_low) | detected_mask
+            candidate_indices = torch.where(candidate_mask)[0]
+            if candidate_indices.numel() == 0:
+                continue
+
+            priority = iou_max[candidate_indices] + gt_scores[candidate_indices]
+            keep_order = select_topk_indices(priority, k=max_candidates)
+            candidate_indices = candidate_indices[keep_order]
+
+            normalized_regions = normalize_xyxy_boxes(
+                anchors_per_image[candidate_indices],
+                image_shape,
+            )
+            point_features = flat_features[image_index][candidate_indices]
+            image_id = int(target_per_image["image_id"].item())
+
+            for local_index, candidate_index in enumerate(candidate_indices.tolist()):
+                detected = bool(detected_mask[candidate_index].item())
+                effective_iou = float(iou_max[candidate_index].item())
+                if detected:
+                    effective_iou = max(effective_iou, mdmb.config.iou_high)
+                observations.append(
+                    MDMBObservation(
+                        image_id=image_id,
+                        region_coords=normalized_regions[local_index],
+                        iou_max=effective_iou,
+                        cls_score=float(gt_scores[candidate_index].item()),
+                        feature_vec=point_features[local_index],
+                        gt_class=int(gt_classes[candidate_index].item()),
+                        detected=detected,
+                        source="point",
+                    )
+                )
+
+        if observations:
+            mdmb.update(observations)
+
+    def _flatten_feature_points(self, feature_list: list[torch.Tensor]) -> torch.Tensor:
+        flattened = []
+        for features in feature_list:
+            flattened.append(features.flatten(start_dim=2).permute(0, 2, 1).detach())
+        return torch.cat(flattened, dim=1)
+
+    def _get_mdmb(self) -> MissedDetectionMemoryBank | None:
+        if self._mdmb_ref is None:
+            return None
+        return self._mdmb_ref()
 
 
 class FCOSWrapper(BaseDetectionWrapper):
@@ -21,13 +260,14 @@ class FCOSWrapper(BaseDetectionWrapper):
         cfg: dict,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
+        mdmb: MissedDetectionMemoryBank | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
+        self.mdmb = mdmb
 
         backbone = build_backbone_with_fpn(
             cfg,
-            # FCOS expects five pyramid levels: P3-P5 from the FPN plus P6-P7.
             extra_blocks=LastLevelP6P7(256, 256),
             pre_neck=pre_neck,
             post_neck=post_neck,
@@ -37,7 +277,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         head = cfg.get("head", {})
         tfm = cfg.get("transform", {})
 
-        self.model = FCOS(
+        self.model = MDMBFCOS(
             backbone=backbone,
             num_classes=cfg.get("num_classes", 91),
             min_size=tfm.get("min_size", 800),
@@ -46,6 +286,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             nms_thresh=head.get("nms_thresh", 0.6),
             detections_per_img=head.get("detections_per_img", 100),
             topk_candidates=head.get("topk_candidates", 1000),
+            mdmb=mdmb,
             **kwargs,
         )
 
@@ -55,7 +296,14 @@ class FCOSWrapper(BaseDetectionWrapper):
         yaml_path: str,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
+        mdmb: MissedDetectionMemoryBank | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
-        return cls(load_cfg(yaml_path), pre_neck=pre_neck, post_neck=post_neck, **kwargs)
+        return cls(
+            load_cfg(yaml_path),
+            pre_neck=pre_neck,
+            post_neck=post_neck,
+            mdmb=mdmb,
+            **kwargs,
+        )
