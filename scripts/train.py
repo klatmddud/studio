@@ -19,6 +19,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to the train runtime YAML.")
     parser.add_argument("--model", required=True, help="Path to the model YAML.")
     parser.add_argument(
+        "--data",
+        default=None,
+        help=(
+            "Optional dataset selector for runtime data env vars "
+            "(for example: kitti, bdd100k, bdd10k)."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Optional override for runtime.output_dir.",
@@ -33,7 +41,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    runtime_config, runtime_config_path = load_runtime_config(args.config, mode="train")
+    runtime_config, runtime_config_path = load_runtime_config(
+        args.config,
+        mode="train",
+        dataset=args.data,
+    )
     if args.output_dir:
         runtime_config["output_dir"] = str(Path(args.output_dir).expanduser().resolve())
         runtime_config["checkpoint"]["dir"] = str(
@@ -53,6 +65,8 @@ def main() -> None:
     print(f"Starting training: arch={arch} device={device.type}")
     print(f"train_config={runtime_config_path}")
     print(f"model_config={model_config_path}")
+    if runtime_config.get("_dataset"):
+        print(f"dataset={runtime_config['_dataset']}")
 
     fit(
         model=model,

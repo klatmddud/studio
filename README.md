@@ -76,7 +76,7 @@ data:
 기본 실행:
 
 ```powershell
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
 ```
 
 ### 학습 CLI 옵션
@@ -85,6 +85,7 @@ uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection
 | --- | --- |
 | `--config` | 학습 런타임 YAML 경로. 필수 |
 | `--model` | 모델 YAML 경로. 필수 |
+| `--data` | 데이터셋 env prefix 선택. 예: `kitti`, `bdd100k`, `bdd10k` |
 | `--output-dir` | `train.yaml`의 `output_dir`를 CLI에서 덮어씀 |
 | `--device` | `runtime.device`를 CLI에서 덮어씀. 예: `auto`, `cpu`, `cuda`, `mps` |
 
@@ -93,19 +94,19 @@ uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection
 FCOS 학습:
 
 ```powershell
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data bdd100k
 ```
 
 Faster R-CNN 학습 결과를 별도 폴더에 저장:
 
 ```powershell
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fasterrcnn.yaml --output-dir runs/fasterrcnn_kitti --device cuda
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fasterrcnn.yaml --data kitti --output-dir runs/fasterrcnn_kitti --device cuda
 ```
 
 DINO 학습:
 
 ```powershell
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/dino.yaml
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/dino.yaml --data bdd10k
 ```
 
 ### `scripts/cfg/train.yaml` 주요 파라미터
@@ -162,13 +163,13 @@ checkpoint:
 기본 실행:
 
 ```powershell
-uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml
+uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --data kitti
 ```
 
 실무에서는 보통 평가할 체크포인트를 함께 지정합니다.
 
 ```powershell
-uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --checkpoint runs/train/checkpoints/best.pt
+uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --data kitti --checkpoint runs/train/checkpoints/best.pt
 ```
 
 ### 평가 CLI 옵션
@@ -177,6 +178,7 @@ uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/c
 | --- | --- |
 | `--config` | 평가 런타임 YAML 경로. 필수 |
 | `--model` | 모델 YAML 경로. 필수 |
+| `--data` | 데이터셋 env prefix 선택. 예: `kitti`, `bdd100k`, `bdd10k` |
 | `--output-dir` | `eval.yaml`의 `output_dir`를 CLI에서 덮어씀 |
 | `--device` | `runtime.device`를 CLI에서 덮어씀 |
 | `--checkpoint` | `eval.yaml`의 `checkpoint.path`를 CLI에서 덮어씀 |
@@ -186,13 +188,13 @@ uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/c
 FCOS best 체크포인트 평가:
 
 ```powershell
-uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --checkpoint runs/fcos_exp/checkpoints/best.pt
+uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --data bdd100k --checkpoint runs/fcos_exp/checkpoints/best.pt
 ```
 
 평가 결과를 별도 폴더에 저장:
 
 ```powershell
-uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/dino.yaml --checkpoint runs/dino_exp/checkpoints/best.pt --output-dir runs/dino_eval --device cuda
+uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/dino.yaml --data bdd10k --checkpoint runs/dino_exp/checkpoints/best.pt --output-dir runs/dino_eval --device cuda
 ```
 
 ### `scripts/cfg/eval.yaml` 주요 파라미터

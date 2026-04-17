@@ -110,9 +110,45 @@ def _build_loader(
 
 def _resolve_image_path(images_dir: Path, file_name: str) -> Path:
     image_path = Path(file_name)
-    if not image_path.is_absolute():
-        image_path = images_dir / image_path
-    return image_path.resolve()
+    if image_path.is_absolute():
+        return image_path.resolve()
+
+    for relative_path in _candidate_relative_image_paths(images_dir, image_path):
+        candidate = (images_dir / relative_path).resolve()
+        if candidate.is_file():
+            return candidate
+
+    return (images_dir / image_path).resolve()
+
+
+def _candidate_relative_image_paths(images_dir: Path, image_path: Path) -> list[Path]:
+    candidates: list[Path] = [image_path]
+
+    deduped = _strip_images_dir_prefix(images_dir, image_path)
+    if deduped is not None and deduped not in candidates:
+        candidates.append(deduped)
+
+    parts = image_path.parts
+    for index in range(1, len(parts)):
+        trimmed = Path(*parts[index:])
+        if trimmed not in candidates:
+            candidates.append(trimmed)
+
+    return candidates
+
+
+def _strip_images_dir_prefix(images_dir: Path, image_path: Path) -> Path | None:
+    image_parts = image_path.parts
+    images_dir_parts = images_dir.parts
+    max_prefix_len = min(len(image_parts), len(images_dir_parts))
+    for prefix_len in range(max_prefix_len, 0, -1):
+        if image_parts[:prefix_len] != images_dir_parts[-prefix_len:]:
+            continue
+        remaining_parts = image_parts[prefix_len:]
+        if not remaining_parts:
+            return None
+        return Path(*remaining_parts)
+    return None
 
 
 def _build_target(

@@ -15,6 +15,22 @@ from .metrics import BOX_METRIC_NAMES
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}")
 _DOTENV_LOADED = False
+_DATA_ENV_SUFFIXES = (
+    "TRAIN_ANNOTATIONS",
+    "TRAIN_IMAGES",
+    "VAL_ANNOTATIONS",
+    "VAL_IMAGES",
+    "ANNOTATIONS",
+    "IMAGES",
+)
+_DATA_PATH_KEYS = {
+    "train_images",
+    "train_annotations",
+    "val_images",
+    "val_annotations",
+    "images",
+    "annotations",
+}
 
 TRAIN_DEFAULTS: dict[str, Any] = {
     "seed": 42,
@@ -99,8 +115,7 @@ EVAL_DEFAULTS: dict[str, Any] = {
 def load_yaml_file(path: str | Path) -> dict[str, Any]:
     _load_project_dotenv()
     config_path = Path(path).expanduser().resolve()
-    with open(config_path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+    data = _read_yaml_file(config_path)
     data = _expand_env_placeholders(data, source=config_path)
     if not isinstance(data, dict):
         raise TypeError(f"YAML config must contain a mapping at the top level: {config_path}")
@@ -141,9 +156,21 @@ def resolve_device(raw: str) -> torch.device:
     return device
 
 
-def load_runtime_config(path: str | Path, mode: str) -> tuple[dict[str, Any], Path]:
+def load_runtime_config(
+    path: str | Path,
+    mode: str,
+    dataset: str | None = None,
+) -> tuple[dict[str, Any], Path]:
+    _load_project_dotenv()
     config_path = Path(path).expanduser().resolve()
-    raw = load_yaml_file(config_path)
+    raw = _read_yaml_file(config_path)
+    if not isinstance(raw, dict):
+        raise TypeError(f"YAML config must contain a mapping at the top level: {config_path}")
+    normalized_dataset = None
+    if dataset:
+        normalized_dataset = _normalize_dataset_name(dataset)
+        raw = _apply_dataset_env_overrides(raw, dataset=normalized_dataset, source=config_path)
+    raw = _expand_env_placeholders(raw, source=config_path)
 
     if mode == "train":
         config = deep_merge(TRAIN_DEFAULTS, raw)
@@ -158,6 +185,8 @@ def load_runtime_config(path: str | Path, mode: str) -> tuple[dict[str, Any], Pa
 
     config["_config_path"] = str(config_path)
     config["_mode"] = mode
+    if normalized_dataset is not None:
+        config["_dataset"] = normalized_dataset
     return config, config_path
 
 
@@ -284,6 +313,76 @@ def _load_project_dotenv() -> None:
     if dotenv_path.is_file():
         load_dotenv(dotenv_path=dotenv_path, override=False)
     _DOTENV_LOADED = True
+
+
+def _read_yaml_file(path: Path) -> Any:
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def _normalize_dataset_name(dataset: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "", dataset).lower()
+    if not normalized:
+        raise ValueError("dataset must contain at least one ASCII letter or digit.")
+    return normalized
+
+
+def _apply_dataset_env_overrides(
+    raw: dict[str, Any],
+    *,
+    dataset: str,
+    source: Path,
+) -> dict[str, Any]:
+    updated = deepcopy(raw)
+    data = updated.get("data")
+    if not isinstance(data, dict):
+        return updated
+
+    dataset_prefix = dataset.upper()
+    for key, value in data.items():
+        if key in _DATA_PATH_KEYS and isinstance(value, str):
+            data[key] = _rewrite_dataset_env_placeholder(
+                value,
+                dataset_prefix=dataset_prefix,
+                source=source,
+                data_key=key,
+            )
+    return updated
+
+
+def _rewrite_dataset_env_placeholder(
+    value: str,
+    *,
+    dataset_prefix: str,
+    source: Path,
+    data_key: str,
+) -> str:
+    match = _ENV_VAR_PATTERN.fullmatch(value)
+    if match is None:
+        return value
+
+    env_name = match.group(1)
+    suffix = _extract_data_env_suffix(env_name)
+    if suffix is None:
+        raise ValueError(
+            f"Unsupported data placeholder {env_name!r} for data.{data_key} in {source}. "
+            f"Expected a placeholder ending with one of: {', '.join(_DATA_ENV_SUFFIXES)}."
+        )
+
+    operator = match.group(2) or ""
+    default_value = match.group(3)
+    rewritten_name = f"{dataset_prefix}_{suffix}"
+    if default_value is None:
+        return f"${{{rewritten_name}}}"
+    return f"${{{rewritten_name}{operator}{default_value}}}"
+
+
+def _extract_data_env_suffix(env_name: str) -> str | None:
+    upper_name = env_name.upper()
+    for suffix in _DATA_ENV_SUFFIXES:
+        if upper_name == suffix or upper_name.endswith(f"_{suffix}"):
+            return suffix
+    return None
 
 
 def _expand_env_placeholders(value: Any, source: Path) -> Any:

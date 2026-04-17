@@ -19,6 +19,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to the eval runtime YAML.")
     parser.add_argument("--model", required=True, help="Path to the model YAML.")
     parser.add_argument(
+        "--data",
+        default=None,
+        help=(
+            "Optional dataset selector for runtime data env vars "
+            "(for example: kitti, bdd100k, bdd10k)."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Optional override for runtime.output_dir.",
@@ -38,7 +46,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    runtime_config, runtime_config_path = load_runtime_config(args.config, mode="eval")
+    runtime_config, runtime_config_path = load_runtime_config(
+        args.config,
+        mode="eval",
+        dataset=args.data,
+    )
     if args.output_dir:
         runtime_config["output_dir"] = str(Path(args.output_dir).expanduser().resolve())
     if args.device:
@@ -74,6 +86,8 @@ def main() -> None:
     print(f"Starting evaluation: arch={arch} device={device.type}")
     print(f"eval_config={runtime_config_path}")
     print(f"model_config={model_config_path}")
+    if runtime_config.get("_dataset"):
+        print(f"dataset={runtime_config['_dataset']}")
     print(f"checkpoint={runtime_config['checkpoint']['path']}")
 
     metrics, _ = evaluate(
