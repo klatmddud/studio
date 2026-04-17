@@ -68,12 +68,14 @@ def _build_resnet_fpn(
     weights,
     trainable_layers: int,
     extra_blocks,
+    returned_layers: list[int] | None = None,
 ) -> "BackboneWithFPN":
     """Build a ResNet backbone with FPN."""
     return resnet_fpn_backbone(
         backbone_name=name,
         weights=weights,
         trainable_layers=trainable_layers,
+        returned_layers=returned_layers,
         extra_blocks=extra_blocks,
     )
 
@@ -106,6 +108,7 @@ def build_backbone_with_fpn(
     extra_blocks=None,
     pre_neck: "nn.Module | None" = None,
     post_neck: "nn.Module | None" = None,
+    returned_layers: list[int] | None = None,
 ) -> "ExtensibleBackboneWithFPN | BackboneWithFPN":
     """
     Build a BackboneWithFPN from a YAML config.
@@ -129,8 +132,16 @@ def build_backbone_with_fpn(
     weights = resolve_weights(name, pretrained)
 
     if name in SUPPORTED_RESNET_BACKBONES:
-        raw = _build_resnet_fpn(name, weights, trainable_layers, extra_blocks)
+        raw = _build_resnet_fpn(
+            name,
+            weights,
+            trainable_layers,
+            extra_blocks,
+            returned_layers=returned_layers,
+        )
     else:
+        if returned_layers is not None:
+            raise ValueError("returned_layers is only supported for ResNet FPN backbones.")
         raw = _build_mobilenet_fpn(name, weights, trainable_layers, extra_blocks)
 
     if pre_neck is None and post_neck is None:

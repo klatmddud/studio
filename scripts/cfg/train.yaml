@@ -1,13 +1,13 @@
 seed: 42
 device: auto
-amp: true
+amp: false
 output_dir: runs/train
 
 data:
-  train_images: C:/Users/user1/datasets/kitti/images/train
-  train_annotations: C:/Users/user1/datasets/kitti/annotations/instances_train.json
-  val_images: C:/Users/user1/datasets/kitti/images/val
-  val_annotations: C:/Users/user1/datasets/kitti/annotations/instances_val.json
+  train_images: ~/base/datasets/kitti/images/train
+  train_annotations: ~/base/datasets/kitti/annotations/instances_train.json
+  val_images: ~/base/datasets/kitti/images/val
+  val_annotations: ~/base/datasets/kitti/annotations/instances_val.json
 
 loader:
   batch_size: 16
@@ -28,10 +28,10 @@ scheduler:
   gamma: 0.1
 
 train:
-  epochs: 20
-  grad_clip_norm: null
+  epochs: 50
+  grad_clip_norm: 1.0
   log_interval: 20
-  eval_every_epochs: 2
+  eval_every_epochs: 5
 
 checkpoint:
   dir: checkpoints

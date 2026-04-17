@@ -27,9 +27,11 @@ class FCOSWrapper(BaseDetectionWrapper):
 
         backbone = build_backbone_with_fpn(
             cfg,
+            # FCOS expects five pyramid levels: P3-P5 from the FPN plus P6-P7.
             extra_blocks=LastLevelP6P7(256, 256),
             pre_neck=pre_neck,
             post_neck=post_neck,
+            returned_layers=[2, 3, 4],
         )
 
         head = cfg.get("head", {})
