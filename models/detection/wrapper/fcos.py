@@ -268,7 +268,7 @@ class MDMBFCOS(FCOS):
             gt_boxes_selected = gt_boxes[nearest_gt[candidate_indices]]
             gt_classes_selected = gt_classes[candidate_indices]
             detected_selected = detected_mask[candidate_indices]
-            matched_positive = matched_idxs_per_image[candidate_indices] >= 0
+            positive_assigned = matched_idxs_per_image[candidate_indices] >= 0
             point_features = flat_features[image_index][candidate_indices]
             base_scores = gt_scores[candidate_indices]
             anchors_selected = anchors_per_image[candidate_indices]
@@ -311,7 +311,7 @@ class MDMBFCOS(FCOS):
                     "gt_classes": gt_classes_selected.to(dtype=torch.int64),
                     "base_scores": base_scores,
                     "detected_mask": detected_selected,
-                    "matched_positive": matched_positive,
+                    "positive_assigned": positive_assigned,
                     "track_ids": track_ids,
                     "observations": observations,
                 }
@@ -343,7 +343,10 @@ class MDMBFCOS(FCOS):
                     continue
                 if bool(batch["detected_mask"][position].item()):
                     continue
-                if not bool(batch["matched_positive"][position].item()):
+                # CFP in FCOS is meant for chronic near-miss points that still
+                # fail the current positive assignment, not for already-positive
+                # hard samples.
+                if bool(batch["positive_assigned"][position].item()):
                     continue
                 selected_tasks.append(
                     {
@@ -361,8 +364,10 @@ class MDMBFCOS(FCOS):
             return None
 
         chronic_features = torch.stack(selected_features, dim=0)
-        cfp_output = cfp(chronic_features)
-        cf_feature_list = [feature.detach().clone() for feature in feature_list]
+        # FCOS CFP should keep the backbone feature graph alive so L_CFP can
+        # update the original FPN features instead of only training the branch.
+        cfp_output = cfp(chronic_features, detach_input=False)
+        cf_feature_list = [feature.clone() for feature in feature_list]
         for task, perturbed_feature in zip(
             selected_tasks,
             cfp_output.perturbed_features,
@@ -457,7 +462,7 @@ class MDMBFCOS(FCOS):
     def _flatten_feature_points(self, feature_list: list[torch.Tensor]) -> torch.Tensor:
         flattened = []
         for features in feature_list:
-            flattened.append(features.flatten(start_dim=2).permute(0, 2, 1).detach())
+            flattened.append(features.flatten(start_dim=2).permute(0, 2, 1))
         return torch.cat(flattened, dim=1)
 
     def _flat_index_to_feature_location(
