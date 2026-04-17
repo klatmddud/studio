@@ -1,0 +1,25 @@
+device: auto
+amp: false
+output_dir: runs/eval
+
+data:
+  images: C:/Users/user1/datasets/kitti/images/val
+  annotations: C:/Users/user1/datasets/kitti/annotations/instances_val.json
+
+loader:
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+  shuffle: false
+
+checkpoint:
+  path: runs/train/checkpoints/best.pt
+
+metrics:
+  type: coco_detection
+  iou_types: [bbox]
+  primary: bbox_mAP_50_95
+
+eval:
+  save_predictions: false
+  predictions_path: null

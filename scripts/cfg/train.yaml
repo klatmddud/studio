@@ -1,0 +1,47 @@
+seed: 42
+device: auto
+amp: true
+output_dir: runs/train
+
+data:
+  train_images: C:/Users/user1/datasets/kitti/images/train
+  train_annotations: C:/Users/user1/datasets/kitti/annotations/instances_train.json
+  val_images: C:/Users/user1/datasets/kitti/images/val
+  val_annotations: C:/Users/user1/datasets/kitti/annotations/instances_val.json
+
+loader:
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+  shuffle: true
+
+optimizer:
+  name: sgd
+  lr: 0.005
+  momentum: 0.9
+  weight_decay: 0.0005
+  nesterov: false
+
+scheduler:
+  name: multistep
+  milestones: [8, 11]
+  gamma: 0.1
+
+train:
+  epochs: 20
+  grad_clip_norm: null
+  log_interval: 20
+  eval_every_epochs: 2
+
+checkpoint:
+  dir: checkpoints
+  resume: null
+  save_last: true
+  save_best: true
+  monitor: bbox_mAP_50_95
+  mode: max
+
+metrics:
+  type: coco_detection
+  iou_types: [bbox]
+  primary: bbox_mAP_50_95

@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import torch.nn as nn
+
+from models.detection.wrapper import FCOSWrapper, FasterRCNNWrapper
+
+from .config import load_yaml_file
+
+ARCH_ALIASES = {
+    "faster_rcnn": "fasterrcnn",
+    "faster-rcnn": "fasterrcnn",
+    "fasterrcnn": "fasterrcnn",
+    "fcos": "fcos",
+}
+
+MODEL_BUILDERS = {
+    "fasterrcnn": FasterRCNNWrapper,
+    "fcos": FCOSWrapper,
+}
+
+
+def normalize_arch(raw_arch: str) -> str:
+    return ARCH_ALIASES.get(raw_arch.lower(), raw_arch.lower())
+
+
+def infer_arch(model_config: dict[str, Any], model_config_path: str | Path) -> str:
+    explicit = model_config.get("arch")
+    candidate = explicit if explicit else Path(model_config_path).stem
+    return normalize_arch(candidate)
+
+
+def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Module:
+    normalized_arch = normalize_arch(arch)
+    builder = MODEL_BUILDERS.get(normalized_arch)
+    if builder is None:
+        supported = ", ".join(sorted(MODEL_BUILDERS))
+        raise NotImplementedError(
+            f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
+            "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
+        )
+    return builder(model_config)
+
+
+def build_model_from_path(
+    model_config_path: str | Path,
+) -> tuple[nn.Module, dict[str, Any], str, Path]:
+    resolved_path = Path(model_config_path).expanduser().resolve()
+    model_config = load_yaml_file(resolved_path)
+    arch = infer_arch(model_config, resolved_path)
+    model = build_model_from_config(model_config, arch)
+    return model, model_config, arch, resolved_path
