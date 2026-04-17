@@ -4,10 +4,10 @@ amp: false
 output_dir: runs/train
 
 data:
-  train_images: ~/base/datasets/kitti/images/train
-  train_annotations: ~/base/datasets/kitti/annotations/instances_train.json
-  val_images: ~/base/datasets/kitti/images/val
-  val_annotations: ~/base/datasets/kitti/annotations/instances_val.json
+  train_images: path/to/your/train/image/folder # ex) C:/Users/user/datasets/coco/images/train2017
+  train_annotations: path/to/your/train/annotation/json/file # ex) C:/Users/user/datasets/coco/annotations/instances_train2017.json
+  val_images: path/to/your/validation/image/folder # ex) C:/Users/user/datasets/coco/images/val2017
+  val_annotations: path/to/your/validation/annotation/json/file # ex) C:/Users/user/datasets/coco/annotations/instances_val2017.json
 
 loader:
   batch_size: 16
