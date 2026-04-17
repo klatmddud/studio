@@ -79,6 +79,8 @@ def main() -> None:
         data_loader=data_loader,
         device=device,
         output_dir=output_dir,
+        log_interval=runtime_config.get("eval", {}).get("log_interval", 20),
+        stage_label="eval",
     )
     print("Evaluation metrics:")
     for key, value in metrics.items():

@@ -21,5 +21,6 @@ metrics:
   primary: bbox_mAP_50_95
 
 eval:
+  log_interval: 20
   save_predictions: false
   predictions_path: null

@@ -84,6 +84,7 @@ EVAL_DEFAULTS: dict[str, Any] = {
         "primary": "bbox_mAP_50_95",
     },
     "eval": {
+        "log_interval": 20,
         "save_predictions": False,
         "predictions_path": None,
     },

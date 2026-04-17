@@ -110,6 +110,10 @@ def fit(
                 data_loader=val_loader,
                 device=device,
                 output_dir=None,
+                log_interval=runtime_config["train"]["log_interval"],
+                stage_label="val",
+                epoch_index=epoch,
+                total_epochs=total_epochs,
             )
             record["val"] = val_metrics
 
@@ -156,6 +160,10 @@ def evaluate(
     data_loader,
     device: torch.device,
     output_dir: str | Path | None,
+    log_interval: int = 0,
+    stage_label: str = "eval",
+    epoch_index: int | None = None,
+    total_epochs: int | None = None,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     checkpoint_path = runtime_config["checkpoint"].get("path")
     if checkpoint_path:
@@ -169,6 +177,10 @@ def evaluate(
         data_loader=data_loader,
         device=device,
         amp=runtime_config["amp"],
+        log_interval=log_interval,
+        stage_label=stage_label,
+        epoch_index=epoch_index,
+        total_epochs=total_epochs,
     )
 
     if output_dir is not None:
