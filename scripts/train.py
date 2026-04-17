@@ -43,7 +43,10 @@ def main() -> None:
         runtime_config["device"] = args.device
 
     seed_everything(runtime_config["seed"])
-    model, model_config, arch, model_config_path = build_model_from_path(args.model)
+    model, model_config, arch, model_config_path = build_model_from_path(
+        args.model,
+        runtime_config=runtime_config,
+    )
     device = resolve_device(runtime_config["device"])
     train_loader, val_loader = build_train_dataloaders(runtime_config)
 

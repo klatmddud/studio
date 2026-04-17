@@ -3,8 +3,8 @@ amp: false
 output_dir: runs/eval
 
 data:
-  images: path/to/your/validation/image/folder # ex) C:/Users/user/datasets/coco/images/val2017
-  annotations: path/to/your/validation/annotation/json/file # ex) C:/Users/user/datasets/coco/annotations/instances_val2017.json
+  images: ${KITTI_VAL_IMAGES} # ex) ${BDD100K_VAL_IMAGES}, ${BDD10K_VAL_IMAGES}
+  annotations: ${KITTI_VAL_ANNOTATIONS} # ex) ${BDD100K_VAL_ANNOTATIONS}, ${BDD10K_VAL_ANNOTATIONS}
 
 loader:
   batch_size: 16

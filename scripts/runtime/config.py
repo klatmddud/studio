@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from pathlib import Path
+import re
 from typing import Any
 
 import torch
 import yaml
+from dotenv import load_dotenv
 
 from .metrics import BOX_METRIC_NAMES
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}")
+_DOTENV_LOADED = False
 
 TRAIN_DEFAULTS: dict[str, Any] = {
     "seed": 42,
@@ -92,9 +97,11 @@ EVAL_DEFAULTS: dict[str, Any] = {
 
 
 def load_yaml_file(path: str | Path) -> dict[str, Any]:
+    _load_project_dotenv()
     config_path = Path(path).expanduser().resolve()
     with open(config_path, "r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
+    data = _expand_env_placeholders(data, source=config_path)
     if not isinstance(data, dict):
         raise TypeError(f"YAML config must contain a mapping at the top level: {config_path}")
     return data
@@ -266,3 +273,40 @@ def _resolve_path(raw_path: str | Path, base_dir: str | Path) -> Path:
     if not path.is_absolute():
         path = Path(base_dir) / path
     return path.resolve()
+
+
+def _load_project_dotenv() -> None:
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+
+    dotenv_path = PROJECT_ROOT / ".env"
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    _DOTENV_LOADED = True
+
+
+def _expand_env_placeholders(value: Any, source: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _expand_env_placeholders(item, source) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_placeholders(item, source) for item in value]
+    if isinstance(value, str):
+        return _expand_env_string(value, source)
+    return value
+
+
+def _expand_env_string(value: str, source: Path) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        default_value = match.group(3)
+        env_value = os.environ.get(name)
+        if env_value is not None:
+            return env_value
+        if default_value is not None:
+            return default_value
+        raise KeyError(
+            f"Environment variable {name!r} referenced in {source} is not set."
+        )
+
+    return _ENV_VAR_PATTERN.sub(replace, value)

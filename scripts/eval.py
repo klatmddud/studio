@@ -53,7 +53,10 @@ def main() -> None:
             f"Evaluation checkpoint not found: {runtime_config['checkpoint']['path']}"
         )
 
-    model, model_config, arch, model_config_path = build_model_from_path(args.model)
+    model, model_config, arch, model_config_path = build_model_from_path(
+        args.model,
+        runtime_config=runtime_config,
+    )
     device = resolve_device(runtime_config["device"])
     data_loader = build_eval_dataloader(runtime_config)
     output_dir = Path(runtime_config["output_dir"])
