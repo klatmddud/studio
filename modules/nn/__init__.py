@@ -21,6 +21,14 @@ from .mdmb import (
     normalize_xyxy_boxes,
     select_topk_indices,
 )
+from .sca import (
+    SCA,
+    SCAConfig,
+    SoftCounterfactualAssignment,
+    build_sca_from_config,
+    build_sca_from_yaml,
+    load_sca_config,
+)
 
 __all__ = [
     "CFP",
@@ -32,13 +40,19 @@ __all__ = [
     "MDMBEntry",
     "MDMBObservation",
     "MissedDetectionMemoryBank",
+    "SCA",
+    "SCAConfig",
+    "SoftCounterfactualAssignment",
     "build_cfp_from_config",
     "build_cfp_from_yaml",
     "build_mdmb_from_config",
     "build_mdmb_from_yaml",
+    "build_sca_from_config",
+    "build_sca_from_yaml",
     "cxcywh_to_xyxy",
     "load_cfp_config",
     "load_mdmb_config",
+    "load_sca_config",
     "normalize_arch",
     "normalize_xyxy_boxes",
     "select_topk_indices",

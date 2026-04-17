@@ -15,11 +15,12 @@ from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 from modules.nn import (
     CounterfactualFeaturePerturbation,
     MDMBObservation,
+    SoftCounterfactualAssignment,
     normalize_xyxy_boxes,
     select_topk_indices,
 )
 from modules.nn.mdmb import MissedDetectionMemoryBank
-from ops import compute_cfp_loss_dict
+from ops import compute_cfp_loss_dict, compute_sca_loss_dict
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
@@ -32,11 +33,13 @@ class MDMBFCOS(FCOS):
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
         cfp: CounterfactualFeaturePerturbation | None = None,
+        sca: SoftCounterfactualAssignment | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._cfp_ref = weakref.ref(cfp) if cfp is not None else None
+        self._sca_ref = weakref.ref(sca) if sca is not None else None
 
     def forward(
         self,
@@ -102,6 +105,12 @@ class MDMBFCOS(FCOS):
                 targets=targets,
                 image_shapes=images.image_sizes,
             )
+            sca_losses = self._compute_sca_losses(
+                head_outputs=head_outputs,
+                candidate_batches=candidate_batches,
+            )
+            if sca_losses:
+                losses.update(sca_losses)
             cfp_losses = self._compute_cfp_losses(
                 feature_list=feature_list,
                 head_outputs=head_outputs,
@@ -220,6 +229,7 @@ class MDMBFCOS(FCOS):
     ) -> list[dict[str, Any]]:
         flat_features = self._flatten_feature_points(feature_list)
         cls_logits = head_outputs["cls_logits"].detach()
+        bbox_regression = head_outputs["bbox_regression"].detach()
         ctrness = head_outputs["bbox_ctrness"].detach().squeeze(dim=2)
         combined_scores = torch.sqrt(torch.sigmoid(cls_logits) * torch.sigmoid(ctrness.unsqueeze(-1)))
         pred_scores, pred_labels = combined_scores.max(dim=-1)
@@ -237,7 +247,9 @@ class MDMBFCOS(FCOS):
             if gt_boxes.numel() == 0:
                 continue
 
-            iou_matrix = box_ops.box_iou(gt_boxes, anchors_per_image)
+            pred_boxes = self.box_coder.decode(bbox_regression[image_index], anchors_per_image)
+            pred_boxes = box_ops.clip_boxes_to_image(pred_boxes, image_shape)
+            iou_matrix = box_ops.box_iou(gt_boxes, pred_boxes)
             iou_max, nearest_gt = iou_matrix.max(dim=0)
             gt_classes = gt_labels[nearest_gt]
             point_indices = torch.arange(
@@ -318,6 +330,56 @@ class MDMBFCOS(FCOS):
             )
 
         return candidate_batches
+
+    def _compute_sca_losses(
+        self,
+        *,
+        head_outputs: dict[str, torch.Tensor],
+        candidate_batches: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor] | None:
+        mdmb = self._get_mdmb()
+        sca = self._get_sca()
+        if mdmb is None or sca is None or not candidate_batches:
+            return None
+
+        selected_logits: list[torch.Tensor] = []
+        selected_ious: list[float] = []
+        selected_miss_counts: list[int] = []
+        for batch in candidate_batches:
+            image_index = int(batch["image_index"])
+            for position, track_id in enumerate(batch["track_ids"]):
+                entry = mdmb.get(track_id)
+                if entry is None or not entry.is_chronic_miss(mdmb.config):
+                    continue
+                if bool(batch["detected_mask"][position].item()):
+                    continue
+                if bool(batch["positive_assigned"][position].item()):
+                    continue
+
+                flat_index = int(batch["candidate_indices"][position].item())
+                gt_class = int(batch["gt_classes"][position].item())
+                selected_logits.append(head_outputs["cls_logits"][image_index, flat_index, gt_class])
+                selected_ious.append(float(entry.iou_max))
+                selected_miss_counts.append(int(entry.miss_count))
+
+        if not selected_logits:
+            return None
+
+        logits_tensor = torch.stack(selected_logits, dim=0)
+        iou_tensor = logits_tensor.new_tensor(selected_ious)
+        miss_count_tensor = logits_tensor.new_tensor(selected_miss_counts)
+        soft_targets = sca.compute_soft_weights(
+            iou_tensor,
+            miss_count_tensor,
+            iou_low=mdmb.config.iou_low,
+            iou_high=mdmb.config.iou_high,
+            max_miss_count=max(selected_miss_counts),
+        ).to(dtype=logits_tensor.dtype)
+        return compute_sca_loss_dict(
+            logits=logits_tensor,
+            soft_targets=soft_targets,
+            config=sca.config,
+        )
 
     def _compute_cfp_losses(
         self,
@@ -488,6 +550,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._cfp_ref()
 
+    def _get_sca(self) -> SoftCounterfactualAssignment | None:
+        if self._sca_ref is None:
+            return None
+        return self._sca_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -503,11 +570,13 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         cfp: CounterfactualFeaturePerturbation | None = None,
+        sca: SoftCounterfactualAssignment | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.cfp = cfp
         self.mdmb = mdmb
+        self.sca = sca
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -531,6 +600,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
             cfp=cfp,
+            sca=sca,
             **kwargs,
         )
 
@@ -542,6 +612,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         cfp: CounterfactualFeaturePerturbation | None = None,
+        sca: SoftCounterfactualAssignment | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -551,5 +622,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             post_neck=post_neck,
             mdmb=mdmb,
             cfp=cfp,
+            sca=sca,
             **kwargs,
         )
