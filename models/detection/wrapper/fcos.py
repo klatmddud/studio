@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import weakref
 from collections import OrderedDict
+from typing import Any
 
 import torch
 import torch.nn as nn
 from torchvision.models.detection import FCOS
-from torchvision.ops import boxes as box_ops
+from torchvision.ops import boxes as box_ops, generalized_box_iou_loss, sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
-from modules.nn import MDMBObservation, normalize_xyxy_boxes, select_topk_indices
+from modules.nn import (
+    CounterfactualFeaturePerturbation,
+    MDMBObservation,
+    normalize_xyxy_boxes,
+    select_topk_indices,
+)
 from modules.nn.mdmb import MissedDetectionMemoryBank
+from ops import compute_cfp_loss_dict
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
@@ -20,9 +27,16 @@ from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 class MDMBFCOS(FCOS):
     """FCOS variant that records point-level observations into MDMB during training."""
 
-    def __init__(self, *args, mdmb: MissedDetectionMemoryBank | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        mdmb: MissedDetectionMemoryBank | None = None,
+        cfp: CounterfactualFeaturePerturbation | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
+        self._cfp_ref = weakref.ref(cfp) if cfp is not None else None
 
     def forward(
         self,
@@ -80,7 +94,7 @@ class MDMBFCOS(FCOS):
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
-            self._observe_mdmb(
+            candidate_batches = self._observe_mdmb(
                 feature_list=feature_list,
                 head_outputs=head_outputs,
                 anchors=anchors,
@@ -88,6 +102,15 @@ class MDMBFCOS(FCOS):
                 targets=targets,
                 image_shapes=images.image_sizes,
             )
+            cfp_losses = self._compute_cfp_losses(
+                feature_list=feature_list,
+                head_outputs=head_outputs,
+                anchors=anchors,
+                targets=targets,
+                candidate_batches=candidate_batches,
+            )
+            if cfp_losses:
+                losses.update(cfp_losses)
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
             for key in head_outputs:
@@ -161,19 +184,48 @@ class MDMBFCOS(FCOS):
         matched_idxs: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]],
         image_shapes: list[tuple[int, int]],
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         mdmb = self._get_mdmb()
         if mdmb is None:
-            return
+            return []
 
+        candidate_batches = self._collect_candidate_batches(
+            mdmb=mdmb,
+            feature_list=feature_list,
+            head_outputs=head_outputs,
+            anchors=anchors,
+            matched_idxs=matched_idxs,
+            targets=targets,
+            image_shapes=image_shapes,
+        )
+        observations = [
+            observation
+            for batch in candidate_batches
+            for observation in batch["observations"]
+        ]
+        if observations:
+            mdmb.update(observations)
+        return candidate_batches
+
+    def _collect_candidate_batches(
+        self,
+        *,
+        mdmb: MissedDetectionMemoryBank,
+        feature_list: list[torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+    ) -> list[dict[str, Any]]:
         flat_features = self._flatten_feature_points(feature_list)
         cls_logits = head_outputs["cls_logits"].detach()
         ctrness = head_outputs["bbox_ctrness"].detach().squeeze(dim=2)
         combined_scores = torch.sqrt(torch.sigmoid(cls_logits) * torch.sigmoid(ctrness.unsqueeze(-1)))
         pred_scores, pred_labels = combined_scores.max(dim=-1)
 
-        observations: list[MDMBObservation] = []
         max_candidates = mdmb.config.max_entries_per_image * 4
+        candidate_batches: list[dict[str, Any]] = []
         for image_index, (
             anchors_per_image,
             matched_idxs_per_image,
@@ -212,14 +264,29 @@ class MDMBFCOS(FCOS):
                 anchors_per_image[candidate_indices],
                 image_shape,
             )
-            point_features = flat_features[image_index][candidate_indices]
             image_id = int(target_per_image["image_id"].item())
+            gt_boxes_selected = gt_boxes[nearest_gt[candidate_indices]]
+            gt_classes_selected = gt_classes[candidate_indices]
+            detected_selected = detected_mask[candidate_indices]
+            matched_positive = matched_idxs_per_image[candidate_indices] >= 0
+            point_features = flat_features[image_index][candidate_indices]
+            base_scores = gt_scores[candidate_indices]
+            anchors_selected = anchors_per_image[candidate_indices]
 
+            observations: list[MDMBObservation] = []
+            track_ids: list[str] = []
             for local_index, candidate_index in enumerate(candidate_indices.tolist()):
                 detected = bool(detected_mask[candidate_index].item())
                 effective_iou = float(iou_max[candidate_index].item())
                 if detected:
                     effective_iou = max(effective_iou, mdmb.config.iou_high)
+                track_id = mdmb.make_track_id(
+                    image_id=image_id,
+                    region_coords=normalized_regions[local_index],
+                    source="point",
+                    gt_class=int(gt_classes[candidate_index].item()),
+                )
+                track_ids.append(track_id)
                 observations.append(
                     MDMBObservation(
                         image_id=image_id,
@@ -229,12 +296,163 @@ class MDMBFCOS(FCOS):
                         feature_vec=point_features[local_index],
                         gt_class=int(gt_classes[candidate_index].item()),
                         detected=detected,
+                        track_id=track_id,
                         source="point",
                     )
                 )
 
-        if observations:
-            mdmb.update(observations)
+            candidate_batches.append(
+                {
+                    "image_index": image_index,
+                    "candidate_indices": candidate_indices,
+                    "features": point_features,
+                    "anchors": anchors_selected,
+                    "gt_boxes": gt_boxes_selected,
+                    "gt_classes": gt_classes_selected.to(dtype=torch.int64),
+                    "base_scores": base_scores,
+                    "detected_mask": detected_selected,
+                    "matched_positive": matched_positive,
+                    "track_ids": track_ids,
+                    "observations": observations,
+                }
+            )
+
+        return candidate_batches
+
+    def _compute_cfp_losses(
+        self,
+        *,
+        feature_list: list[torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        candidate_batches: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor] | None:
+        mdmb = self._get_mdmb()
+        cfp = self._get_cfp()
+        if mdmb is None or cfp is None or not candidate_batches:
+            return None
+
+        feature_shapes = [(feature.shape[-2], feature.shape[-1]) for feature in feature_list]
+        selected_tasks: list[dict[str, Any]] = []
+        selected_features: list[torch.Tensor] = []
+        for batch in candidate_batches:
+            for position, track_id in enumerate(batch["track_ids"]):
+                entry = mdmb.get(track_id)
+                if entry is None or not entry.is_chronic_miss(mdmb.config):
+                    continue
+                if bool(batch["detected_mask"][position].item()):
+                    continue
+                if not bool(batch["matched_positive"][position].item()):
+                    continue
+                selected_tasks.append(
+                    {
+                        "image_index": int(batch["image_index"]),
+                        "flat_index": int(batch["candidate_indices"][position].item()),
+                        "anchor": batch["anchors"][position],
+                        "gt_box": batch["gt_boxes"][position],
+                        "gt_class": batch["gt_classes"][position],
+                        "base_score": batch["base_scores"][position],
+                    }
+                )
+                selected_features.append(batch["features"][position])
+
+        if not selected_features:
+            return None
+
+        chronic_features = torch.stack(selected_features, dim=0)
+        cfp_output = cfp(chronic_features)
+        cf_feature_list = [feature.detach().clone() for feature in feature_list]
+        for task, perturbed_feature in zip(
+            selected_tasks,
+            cfp_output.perturbed_features,
+            strict=True,
+        ):
+            level, y, x = self._flat_index_to_feature_location(
+                task["flat_index"],
+                feature_shapes,
+            )
+            cf_feature_list[level][task["image_index"], :, y, x] = perturbed_feature
+
+        cf_head_outputs = self.head(cf_feature_list)
+        cf_cls_logits = []
+        cf_bbox_regression = []
+        cf_bbox_ctrness = []
+        gt_classes = []
+        gt_boxes = []
+        anchor_boxes = []
+        base_scores = []
+        for task in selected_tasks:
+            image_index = task["image_index"]
+            flat_index = task["flat_index"]
+            cf_cls_logits.append(cf_head_outputs["cls_logits"][image_index, flat_index])
+            cf_bbox_regression.append(cf_head_outputs["bbox_regression"][image_index, flat_index])
+            cf_bbox_ctrness.append(cf_head_outputs["bbox_ctrness"][image_index, flat_index])
+            gt_classes.append(task["gt_class"])
+            gt_boxes.append(task["gt_box"])
+            anchor_boxes.append(task["anchor"])
+            base_scores.append(task["base_score"])
+
+        cf_cls_logits_tensor = torch.stack(cf_cls_logits, dim=0)
+        cf_bbox_regression_tensor = torch.stack(cf_bbox_regression, dim=0)
+        cf_bbox_ctrness_tensor = torch.stack(cf_bbox_ctrness, dim=0).squeeze(dim=1)
+        gt_classes_tensor = torch.stack(gt_classes, dim=0).to(dtype=torch.int64)
+        gt_boxes_tensor = torch.stack(gt_boxes, dim=0)
+        anchor_boxes_tensor = torch.stack(anchor_boxes, dim=0)
+        base_scores_tensor = torch.stack(base_scores, dim=0)
+
+        num_selected = max(1, gt_classes_tensor.numel())
+        gt_class_targets = torch.zeros_like(cf_cls_logits_tensor)
+        gt_class_targets[
+            torch.arange(num_selected, device=gt_classes_tensor.device),
+            gt_classes_tensor,
+        ] = 1.0
+        loss_cls = sigmoid_focal_loss(
+            cf_cls_logits_tensor,
+            gt_class_targets,
+            reduction="sum",
+        ) / num_selected
+
+        pred_boxes = self.box_coder.decode(cf_bbox_regression_tensor, anchor_boxes_tensor)
+        loss_bbox_reg = generalized_box_iou_loss(
+            pred_boxes,
+            gt_boxes_tensor,
+            reduction="sum",
+        ) / num_selected
+
+        bbox_reg_targets = self.box_coder.encode(anchor_boxes_tensor, gt_boxes_tensor)
+        left_right = bbox_reg_targets[:, [0, 2]]
+        top_bottom = bbox_reg_targets[:, [1, 3]]
+        gt_ctrness_targets = torch.sqrt(
+            (left_right.min(dim=-1).values / left_right.max(dim=-1).values)
+            * (top_bottom.min(dim=-1).values / top_bottom.max(dim=-1).values)
+        )
+        loss_bbox_ctrness = nn.functional.binary_cross_entropy_with_logits(
+            cf_bbox_ctrness_tensor,
+            gt_ctrness_targets,
+            reduction="sum",
+        ) / num_selected
+
+        cf_scores = torch.sqrt(
+            torch.sigmoid(
+                cf_cls_logits_tensor[
+                    torch.arange(num_selected, device=gt_classes_tensor.device),
+                    gt_classes_tensor,
+                ]
+            )
+            * torch.sigmoid(cf_bbox_ctrness_tensor)
+        )
+        return compute_cfp_loss_dict(
+            detection_loss={
+                "classification": loss_cls,
+                "bbox_regression": loss_bbox_reg,
+                "bbox_ctrness": loss_bbox_ctrness,
+            },
+            delta=cfp_output,
+            config=cfp.config,
+            cf_scores=cf_scores,
+            base_scores=base_scores_tensor,
+        )
 
     def _flatten_feature_points(self, feature_list: list[torch.Tensor]) -> torch.Tensor:
         flattened = []
@@ -242,10 +460,28 @@ class MDMBFCOS(FCOS):
             flattened.append(features.flatten(start_dim=2).permute(0, 2, 1).detach())
         return torch.cat(flattened, dim=1)
 
+    def _flat_index_to_feature_location(
+        self,
+        flat_index: int,
+        feature_shapes: list[tuple[int, int]],
+    ) -> tuple[int, int, int]:
+        offset = int(flat_index)
+        for level_index, (height, width) in enumerate(feature_shapes):
+            num_points = height * width
+            if offset < num_points:
+                return level_index, offset // width, offset % width
+            offset -= num_points
+        raise IndexError(f"FCOS flat index {flat_index} is out of range.")
+
     def _get_mdmb(self) -> MissedDetectionMemoryBank | None:
         if self._mdmb_ref is None:
             return None
         return self._mdmb_ref()
+
+    def _get_cfp(self) -> CounterfactualFeaturePerturbation | None:
+        if self._cfp_ref is None:
+            return None
+        return self._cfp_ref()
 
 
 class FCOSWrapper(BaseDetectionWrapper):
@@ -261,9 +497,11 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        cfp: CounterfactualFeaturePerturbation | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
+        self.cfp = cfp
         self.mdmb = mdmb
 
         backbone = build_backbone_with_fpn(
@@ -287,6 +525,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             detections_per_img=head.get("detections_per_img", 100),
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
+            cfp=cfp,
             **kwargs,
         )
 
@@ -297,6 +536,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        cfp: CounterfactualFeaturePerturbation | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -305,5 +545,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             pre_neck=pre_neck,
             post_neck=post_neck,
             mdmb=mdmb,
+            cfp=cfp,
             **kwargs,
         )

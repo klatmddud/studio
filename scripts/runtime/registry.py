@@ -5,7 +5,7 @@ from typing import Any
 
 import torch.nn as nn
 
-from modules.nn import build_mdmb_from_yaml
+from modules.nn import build_cfp_from_yaml, build_mdmb_from_yaml
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
 from .config import load_yaml_file
@@ -26,6 +26,7 @@ MODEL_BUILDERS = {
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CFP_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "cfp.yaml"
 MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
 
 
@@ -48,8 +49,9 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
+    cfp = _build_cfp(normalized_arch)
     mdmb = _build_mdmb(normalized_arch)
-    return builder(model_config, mdmb=mdmb)
+    return builder(model_config, mdmb=mdmb, cfp=cfp)
 
 
 def build_model_from_path(
@@ -72,3 +74,9 @@ def _build_mdmb(arch: str) -> nn.Module | None:
     if not MDMB_CONFIG_PATH.is_file():
         return None
     return build_mdmb_from_yaml(MDMB_CONFIG_PATH, arch=arch)
+
+
+def _build_cfp(arch: str) -> nn.Module | None:
+    if not CFP_CONFIG_PATH.is_file():
+        return None
+    return build_cfp_from_yaml(CFP_CONFIG_PATH, arch=arch)

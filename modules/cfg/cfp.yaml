@@ -1,0 +1,15 @@
+enabled: true
+alpha_init: 0.1
+lambda_reg: 0.01
+lambda_margin: 0.5
+margin: 0.3
+hidden_ratio: 0.5
+detach_input: true
+
+models:
+  fasterrcnn:
+    feature_dim: 1024
+  fcos:
+    feature_dim: 256
+  dino:
+    feature_dim: 256

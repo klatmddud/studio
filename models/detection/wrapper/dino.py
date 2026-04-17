@@ -12,8 +12,14 @@ import torch
 import torch.nn as nn
 from torchvision.ops import boxes as box_ops
 
-from modules.nn import MDMBObservation, cxcywh_to_xyxy, select_topk_indices
+from modules.nn import (
+    CounterfactualFeaturePerturbation,
+    MDMBObservation,
+    cxcywh_to_xyxy,
+    select_topk_indices,
+)
 from modules.nn.mdmb import MissedDetectionMemoryBank
+from ops import compute_cfp_loss_dict
 
 from ._base import BaseDetectionWrapper, load_cfg
 
@@ -21,6 +27,7 @@ from ._base import BaseDetectionWrapper, load_cfg
 TensorDict = dict[str, torch.Tensor]
 BackendBuilder = Callable[..., Any]
 Postprocessor = Callable[[Mapping[str, Any], torch.Tensor], Sequence[Mapping[str, Any]]]
+CFPForward = Callable[..., Any]
 MDMBObserver = Callable[
     [Any, list[TensorDict], MissedDetectionMemoryBank, "DINOWrapper"],
     None,
@@ -36,6 +43,7 @@ class DINOBackendComponents:
     bbox_postprocessor: Postprocessor | None = None
     prepare_inputs: Callable[[list[torch.Tensor]], Any] | None = None
     mdmb_observer: MDMBObserver | None = None
+    cfp_forward: CFPForward | None = None
 
 
 class DINOWrapper(BaseDetectionWrapper):
@@ -61,6 +69,7 @@ class DINOWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        cfp: CounterfactualFeaturePerturbation | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> None:
@@ -72,6 +81,7 @@ class DINOWrapper(BaseDetectionWrapper):
         self.inference_cfg = cfg.get("inference", {})
         self.loss_cfg = cfg.get("loss", {})
         self.label_cfg = cfg.get("labels", {})
+        self.cfp = cfp
         self.mdmb = mdmb
 
         builder = self._resolve_backend_builder(cfg, backend_builder)
@@ -81,6 +91,7 @@ class DINOWrapper(BaseDetectionWrapper):
             pre_neck=pre_neck,
             post_neck=post_neck,
             mdmb=mdmb,
+            cfp=cfp,
             extra_kwargs=kwargs,
         )
 
@@ -92,6 +103,7 @@ class DINOWrapper(BaseDetectionWrapper):
             self.bbox_postprocessor = None
             self.prepare_inputs = None
             self.mdmb_observer = None
+            self.cfp_forward = None
             return
 
         components = self._coerce_components(built)
@@ -104,6 +116,7 @@ class DINOWrapper(BaseDetectionWrapper):
         self.bbox_postprocessor = components.bbox_postprocessor
         self.prepare_inputs = components.prepare_inputs
         self.mdmb_observer = components.mdmb_observer
+        self.cfp_forward = components.cfp_forward or self._resolve_cfp_forward(self.model)
 
         if self.criterion is None:
             raise ValueError(
@@ -132,6 +145,9 @@ class DINOWrapper(BaseDetectionWrapper):
         if self.training:
             self._observe_mdmb(outputs, prepared_targets)
             loss_dict = self._compute_losses(outputs, prepared_targets)
+            cfp_losses = self._compute_cfp_losses(outputs, prepared_targets)
+            if cfp_losses:
+                loss_dict.update(cfp_losses)
             if not loss_dict:
                 raise RuntimeError("DINO backend returned no trainable losses.")
             return loss_dict
@@ -146,6 +162,7 @@ class DINOWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        cfp: CounterfactualFeaturePerturbation | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> "DINOWrapper":
@@ -155,6 +172,7 @@ class DINOWrapper(BaseDetectionWrapper):
             pre_neck=pre_neck,
             post_neck=post_neck,
             mdmb=mdmb,
+            cfp=cfp,
             backend_builder=backend_builder,
             **kwargs,
         )
@@ -380,6 +398,17 @@ class DINOWrapper(BaseDetectionWrapper):
                 prepare_inputs=prepare_inputs,
             )
 
+        if isinstance(built, tuple) and len(built) == 6:
+            model, criterion, postprocessor, prepare_inputs, mdmb_observer, cfp_forward = built
+            return DINOBackendComponents(
+                model=model,
+                criterion=criterion,
+                bbox_postprocessor=self._resolve_postprocessor(postprocessor),
+                prepare_inputs=prepare_inputs,
+                mdmb_observer=mdmb_observer,
+                cfp_forward=cfp_forward,
+            )
+
         if isinstance(built, tuple) and len(built) == 5:
             model, criterion, postprocessor, prepare_inputs, mdmb_observer = built
             return DINOBackendComponents(
@@ -398,12 +427,14 @@ class DINOWrapper(BaseDetectionWrapper):
                 postprocessor = built["postprocessors"]
             prepare_inputs = built.get("prepare_inputs")
             mdmb_observer = built.get("mdmb_observer")
+            cfp_forward = built.get("cfp_forward")
             return DINOBackendComponents(
                 model=model,
                 criterion=criterion,
                 bbox_postprocessor=self._resolve_postprocessor(postprocessor),
                 prepare_inputs=prepare_inputs,
                 mdmb_observer=mdmb_observer,
+                cfp_forward=cfp_forward,
             )
 
         model = getattr(built, "model", None)
@@ -415,6 +446,7 @@ class DINOWrapper(BaseDetectionWrapper):
             postprocessor = getattr(built, "postprocessors", None)
         prepare_inputs = getattr(built, "prepare_inputs", None)
         mdmb_observer = getattr(built, "mdmb_observer", None)
+        cfp_forward = getattr(built, "cfp_forward", None)
         if model is None:
             raise TypeError(
                 "DINO backend builder returned an unsupported object. Expected nn.Module, "
@@ -426,6 +458,7 @@ class DINOWrapper(BaseDetectionWrapper):
             bbox_postprocessor=self._resolve_postprocessor(postprocessor),
             prepare_inputs=prepare_inputs,
             mdmb_observer=mdmb_observer,
+            cfp_forward=cfp_forward,
         )
 
     def _resolve_postprocessor(self, value: Any) -> Postprocessor | None:
@@ -446,6 +479,7 @@ class DINOWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None,
         post_neck: nn.Module | None,
         mdmb: MissedDetectionMemoryBank | None,
+        cfp: CounterfactualFeaturePerturbation | None,
         extra_kwargs: dict[str, Any],
     ) -> Any:
         backend_cfg = cfg.get("backend", {})
@@ -459,6 +493,7 @@ class DINOWrapper(BaseDetectionWrapper):
             "pre_neck": pre_neck,
             "post_neck": post_neck,
             "mdmb": mdmb,
+            "cfp": cfp,
             **builder_kwargs,
         }
 
@@ -535,23 +570,125 @@ class DINOWrapper(BaseDetectionWrapper):
             return
         if not isinstance(outputs, Mapping):
             return
+        candidate_batches = self._collect_mdmb_candidate_batches(outputs, prepared_targets)
+        observations = [
+            observation
+            for batch in candidate_batches
+            for observation in batch["observations"]
+        ]
+        if observations:
+            self.mdmb.update(observations)
+
+    def _compute_cfp_losses(
+        self,
+        outputs: Any,
+        prepared_targets: list[TensorDict] | None,
+    ) -> dict[str, torch.Tensor] | None:
+        if (
+            self.cfp is None
+            or self.mdmb is None
+            or prepared_targets is None
+            or self.cfp_forward is None
+            or not isinstance(outputs, Mapping)
+        ):
+            return None
+
+        pred_logits = outputs.get("pred_logits")
+        if not isinstance(pred_logits, torch.Tensor) or pred_logits.ndim != 3:
+            return None
+
+        query_features = self._extract_query_features(outputs, pred_logits)
+        if query_features.shape[-1] != self.cfp.feature_dim:
+            return None
+        candidate_batches = self._collect_mdmb_candidate_batches(outputs, prepared_targets)
+        selected_tasks: list[dict[str, Any]] = []
+        selected_features: list[torch.Tensor] = []
+        for batch in candidate_batches:
+            for position, track_id in enumerate(batch["track_ids"]):
+                entry = self.mdmb.get(track_id)
+                if entry is None or not entry.is_chronic_miss(self.mdmb.config):
+                    continue
+                if bool(batch["detected_mask"][position].item()):
+                    continue
+                selected_tasks.append(
+                    {
+                        "image_index": batch["image_index"],
+                        "query_index": int(batch["candidate_indices"][position].item()),
+                        "gt_label_index": int(batch["gt_label_indices"][position].item()),
+                        "base_score": batch["base_scores"][position],
+                    }
+                )
+                selected_features.append(batch["query_features"][position])
+
+        if not selected_features:
+            return None
+
+        cfp_output = self.cfp(torch.stack(selected_features, dim=0))
+        cf_query_features = query_features.detach().clone()
+        for task, perturbed_feature in zip(
+            selected_tasks,
+            cfp_output.perturbed_features,
+            strict=True,
+        ):
+            cf_query_features[task["image_index"], task["query_index"]] = perturbed_feature
+
+        cf_outputs = self._call_cfp_forward(outputs, cf_query_features, prepared_targets)
+        if not isinstance(cf_outputs, Mapping):
+            return None
+
+        cf_loss_dict = self._compute_losses(cf_outputs, prepared_targets)
+        cf_pred_logits = cf_outputs.get("pred_logits")
+        if isinstance(cf_pred_logits, torch.Tensor) and cf_pred_logits.ndim == 3:
+            cf_class_scores = torch.sigmoid(cf_pred_logits)
+            cf_scores = torch.stack(
+                [
+                    cf_class_scores[
+                        task["image_index"],
+                        task["query_index"],
+                        task["gt_label_index"],
+                    ]
+                    for task in selected_tasks
+                ],
+                dim=0,
+            )
+        else:
+            cf_scores = None
+        base_scores = torch.stack(
+            [task["base_score"] for task in selected_tasks],
+            dim=0,
+        )
+        return compute_cfp_loss_dict(
+            detection_loss=cf_loss_dict,
+            delta=cfp_output,
+            config=self.cfp.config,
+            cf_scores=cf_scores,
+            base_scores=base_scores,
+        )
+
+    def _collect_mdmb_candidate_batches(
+        self,
+        outputs: Mapping[str, Any],
+        prepared_targets: list[TensorDict],
+    ) -> list[dict[str, Any]]:
+        if self.mdmb is None:
+            return []
 
         pred_logits = outputs.get("pred_logits")
         pred_boxes = outputs.get("pred_boxes")
         if not isinstance(pred_logits, torch.Tensor) or not isinstance(pred_boxes, torch.Tensor):
-            return
+            return []
         if pred_logits.ndim != 3 or pred_boxes.ndim != 3:
-            return
+            return []
 
         query_features = self._extract_query_features(outputs, pred_logits)
         matches = self._match_queries(outputs, prepared_targets)
-        observations: list[MDMBObservation] = []
         max_candidates = self.mdmb.config.max_entries_per_image * 4
 
         normalized_boxes = cxcywh_to_xyxy(pred_boxes.detach()).clamp_(min=0.0, max=1.0)
         class_scores = torch.sigmoid(pred_logits.detach())
         pred_scores, pred_label_indices = class_scores.max(dim=-1)
         pred_label_ids = self._restore_label_ids(pred_label_indices)
+        candidate_batches: list[dict[str, Any]] = []
 
         for image_index, prepared_target in enumerate(prepared_targets):
             gt_boxes_xyxy = prepared_target["boxes_xyxy"]
@@ -595,12 +732,21 @@ class DINOWrapper(BaseDetectionWrapper):
             keep_order = select_topk_indices(priority, k=max_candidates)
             candidate_indices = candidate_indices[keep_order]
             image_id = int(prepared_target["image_id"].item())
-
-            for candidate_index in candidate_indices.tolist():
+            observations: list[MDMBObservation] = []
+            track_ids: list[str] = []
+            for local_index, candidate_index in enumerate(candidate_indices.tolist()):
                 detected = bool(detected_mask[candidate_index].item())
                 effective_iou = float(iou_max[candidate_index].item())
                 if detected:
                     effective_iou = max(effective_iou, self.mdmb.config.iou_high)
+                gt_class_id = int(gt_label_ids[nearest_gt[candidate_index]].item())
+                track_id = self.mdmb.make_track_id(
+                    image_id=image_id,
+                    region_coords=normalized_boxes[image_index, candidate_index],
+                    source="query",
+                    gt_class=gt_class_id,
+                )
+                track_ids.append(track_id)
                 observations.append(
                     MDMBObservation(
                         image_id=image_id,
@@ -608,14 +754,27 @@ class DINOWrapper(BaseDetectionWrapper):
                         iou_max=effective_iou,
                         cls_score=float(gt_scores[candidate_index].item()),
                         feature_vec=query_features[image_index, candidate_index],
-                        gt_class=int(gt_label_ids[nearest_gt[candidate_index]].item()),
+                        gt_class=gt_class_id,
                         detected=detected,
+                        track_id=track_id,
                         source="query",
                     )
                 )
 
-        if observations:
-            self.mdmb.update(observations)
+            candidate_batches.append(
+                {
+                    "image_index": image_index,
+                    "candidate_indices": candidate_indices,
+                    "track_ids": track_ids,
+                    "detected_mask": detected_mask[candidate_indices],
+                    "gt_label_indices": gt_label_indices[candidate_indices].to(dtype=torch.int64),
+                    "base_scores": gt_scores[candidate_indices],
+                    "query_features": query_features[image_index, candidate_indices].detach(),
+                    "observations": observations,
+                }
+            )
+
+        return candidate_batches
 
     def _match_queries(
         self,
@@ -697,6 +856,48 @@ class DINOWrapper(BaseDetectionWrapper):
             if tensor.shape[0] == batch_size and tensor.shape[1] == num_queries:
                 return tensor[:, :, -1, :]
         return None
+
+    def _resolve_cfp_forward(self, model: nn.Module) -> CFPForward | None:
+        for name in ("cfp_forward", "forward_cfp"):
+            candidate = getattr(model, name, None)
+            if callable(candidate):
+                return candidate
+        return None
+
+    def _call_cfp_forward(
+        self,
+        outputs: Mapping[str, Any],
+        cf_query_features: torch.Tensor,
+        prepared_targets: list[TensorDict],
+    ) -> Any:
+        if self.cfp_forward is None:
+            return None
+
+        candidate_kwargs = {
+            "outputs": outputs,
+            "base_outputs": outputs,
+            "query_features": cf_query_features,
+            "cf_query_features": cf_query_features,
+            "targets": prepared_targets,
+            "prepared_targets": prepared_targets,
+            "wrapper": self,
+            "model": self.model,
+        }
+
+        signature = inspect.signature(self.cfp_forward)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if accepts_kwargs:
+            accepted_kwargs = candidate_kwargs
+        else:
+            accepted_kwargs = {
+                name: value
+                for name, value in candidate_kwargs.items()
+                if name in signature.parameters
+            }
+        return self.cfp_forward(**accepted_kwargs)
 
     def _call_accepts_targets(self, module: nn.Module) -> bool:
         signature = inspect.signature(module.forward)

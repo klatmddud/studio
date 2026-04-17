@@ -1,3 +1,12 @@
+from .cfp import (
+    CFP,
+    CFPConfig,
+    CFPOutput,
+    CounterfactualFeaturePerturbation,
+    build_cfp_from_config,
+    build_cfp_from_yaml,
+    load_cfp_config,
+)
 from .mdmb import (
     MDMB,
     MDMBConfig,
@@ -14,14 +23,21 @@ from .mdmb import (
 )
 
 __all__ = [
+    "CFP",
+    "CFPConfig",
+    "CFPOutput",
+    "CounterfactualFeaturePerturbation",
     "MDMB",
     "MDMBConfig",
     "MDMBEntry",
     "MDMBObservation",
     "MissedDetectionMemoryBank",
+    "build_cfp_from_config",
+    "build_cfp_from_yaml",
     "build_mdmb_from_config",
     "build_mdmb_from_yaml",
     "cxcywh_to_xyxy",
+    "load_cfp_config",
     "load_mdmb_config",
     "normalize_arch",
     "normalize_xyxy_boxes",
