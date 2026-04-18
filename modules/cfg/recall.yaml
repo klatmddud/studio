@@ -1,7 +1,7 @@
 enabled: true
-match_threshold: 0.5
-max_per_image: null
-warmup_epochs: 5
+amp_type_a: 2.5
+amp_type_b: 1.5
+ignore_iou_threshold: 0.3
 
 models:
   fcos: {}

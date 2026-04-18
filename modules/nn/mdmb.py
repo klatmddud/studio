@@ -100,12 +100,14 @@ class MDMBEntry:
     image_id: str
     class_id: int
     bbox: torch.Tensor
+    miss_type: str
 
     def to_state(self) -> dict[str, Any]:
         return {
             "image_id": self.image_id,
             "class_id": self.class_id,
             "bbox": self.bbox.cpu(),
+            "miss_type": self.miss_type,
         }
 
     @classmethod
@@ -114,6 +116,7 @@ class MDMBEntry:
             image_id=_normalize_image_id(state["image_id"]),
             class_id=int(state["class_id"]),
             bbox=_as_region_tensor(state["bbox"]),
+            miss_type=str(state.get("miss_type", "type_a")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,6 +124,7 @@ class MDMBEntry:
             "image_id": self.image_id,
             "class_id": self.class_id,
             "bbox": self.bbox.tolist(),
+            "miss_type": self.miss_type,
         }
 
 
@@ -162,6 +166,7 @@ class MissedDetectionMemoryBank(nn.Module):
         *,
         image_ids: Sequence[Any],
         pred_boxes_list: Sequence[torch.Tensor | Sequence[Sequence[float]] | Sequence[float]],
+        pred_labels_list: Sequence[torch.Tensor | Sequence[int] | int],
         gt_boxes_list: Sequence[torch.Tensor | Sequence[Sequence[float]] | Sequence[float]],
         gt_labels_list: Sequence[torch.Tensor | Sequence[int] | int],
         image_shapes: Sequence[Sequence[int] | torch.Tensor],
@@ -173,6 +178,7 @@ class MissedDetectionMemoryBank(nn.Module):
         batch_size = len(image_ids)
         expected_lengths = (
             len(pred_boxes_list),
+            len(pred_labels_list),
             len(gt_boxes_list),
             len(gt_labels_list),
             len(image_shapes),
@@ -181,13 +187,14 @@ class MissedDetectionMemoryBank(nn.Module):
             raise ValueError(
                 "MDMB update inputs must share the same batch dimension: "
                 f"image_ids={batch_size}, pred_boxes={expected_lengths[0]}, "
-                f"gt_boxes={expected_lengths[1]}, gt_labels={expected_lengths[2]}, "
-                f"image_shapes={expected_lengths[3]}."
+                f"pred_labels={expected_lengths[1]}, gt_boxes={expected_lengths[2]}, "
+                f"gt_labels={expected_lengths[3]}, image_shapes={expected_lengths[4]}."
             )
 
-        for image_id, pred_boxes, gt_boxes, gt_labels, image_shape in zip(
+        for image_id, pred_boxes, pred_labels, gt_boxes, gt_labels, image_shape in zip(
             image_ids,
             pred_boxes_list,
+            pred_labels_list,
             gt_boxes_list,
             gt_labels_list,
             image_shapes,
@@ -207,19 +214,33 @@ class MissedDetectionMemoryBank(nn.Module):
                 continue
 
             pred_boxes_tensor = _as_box_tensor(pred_boxes, device=gt_boxes_tensor.device)
-            if pred_boxes_tensor.numel() == 0:
-                max_ious = gt_boxes_tensor.new_zeros((gt_boxes_tensor.shape[0],))
-            else:
-                max_ious = box_ops.box_iou(gt_boxes_tensor, pred_boxes_tensor).max(dim=1).values
+            pred_labels_tensor = _as_label_tensor(pred_labels, device=gt_boxes_tensor.device)
+            if pred_boxes_tensor.shape[0] != pred_labels_tensor.shape[0]:
+                raise ValueError(
+                    "MDMB pred_boxes and pred_labels must contain the same number of predictions. "
+                    f"Got {pred_boxes_tensor.shape[0]} and {pred_labels_tensor.shape[0]} for {image_key!r}."
+                )
 
             normalized_gt_boxes = normalize_xyxy_boxes(gt_boxes_tensor, image_shape)
             missed_entries: list[MDMBEntry] = []
-            for gt_index in torch.where(max_ious < self.config.match_threshold)[0].tolist():
+            for gt_index, (gt_box, gt_label) in enumerate(
+                zip(gt_boxes_tensor, gt_labels_tensor, strict=True)
+            ):
+                miss_type = classify_miss(
+                    gt_box=gt_box,
+                    gt_label=int(gt_label.item()),
+                    pred_boxes=pred_boxes_tensor,
+                    pred_labels=pred_labels_tensor,
+                    theta_loc=self.config.match_threshold,
+                )
+                if miss_type == "detected":
+                    continue
                 missed_entries.append(
                     MDMBEntry(
                         image_id=image_key,
-                        class_id=int(gt_labels_tensor[gt_index].item()),
+                        class_id=int(gt_label.item()),
                         bbox=normalized_gt_boxes[gt_index].cpu(),
+                        miss_type=miss_type,
                     )
                 )
 
@@ -255,10 +276,54 @@ class MissedDetectionMemoryBank(nn.Module):
     def get_image_entries(self, image_id: Any) -> list[MDMBEntry]:
         return self.get(image_id)
 
+    def get_missed_set_with_type(
+        self,
+        image_id: Any,
+        gt_boxes: torch.Tensor | Sequence[Sequence[float]] | Sequence[float],
+        gt_labels: torch.Tensor | Sequence[int] | int,
+        *,
+        image_shape: Sequence[int] | torch.Tensor,
+        iou_thresh: float = 0.95,
+    ) -> dict[int, str]:
+        entries = self.get(image_id)
+        if not entries:
+            return {}
+
+        gt_boxes_tensor = normalize_xyxy_boxes(gt_boxes, image_shape)
+        gt_labels_tensor = _as_label_tensor(gt_labels, device=gt_boxes_tensor.device)
+        if gt_boxes_tensor.shape[0] != gt_labels_tensor.shape[0]:
+            raise ValueError(
+                "MDMB get_missed_set_with_type expects gt_boxes and gt_labels to contain the same number of instances."
+            )
+        if gt_boxes_tensor.numel() == 0:
+            return {}
+
+        missed_set: dict[int, str] = {}
+        for entry in entries:
+            entry_box = entry.bbox.to(device=gt_boxes_tensor.device, dtype=gt_boxes_tensor.dtype).unsqueeze(0)
+            ious = box_ops.box_iou(entry_box, gt_boxes_tensor)[0]
+            if ious.numel() == 0:
+                continue
+            best_idx = int(ious.argmax().item())
+            if float(ious[best_idx].item()) < float(iou_thresh):
+                continue
+            if int(gt_labels_tensor[best_idx].item()) != int(entry.class_id):
+                continue
+            missed_set[best_idx] = entry.miss_type
+        return missed_set
+
     def summary(self) -> dict[str, Any]:
         num_entries = len(self)
         num_images = len(self._bank)
         warmup_active = self.config.enabled and self.current_epoch <= self.config.warmup_epochs
+        num_type_a = 0
+        num_type_b = 0
+        for entries in self._bank.values():
+            for entry in entries:
+                if entry.miss_type == "type_a":
+                    num_type_a += 1
+                elif entry.miss_type == "type_b":
+                    num_type_b += 1
         return {
             "enabled": self.config.enabled,
             "arch": self.config.arch,
@@ -267,6 +332,8 @@ class MissedDetectionMemoryBank(nn.Module):
             "warmup_active": warmup_active,
             "num_images": num_images,
             "num_entries": num_entries,
+            "num_type_a": num_type_a,
+            "num_type_b": num_type_b,
         }
 
     def __len__(self) -> int:
@@ -280,7 +347,7 @@ class MissedDetectionMemoryBank(nn.Module):
 
     def get_extra_state(self) -> dict[str, Any]:
         return {
-            "version": 2,
+            "version": 3,
             "current_epoch": self.current_epoch,
             "config": self.config.to_dict(),
             "bank": {
@@ -303,7 +370,7 @@ class MissedDetectionMemoryBank(nn.Module):
         self.current_epoch = int(state.get("current_epoch", 0))
 
         # Gracefully ignore legacy v1 checkpoints instead of failing the whole load.
-        if int(state.get("version", 0)) != 2:
+        if int(state.get("version", 0)) != 3:
             self._bank = {}
             return
 
@@ -328,6 +395,36 @@ class MissedDetectionMemoryBank(nn.Module):
 
 
 MDMB = MissedDetectionMemoryBank
+
+
+def classify_miss(
+    *,
+    gt_box: torch.Tensor | Sequence[float],
+    gt_label: int,
+    pred_boxes: torch.Tensor | Sequence[Sequence[float]] | Sequence[float],
+    pred_labels: torch.Tensor | Sequence[int] | int,
+    theta_loc: float,
+) -> str:
+    gt_box_tensor = _as_box_tensor(gt_box)
+    pred_boxes_tensor = _as_box_tensor(pred_boxes, device=gt_box_tensor.device)
+    pred_labels_tensor = _as_label_tensor(pred_labels, device=gt_box_tensor.device)
+
+    if pred_boxes_tensor.shape[0] != pred_labels_tensor.shape[0]:
+        raise ValueError(
+            "MDMB classify_miss expects pred_boxes and pred_labels to contain the same number of predictions."
+        )
+    if pred_boxes_tensor.numel() == 0:
+        return "type_a"
+
+    ious = box_ops.box_iou(gt_box_tensor, pred_boxes_tensor)[0]
+    loc_mask = ious >= float(theta_loc)
+    if not bool(loc_mask.any().item()):
+        return "type_a"
+
+    matched_labels = pred_labels_tensor[loc_mask]
+    if bool((matched_labels == int(gt_label)).any().item()):
+        return "detected"
+    return "type_b"
 
 
 def normalize_arch(raw_arch: str | None) -> str | None:

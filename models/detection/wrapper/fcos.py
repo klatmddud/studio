@@ -7,44 +7,38 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models.detection import FCOS
-from torchvision.ops import roi_align
+from torchvision.ops import boxes as box_ops
+from torchvision.ops import sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
-from modules.nn import (
-    CounterfactualFeaturePerturbation,
-    MissedObjectDirectSupervision,
-    SoftCounterfactualAssignment,
-)
+from modules.nn import MDMBSelectiveLoss
 from modules.nn.mdmb import MissedDetectionMemoryBank
-from ops import compute_mods_loss_dict
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 
 class MDMBFCOS(FCOS):
     """
-    FCOS variant with MDMB v2 support.
+    FCOS variant with MDMB-guided RECALL loss reweighting.
 
-    During the training forward pass it computes the standard FCOS loss only.
-    After optimizer.step(), the wrapper triggers an extra no-grad inference pass
-    to update MDMB from the final post-NMS detections of the current batch.
+    During training the wrapper can replace the standard aggregated FCOS loss
+    with a per-point loss decomposition, then reweight positives / suppress
+    nearby negatives using the MDMB bank. After optimizer.step(), it runs an
+    extra no-grad inference pass to refresh the MDMB state from final detections.
     """
 
     def __init__(
         self,
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
-        cfp: CounterfactualFeaturePerturbation | None = None,
-        mods: MissedObjectDirectSupervision | None = None,
-        sca: SoftCounterfactualAssignment | None = None,
+        recall: MDMBSelectiveLoss | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
-        self._cfp_ref = weakref.ref(cfp) if cfp is not None else None
-        self._mods_ref = weakref.ref(mods) if mods is not None else None
-        self._sca_ref = weakref.ref(sca) if sca is not None else None
+        self._recall_ref = weakref.ref(recall) if recall is not None else None
 
     def forward(
         self,
@@ -98,20 +92,24 @@ class MDMBFCOS(FCOS):
         anchors = self.anchor_generator(images, feature_list)
         num_anchors_per_level = [x.size(2) * x.size(3) for x in feature_list]
 
-        losses = {}
+        losses: dict[str, torch.Tensor] = {}
         detections: list[dict[str, torch.Tensor]] = []
         if self.training:
             if targets is None:
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
-            losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
-            mods_losses = self._compute_mods_losses(
-                feature_list=feature_list,
-                targets=targets,
-                image_shapes=images.image_sizes,
-            )
-            if mods_losses:
-                losses.update(mods_losses)
+            mdmb = self._get_mdmb()
+            recall = self._get_recall()
+            if mdmb is None or recall is None:
+                losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
+            else:
+                losses = self._compute_recall_loss_dict(
+                    targets=targets,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    matched_idxs=matched_idxs,
+                    image_shapes=images.image_sizes,
+                )
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
             for key in head_outputs:
@@ -129,91 +127,220 @@ class MDMBFCOS(FCOS):
             return losses, detections
         return self.eager_outputs(losses, detections)
 
-    def _compute_mods_losses(
+    def _compute_recall_loss_dict(
         self,
         *,
-        feature_list: list[torch.Tensor],
-        targets: list[dict[str, torch.Tensor]] | None,
+        targets: list[dict[str, torch.Tensor]],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
         image_shapes: list[tuple[int, int]],
-    ) -> dict[str, torch.Tensor] | None:
+    ) -> dict[str, torch.Tensor]:
         mdmb = self._get_mdmb()
-        mods = self._get_mods()
-        if mdmb is None or mods is None or not targets:
-            return None
-        if len(feature_list) != len(mods.config.strides):
+        recall = self._get_recall()
+        if mdmb is None or recall is None:
+            raise RuntimeError("RECALL loss requested without MDMB / RECALL modules.")
+
+        cls_template = head_outputs["cls_logits"]
+        cls_sum = cls_template.new_zeros(())
+        reg_sum = cls_template.new_zeros(())
+        ctr_sum = cls_template.new_zeros(())
+        total_pos = 0
+
+        for image_index, target in enumerate(targets):
+            raw = self._compute_raw_losses_for_image(
+                image_index=image_index,
+                target=target,
+                head_outputs=head_outputs,
+                anchors_per_image=anchors[image_index],
+                matched_idxs_per_image=matched_idxs[image_index],
+            )
+            assignments = raw["assignments"]
+            point_boxes = raw["point_boxes"]
+            gt_boxes = raw["gt_boxes"]
+            gt_labels = raw["gt_labels"]
+
+            image_id = target.get(
+                "image_id",
+                torch.tensor(image_index, device=assignments.device),
+            )
+            missed_set = mdmb.get_missed_set_with_type(
+                image_id,
+                gt_boxes,
+                gt_labels,
+                image_shape=image_shapes[image_index],
+            )
+
+            weights, valid = recall.compute_weights(
+                point_gt_indices=assignments,
+                point_boxes=point_boxes,
+                gt_boxes=gt_boxes,
+                missed_set=missed_set,
+                device=assignments.device,
+            )
+
+            pos_mask = assignments >= 0
+            total_pos += int(pos_mask.sum().item())
+
+            weights = weights.to(dtype=raw["cls_losses"].dtype)
+            valid_float = valid.to(dtype=raw["cls_losses"].dtype)
+
+            cls_sum = cls_sum + (raw["cls_losses"] * weights * valid_float).sum()
+            if bool(pos_mask.any().item()):
+                pos_weights = weights[pos_mask]
+                reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * pos_weights).sum()
+                ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * pos_weights).sum()
+
+        normalizer = cls_sum.new_tensor(float(max(total_pos, 1)))
+        return {
+            "classification": cls_sum / normalizer,
+            "bbox_regression": reg_sum / normalizer,
+            "bbox_ctrness": ctr_sum / normalizer,
+        }
+
+    def _compute_raw_losses_for_image(
+        self,
+        *,
+        image_index: int,
+        target: dict[str, torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors_per_image: torch.Tensor,
+        matched_idxs_per_image: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        cls_logits = head_outputs["cls_logits"][image_index]
+        bbox_regression = head_outputs["bbox_regression"][image_index]
+        bbox_ctrness = head_outputs["bbox_ctrness"][image_index].flatten()
+
+        if cls_logits.ndim != 2:
             raise ValueError(
-                "FCOS MODS expects the configured strides to match the number of FPN levels. "
-                f"Got {len(mods.config.strides)} strides and {len(feature_list)} feature maps."
+                "FCOS cls_logits must have shape [N_points, num_classes] per image. "
+                f"Got {tuple(cls_logits.shape)}."
             )
-
-        image_ids = [
-            target.get("image_id", torch.tensor(index, device=feature_list[0].device))
-            for index, target in enumerate(targets)
-        ]
-        missed_entries_batch = [mdmb.get(image_id) for image_id in image_ids]
-        mods_targets = mods.collect_targets(
-            image_ids=image_ids,
-            missed_entries_batch=missed_entries_batch,
-            image_shapes=image_shapes,
-            device=feature_list[0].device,
-            training=self.training,
-        )
-        if mods_targets.is_empty():
-            return None
-
-        cls_logits_chunks: list[torch.Tensor] = []
-        cls_target_chunks: list[torch.Tensor] = []
-        reg_pred_chunks: list[torch.Tensor] = []
-        reg_target_chunks: list[torch.Tensor] = []
-
-        for level_index, (feature_map, stride) in enumerate(
-            zip(feature_list, mods.config.strides, strict=True)
-        ):
-            level_mask = mods_targets.level_indices == level_index
-            if not bool(level_mask.any().item()):
-                continue
-
-            level_image_indices = mods_targets.image_indices[level_mask].to(
-                device=feature_map.device,
-                dtype=torch.float32,
+        if bbox_regression.ndim != 2 or bbox_regression.shape[-1] != 4:
+            raise ValueError(
+                "FCOS bbox_regression must have shape [N_points, 4] per image. "
+                f"Got {tuple(bbox_regression.shape)}."
             )
-            level_boxes = mods_targets.boxes_abs[level_mask].to(
-                device=feature_map.device,
-                dtype=feature_map.dtype,
-            )
-            rois = torch.cat((level_image_indices.unsqueeze(1), level_boxes), dim=1)
-            pooled_features = roi_align(
-                feature_map,
-                rois,
-                output_size=mods.config.roi_output_size,
-                spatial_scale=1.0 / float(stride),
-                sampling_ratio=mods.config.sampling_ratio,
-                aligned=mods.config.aligned,
-            )
+        if bbox_regression.shape[0] != cls_logits.shape[0]:
+            raise ValueError("FCOS bbox_regression and cls_logits must share N_points.")
+        if bbox_ctrness.shape[0] != cls_logits.shape[0]:
+            raise ValueError("FCOS bbox_ctrness and cls_logits must share N_points.")
+        if anchors_per_image.shape[0] != cls_logits.shape[0]:
+            raise ValueError("FCOS anchors and logits must share N_points.")
+        if matched_idxs_per_image.shape[0] != cls_logits.shape[0]:
+            raise ValueError("FCOS matched indices and logits must share N_points.")
 
-            cls_logits = self.head.classification_head([pooled_features])
-            cls_logits_chunks.append(self._reduce_dense_predictions(cls_logits))
-            cls_target_chunks.append(mods_targets.class_ids[level_mask].to(feature_map.device))
+        gt_boxes = target["boxes"]
+        gt_labels = target["labels"].to(dtype=torch.int64)
+        gt_classes_targets = torch.zeros_like(cls_logits)
 
-            if mods.config.lambda_reg > 0.0:
-                bbox_regression, _ = self.head.regression_head([pooled_features])
-                reg_pred_chunks.append(self._reduce_dense_predictions(bbox_regression))
-                reg_target_chunks.append(
-                    mods_targets.boxes_norm[level_mask].to(
-                        device=feature_map.device,
-                        dtype=feature_map.dtype,
-                    )
+        raw_reg = cls_logits.new_zeros((cls_logits.shape[0],))
+        raw_ctr = cls_logits.new_zeros((cls_logits.shape[0],))
+
+        pos_mask = matched_idxs_per_image >= 0
+        if bool(pos_mask.any().item()):
+            matched_gt_indices = matched_idxs_per_image[pos_mask]
+            matched_gt_labels = gt_labels[matched_gt_indices]
+            if bool((matched_gt_labels >= cls_logits.shape[1]).any().item()):
+                raise ValueError(
+                    "FCOS target label exceeds classifier dimension. "
+                    f"Max label={int(matched_gt_labels.max().item())}, "
+                    f"num_classes={cls_logits.shape[1]}."
                 )
 
-        if not cls_logits_chunks:
-            return None
+            gt_classes_targets[pos_mask, matched_gt_labels] = 1.0
 
-        return compute_mods_loss_dict(
-            cls_logits=torch.cat(cls_logits_chunks, dim=0),
-            gt_classes=torch.cat(cls_target_chunks, dim=0),
-            reg_pred=None if not reg_pred_chunks else torch.cat(reg_pred_chunks, dim=0),
-            reg_target=None if not reg_target_chunks else torch.cat(reg_target_chunks, dim=0),
-            config=mods.config,
+            matched_gt_boxes = gt_boxes[matched_gt_indices]
+            pred_boxes = self._decode_boxes(
+                box_regression=bbox_regression[pos_mask],
+                anchors=anchors_per_image[pos_mask],
+            )
+            giou = box_ops.generalized_box_iou(pred_boxes, matched_gt_boxes)
+            raw_reg[pos_mask] = 1.0 - torch.diagonal(giou)
+
+            ctr_targets = self._compute_centerness_targets(
+                anchors=anchors_per_image[pos_mask],
+                gt_boxes=matched_gt_boxes,
+            )
+            raw_ctr[pos_mask] = F.binary_cross_entropy_with_logits(
+                bbox_ctrness[pos_mask],
+                ctr_targets,
+                reduction="none",
+            )
+
+        raw_cls = sigmoid_focal_loss(cls_logits, gt_classes_targets, reduction="none").sum(dim=-1)
+        return {
+            "cls_losses": raw_cls,
+            "reg_losses": raw_reg,
+            "ctr_losses": raw_ctr,
+            "assignments": matched_idxs_per_image,
+            "point_boxes": anchors_per_image,
+            "gt_boxes": gt_boxes,
+            "gt_labels": gt_labels,
+        }
+
+    def _compute_centerness_targets(
+        self,
+        *,
+        anchors: torch.Tensor,
+        gt_boxes: torch.Tensor,
+    ) -> torch.Tensor:
+        if anchors.numel() == 0:
+            return anchors.new_zeros((0,))
+
+        centers = (anchors[:, :2] + anchors[:, 2:]) * 0.5
+        left = centers[:, 0] - gt_boxes[:, 0]
+        top = centers[:, 1] - gt_boxes[:, 1]
+        right = gt_boxes[:, 2] - centers[:, 0]
+        bottom = gt_boxes[:, 3] - centers[:, 1]
+
+        eps = torch.finfo(gt_boxes.dtype).eps if gt_boxes.is_floating_point() else 1e-6
+        lr = torch.minimum(left, right).clamp(min=0.0) / torch.maximum(left, right).clamp(min=eps)
+        tb = torch.minimum(top, bottom).clamp(min=0.0) / torch.maximum(top, bottom).clamp(min=eps)
+        return torch.sqrt((lr * tb).clamp(min=0.0))
+
+    def _decode_boxes(
+        self,
+        *,
+        box_regression: torch.Tensor,
+        anchors: torch.Tensor,
+    ) -> torch.Tensor:
+        box_coder = getattr(self, "box_coder", None)
+        if box_coder is not None:
+            decode_single = getattr(box_coder, "decode_single", None)
+            if callable(decode_single):
+                try:
+                    decoded = decode_single(box_regression, anchors)
+                    if isinstance(decoded, torch.Tensor):
+                        return decoded
+                except TypeError:
+                    pass
+
+            decode = getattr(box_coder, "decode", None)
+            if callable(decode):
+                try:
+                    decoded = decode(box_regression, anchors)
+                    if isinstance(decoded, torch.Tensor):
+                        if decoded.ndim == 3 and decoded.shape[0] == 1:
+                            return decoded[0]
+                        return decoded
+                except TypeError:
+                    pass
+
+        centers = (anchors[:, :2] + anchors[:, 2:]) * 0.5
+        sizes = (anchors[:, 2:] - anchors[:, :2]).clamp(min=1e-6)
+        left = box_regression[:, 0] * sizes[:, 0]
+        top = box_regression[:, 1] * sizes[:, 1]
+        right = box_regression[:, 2] * sizes[:, 0]
+        bottom = box_regression[:, 3] * sizes[:, 1]
+        return torch.stack(
+            (
+                centers[:, 0] - left,
+                centers[:, 1] - top,
+                centers[:, 0] + right,
+                centers[:, 1] + bottom,
+            ),
+            dim=-1,
         )
 
     def _match_anchors_to_targets(
@@ -297,9 +424,14 @@ class MDMBFCOS(FCOS):
             detection["boxes"] if "boxes" in detection else image.new_zeros((0, 4))
             for detection, image in zip(detections, images, strict=True)
         ]
+        pred_labels_list = [
+            detection["labels"] if "labels" in detection else image.new_zeros((0,), dtype=torch.int64)
+            for detection, image in zip(detections, images, strict=True)
+        ]
         mdmb.update(
             image_ids=image_ids,
             pred_boxes_list=pred_boxes_list,
+            pred_labels_list=pred_labels_list,
             gt_boxes_list=gt_boxes_list,
             gt_labels_list=gt_labels_list,
             image_shapes=image_shapes,
@@ -311,27 +443,10 @@ class MDMBFCOS(FCOS):
             return None
         return self._mdmb_ref()
 
-    def _get_mods(self) -> MissedObjectDirectSupervision | None:
-        if self._mods_ref is None:
+    def _get_recall(self) -> MDMBSelectiveLoss | None:
+        if self._recall_ref is None:
             return None
-        return self._mods_ref()
-
-    def _reduce_dense_predictions(self, tensor: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]) -> torch.Tensor:
-        if isinstance(tensor, (list, tuple)):
-            if len(tensor) != 1:
-                raise ValueError(
-                    "FCOS MODS expected a single pooled feature prediction tensor per level. "
-                    f"Got {len(tensor)} tensors."
-                )
-            tensor = tensor[0]
-        if tensor.ndim == 3:
-            return tensor.mean(dim=1)
-        if tensor.ndim == 2:
-            return tensor
-        raise ValueError(
-            "FCOS MODS expected a dense prediction tensor with shape [N, HWA, C] or [N, C]. "
-            f"Got {tuple(tensor.shape)}."
-        )
+        return self._recall_ref()
 
 
 class FCOSWrapper(BaseDetectionWrapper):
@@ -347,15 +462,17 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
-        cfp: CounterfactualFeaturePerturbation | None = None,
-        mods: MissedObjectDirectSupervision | None = None,
-        sca: SoftCounterfactualAssignment | None = None,
+        recall: MDMBSelectiveLoss | None = None,
+        cfp: nn.Module | None = None,
+        mods: nn.Module | None = None,
+        sca: nn.Module | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.cfp = cfp
         self.mdmb = mdmb
         self.mods = mods
+        self.recall = recall
         self.sca = sca
 
         backbone = build_backbone_with_fpn(
@@ -379,9 +496,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             detections_per_img=head.get("detections_per_img", 100),
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
-            cfp=cfp,
-            mods=mods,
-            sca=sca,
+            recall=recall,
             **kwargs,
         )
 
@@ -405,9 +520,10 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
-        cfp: CounterfactualFeaturePerturbation | None = None,
-        mods: MissedObjectDirectSupervision | None = None,
-        sca: SoftCounterfactualAssignment | None = None,
+        recall: MDMBSelectiveLoss | None = None,
+        cfp: nn.Module | None = None,
+        mods: nn.Module | None = None,
+        sca: nn.Module | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -416,6 +532,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             pre_neck=pre_neck,
             post_neck=post_neck,
             mdmb=mdmb,
+            recall=recall,
             cfp=cfp,
             mods=mods,
             sca=sca,
