@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 alpha_init: 0.1
 lambda_reg: 0.01
 lambda_margin: 0.5

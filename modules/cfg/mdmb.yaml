@@ -1,19 +1,11 @@
 enabled: true
-tau: 3 # miss 판정을 위한 연속 미검출 epoch 임계값
-iou_low: 0.3
-iou_high: 0.5
-momentum: 0.99
-stale_ttl: 5 # 미갱신 항목 삭제 기준 epoch 수
-max_entries_per_image: 50
-coord_precision: 4
-storage_device: cpu
-prune_on_epoch_end: true
-detection_score_threshold: 0.5
+match_threshold: 0.5
+max_per_image: null
+warmup_epochs: 1
 
 models:
+  fcos: {}
   fasterrcnn:
-    track_unit: proposal
-  fcos:
-    track_unit: point
+    enabled: false
   dino:
-    track_unit: query
+    enabled: false

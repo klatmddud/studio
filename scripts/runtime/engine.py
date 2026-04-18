@@ -254,6 +254,13 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
 
+        _call_after_optimizer_step(
+            model,
+            images,
+            targets,
+            epoch_index=epoch_index,
+        )
+
         num_batches += 1
         loss_sums["loss"] += float(total_loss.detach().item())
         for name, value in loss_dict.items():
@@ -449,7 +456,7 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     mdmb_summary = record.get("mdmb")
     if isinstance(mdmb_summary, dict):
         parts.append(f"mdmb_entries={int(mdmb_summary.get('num_entries', 0))}")
-        parts.append(f"mdmb_chronic={int(mdmb_summary.get('num_chronic_misses', 0))}")
+        parts.append(f"mdmb_images={int(mdmb_summary.get('num_images', 0))}")
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
@@ -525,6 +532,18 @@ def _call_model_hook(
     hook = getattr(attribute, hook_name, None)
     if callable(hook):
         hook(*args)
+
+
+def _call_after_optimizer_step(
+    model: torch.nn.Module,
+    images: list[torch.Tensor],
+    targets: list[dict[str, torch.Tensor]],
+    *,
+    epoch_index: int,
+) -> None:
+    hook = getattr(model, "after_optimizer_step", None)
+    if callable(hook):
+        hook(images, targets, epoch_index=epoch_index)
 
 
 def _is_optional_mdmb_key(key: str) -> bool:
