@@ -10,5 +10,4 @@ wheels/
 .venv
 .idea
 .env
-docs
 runs
