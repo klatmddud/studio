@@ -15,6 +15,14 @@ from torch import optim
 
 from .config import dump_yaml_file
 from .metrics import evaluate_coco_detection, save_predictions
+from .visualize import (
+    build_confusion_matrix,
+    plot_confusion_matrices,
+    plot_loss_curves,
+    plot_map_curves,
+    plot_mdmb_curves,
+    plot_mdmb_per_class,
+)
 
 
 def fit(
@@ -156,6 +164,35 @@ def fit(
         summary = format_metrics(record, runtime_config["metrics"]["primary"])
         print(f"[epoch {epoch + 1}/{total_epochs}] {summary}")
 
+    best_pt = checkpoint_dir / "best.pt"
+    if val_loader is not None and best_pt.is_file():
+        print(f"[best_val] Loading best checkpoint: {best_pt}")
+        load_checkpoint(best_pt, model=model, map_location=device)
+        best_val_metrics, best_val_predictions = evaluate_coco_detection(
+            model=model,
+            data_loader=val_loader,
+            device=device,
+            amp=runtime_config["amp"],
+            log_interval=runtime_config["train"]["log_interval"],
+            stage_label="best_val",
+        )
+        _write_json(output_dir / "best_val_metrics.json", best_val_metrics)
+        primary = runtime_config["metrics"]["primary"]
+        print(
+            f"[best_val] {primary}={best_val_metrics.get(primary, float('nan')):.4f} "
+            f"→ saved to {output_dir / 'best_val_metrics.json'}"
+        )
+
+        print("[visualize] Generating training figures ...")
+        plot_loss_curves(history, output_dir)
+        plot_map_curves(history, output_dir)
+        plot_mdmb_curves(history, output_dir)
+
+        print("[visualize] Building confusion matrix ...")
+        cm, class_names = build_confusion_matrix(best_val_predictions, val_loader)
+        plot_confusion_matrices(cm, class_names, output_dir)
+        plot_mdmb_per_class(model, val_loader, output_dir)
+
     return history
 
 
@@ -201,6 +238,11 @@ def evaluate(
             else:
                 destination = resolved_output_dir / "predictions.json"
             save_predictions(destination, predictions)
+
+        print("[visualize] Building confusion matrix ...")
+        cm, class_names = build_confusion_matrix(predictions, data_loader)
+        plot_confusion_matrices(cm, class_names, resolved_output_dir)
+        plot_mdmb_per_class(model, data_loader, resolved_output_dir)
 
     return metrics, predictions
 
