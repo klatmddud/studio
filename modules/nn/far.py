@@ -208,18 +208,23 @@ class ForgettingAwareReplay(nn.Module):
         gt_labels_list: Sequence[torch.Tensor],
         features: Mapping[str, torch.Tensor],
         image_shapes: Sequence[Sequence[int]],
-        mdmb: MissedDetectionMemoryBank | None,
+        mdmb: MissedDetectionMemoryBank | None = None,
     ) -> torch.Tensor:
         """
         Compute the FAR consistency loss for the current training batch.
 
-        Returns a scalar tensor on the feature device. Zero when FAR is in
-        warmup, when there are no relapsed GTs with a frozen anchor, or when
-        MDMB has no temporal records yet.
+        Relapse state is determined solely from the anchor bank (frozen flag),
+        which was set in flush_far_update using post-transform coordinates —
+        the same space used here. MDMB records are not consulted to avoid a
+        coordinate-space mismatch: MDMB normalizes against pre-transform image
+        sizes while features and boxes here are post-transform (padded batch).
+
+        Returns a scalar tensor on the feature device. Zero during warmup or
+        when there are no frozen anchors matching any GT in the batch.
         """
         feature_device = self._infer_device(features)
         zero = torch.zeros((), device=feature_device, dtype=torch.float32)
-        if not self.should_apply() or mdmb is None:
+        if not self.should_apply():
             return zero
         if not self._anchors:
             return zero
@@ -257,9 +262,6 @@ class ForgettingAwareReplay(nn.Module):
             anchor_records = self._anchors.get(image_key)
             if not anchor_records:
                 continue
-            records_for_image = _gt_records_for_image(mdmb, image_key)
-            if not records_for_image:
-                continue
 
             gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shape)
             gt_labels_tensor = _as_int_tensor(gt_labels)
@@ -269,20 +271,10 @@ class ForgettingAwareReplay(nn.Module):
                 records=anchor_records,
                 iou_thresh=self.config.match_threshold,
             )
-            mdmb_matches = _match_boxes_to_records(
-                gt_boxes_norm=gt_boxes_norm,
-                gt_labels=gt_labels_tensor,
-                records=records_for_image,
-                iou_thresh=self.config.match_threshold,
-            )
 
             for gt_index in range(gt_boxes_norm.shape[0]):
                 anchor_idx = anchor_matches[gt_index]
-                mdmb_idx = mdmb_matches[gt_index]
-                if anchor_idx is None or mdmb_idx is None:
-                    continue
-                mdmb_record = records_for_image[mdmb_idx]
-                if not self._is_relapse(mdmb_record):
+                if anchor_idx is None:
                     continue
                 anchor_record = anchor_records[anchor_idx]
                 if not anchor_record.frozen:
@@ -294,9 +286,13 @@ class ForgettingAwareReplay(nn.Module):
                     device=feature_norm.device, dtype=feature_norm.dtype
                 )
                 cos_sim = torch.dot(feature_norm, anchor_vec)
-                streak_weight = 1.0 + self.config.persistence_gamma * self._streak_ratio(
-                    mdmb_record.consecutive_miss_count, mdmb
+                # Approximate streak via epochs elapsed since anchor was last updated.
+                # Normalized to [0, 1] by current epoch so the scale stays bounded.
+                epoch_gap = float(
+                    max(self.current_epoch - anchor_record.last_updated_epoch, 0)
                 )
+                streak_ratio = epoch_gap / float(max(self.current_epoch, 1))
+                streak_weight = 1.0 + self.config.persistence_gamma * streak_ratio
                 total_contribution = total_contribution + streak_weight * (1.0 - cos_sim)
                 num_relapse += 1
 
