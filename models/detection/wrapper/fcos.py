@@ -14,6 +14,7 @@ from torchvision.ops import sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from modules.nn import MDMBSelectiveLoss
+from modules.nn.far import ForgettingAwareReplay
 from modules.nn.mdmb import MissedDetectionMemoryBank
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
@@ -21,12 +22,13 @@ from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 class MDMBFCOS(FCOS):
     """
-    FCOS variant with MDMB-guided RECALL loss reweighting.
+    FCOS variant with MDMB-guided RECALL loss reweighting and optional FAR loss.
 
     During training the wrapper can replace the standard aggregated FCOS loss
     with a per-point loss decomposition, then reweight positives / suppress
     nearby negatives using the MDMB bank. After optimizer.step(), it runs an
-    extra no-grad inference pass to refresh the MDMB state from final detections.
+    extra no-grad inference pass to refresh the MDMB state from final detections
+    and (if enabled) to update the FAR anchor bank.
     """
 
     def __init__(
@@ -34,11 +36,13 @@ class MDMBFCOS(FCOS):
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
+        far: ForgettingAwareReplay | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._recall_ref = weakref.ref(recall) if recall is not None else None
+        self._far_ref = weakref.ref(far) if far is not None else None
 
     def forward(
         self,
@@ -110,6 +114,26 @@ class MDMBFCOS(FCOS):
                     matched_idxs=matched_idxs,
                     image_shapes=images.image_sizes,
                 )
+
+            far = self._get_far()
+            if far is not None and mdmb is not None and far.should_apply():
+                far_loss = far.compute_loss(
+                    image_ids=[
+                        target.get(
+                            "image_id",
+                            torch.tensor(idx, device=images.tensors.device),
+                        )
+                        for idx, target in enumerate(targets)
+                    ],
+                    gt_boxes_list=[target["boxes"] for target in targets],
+                    gt_labels_list=[target["labels"] for target in targets],
+                    features=features,
+                    image_shapes=images.image_sizes,
+                    mdmb=mdmb,
+                )
+                if far_loss.requires_grad or float(far_loss.detach().item()) != 0.0:
+                    losses = dict(losses)
+                    losses["far"] = far_loss
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
             for key in head_outputs:
@@ -438,6 +462,53 @@ class MDMBFCOS(FCOS):
             epoch=epoch,
         )
 
+    @torch.no_grad()
+    def flush_far_update(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int | None = None,
+    ) -> None:
+        far = self._get_far()
+        mdmb = self._get_mdmb()
+        if far is None or mdmb is None or not targets:
+            return
+        if not far.should_apply(epoch=epoch):
+            return
+
+        image_ids = [
+            target.get("image_id", torch.tensor(index, device=images[index].device))
+            for index, target in enumerate(targets)
+        ]
+
+        was_training = self.training
+        try:
+            self.eval()
+            cloned_targets = [
+                {key: value for key, value in target.items()} for target in targets
+            ]
+            transformed_images, transformed_targets = self.transform(images, cloned_targets)
+            features = self.backbone(transformed_images.tensors)
+            if isinstance(features, torch.Tensor):
+                features = OrderedDict([("0", features)])
+
+            gt_boxes_list = [target["boxes"] for target in transformed_targets]
+            gt_labels_list = [target["labels"] for target in transformed_targets]
+
+            far.update_anchors(
+                image_ids=image_ids,
+                gt_boxes_list=gt_boxes_list,
+                gt_labels_list=gt_labels_list,
+                features=features,
+                image_shapes=transformed_images.image_sizes,
+                mdmb=mdmb,
+                epoch=epoch,
+            )
+        finally:
+            if was_training:
+                self.train()
+
     def _get_mdmb(self) -> MissedDetectionMemoryBank | None:
         if self._mdmb_ref is None:
             return None
@@ -447,6 +518,11 @@ class MDMBFCOS(FCOS):
         if self._recall_ref is None:
             return None
         return self._recall_ref()
+
+    def _get_far(self) -> ForgettingAwareReplay | None:
+        if self._far_ref is None:
+            return None
+        return self._far_ref()
 
 
 class FCOSWrapper(BaseDetectionWrapper):
@@ -463,17 +539,13 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
-        cfp: nn.Module | None = None,
-        mods: nn.Module | None = None,
-        sca: nn.Module | None = None,
+        far: ForgettingAwareReplay | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
-        self.cfp = cfp
         self.mdmb = mdmb
-        self.mods = mods
         self.recall = recall
-        self.sca = sca
+        self.far = far
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -497,6 +569,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
             recall=recall,
+            far=far,
             **kwargs,
         )
 
@@ -512,6 +585,8 @@ class FCOSWrapper(BaseDetectionWrapper):
             return
         epoch = None if epoch_index is None else int(epoch_index) + 1
         self.model.flush_mdmb_update(images, targets, epoch=epoch)
+        if self.far is not None:
+            self.model.flush_far_update(images, targets, epoch=epoch)
 
     @classmethod
     def from_yaml(
@@ -521,9 +596,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
-        cfp: nn.Module | None = None,
-        mods: nn.Module | None = None,
-        sca: nn.Module | None = None,
+        far: ForgettingAwareReplay | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -533,8 +606,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             post_neck=post_neck,
             mdmb=mdmb,
             recall=recall,
-            cfp=cfp,
-            mods=mods,
-            sca=sca,
+            far=far,
             **kwargs,
         )

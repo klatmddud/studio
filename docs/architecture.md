@@ -29,9 +29,9 @@
 │
 ├── modules/
 │   ├── cfg/                      # Module configs (all disabled by default)
-│   └── nn/                       # Module implementations (mdmb/recall/cfp/mods/sca)
+│   └── nn/                       # Module implementations (mdmb/recall/far)
 │
-└── ops/                          # Custom loss functions (cfp/mods/sca)
+└── ops/                          # Reserved for custom ops (currently empty)
 ```
 
 ## Tech Stack

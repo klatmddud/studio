@@ -29,7 +29,7 @@ Tracks false-negative detections (missed objects) across training batches with *
 - **Hooks**: `start_epoch()`, `end_epoch()` called by `engine.fit()`
 - **Hook**: `after_optimizer_step(images, targets, epoch_index)` called after each optimizer step
 - **Summary**: `mdmb.summary()` → logged as `mdmb_entries`, `mdmb_images` in `history.json`
-- **Arch support**: FCOS, Faster R-CNN
+- **Arch support**: FCOS
 - **Config**: `modules/cfg/mdmb.yaml`
 
 #### 데이터 구조
@@ -82,35 +82,37 @@ Uses MDMB observations to upweight losses on missed detections.
 - **Arch support**: FCOS
 - **Config**: `modules/cfg/recall.yaml`
 
-### CFP — Counterfactual Feature Perturbation (`cfp.py`)
+### FAR — Forgetting-Aware feature Replay (`far.py`)
 
-Generates counterfactual augmentations at the feature level.
+Pulls a feature-level consistency loss toward a frozen per-GT anchor captured when the
+object was last successfully detected, so that GTs which **relapse** (previously detected,
+currently missed) receive a dedicated pressure signal.
 
-- Loss: `ops/cfp_loss.py`
-- **Arch support**: Faster R-CNN
-- **Config**: `modules/cfg/cfp.yaml`
-
-### MODS — Missed Object Direct Supervision (`mods.py`)
-
-Adds direct supervision signal for hard-negative/missed object regions.
-
-- Loss: `ops/mods_loss.py`
-- **Config**: `modules/cfg/mods.yaml`
-
-### SCA — Soft Counterfactual Assignment (`sca.py`)
-
-Soft label assignment strategy to handle ambiguous detections.
-
-- Loss: `ops/sca_loss.py`
+- Depends on MDMB being enabled (reads `mdmb._gt_records` for relapse state)
+- **Hooks**: `start_epoch()`, `end_epoch()` called by `engine.fit()`
+- **Anchor update**: runs inside `after_optimizer_step` via `MDMBFCOS.flush_far_update(...)`, after MDMB has been refreshed
+- **Training loss**: `far.compute_loss(...)` adds a `far` entry to the FCOS loss dict
+- **Summary**: `far.summary()` → logged as `far` in `history.json`
 - **Arch support**: FCOS
-- **Config**: `modules/cfg/sca.yaml`
+- **Config**: `modules/cfg/far.yaml`
+- **Design**: see [docs/proposals/far.md](proposals/far.md)
+
+Key config fields:
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `lambda_far` | `0.1` | FAR loss scale |
+| `anchor_ema_mu` | `0.9` | anchor EMA 계수 (detected 상태 유지 시) |
+| `persistence_gamma` | `1.0` | 연속 miss streak 기반 가중 증폭 계수 |
+| `min_relapse_streak` | `1` | relapse로 판정하여 anchor를 freeze할 최소 연속 miss 수 |
+| `match_threshold` | `0.95` | GT-to-anchor IoU 매칭 임계치 |
+| `warmup_epochs` | `1` | FAR loss/anchor 갱신을 시작하기까지 무시할 초기 epoch 수 |
+| `feature_keys` | `["0","1","2","p6","p7"]` | FPN 레벨 키 (FCOS 기본) |
 
 ## Module × Architecture Compatibility
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|:---:|:---:|:---:|
-| MDMB | ✓ | ✓ | — |
+| MDMB | ✓ | — | — |
 | RECALL | ✓ | — | — |
-| CFP | — | ✓ | — |
-| MODS | ✓ | ✓ | — |
-| SCA | ✓ | — | — |
+| FAR | ✓ | — | — |

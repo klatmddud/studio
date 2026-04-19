@@ -90,6 +90,7 @@ def fit(
 
     for epoch in range(start_epoch, total_epochs):
         _call_model_hook(model, "mdmb", "start_epoch", epoch + 1)
+        _call_model_hook(model, "far", "start_epoch", epoch + 1)
         train_metrics = train_one_epoch(
             model=model,
             optimizer=optimizer,
@@ -103,7 +104,9 @@ def fit(
             total_epochs=total_epochs,
         )
         _call_model_hook(model, "mdmb", "end_epoch", epoch + 1)
+        _call_model_hook(model, "far", "end_epoch", epoch + 1)
         mdmb_summary = _get_mdmb_summary(model)
+        far_summary = _get_module_summary(model, "far")
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -111,6 +114,8 @@ def fit(
         }
         if mdmb_summary is not None:
             record["mdmb"] = mdmb_summary
+        if far_summary is not None:
+            record["far"] = far_summary
 
         should_eval = (
             val_loader is not None
@@ -589,14 +594,26 @@ def _call_after_optimizer_step(
 
 
 def _is_optional_mdmb_key(key: str) -> bool:
-    return key == "mdmb._extra_state" or key.startswith("mdmb.")
+    return (
+        key == "mdmb._extra_state"
+        or key == "far._extra_state"
+        or key.startswith("mdmb.")
+        or key.startswith("far.")
+    )
 
 
 def _get_mdmb_summary(model: torch.nn.Module) -> dict[str, Any] | None:
-    mdmb = getattr(model, "mdmb", None)
-    if mdmb is None:
+    return _get_module_summary(model, "mdmb")
+
+
+def _get_module_summary(
+    model: torch.nn.Module,
+    attribute_name: str,
+) -> dict[str, Any] | None:
+    module = getattr(model, attribute_name, None)
+    if module is None:
         return None
-    summary = getattr(mdmb, "summary", None)
+    summary = getattr(module, "summary", None)
     if not callable(summary):
         return None
     return summary()

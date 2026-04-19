@@ -7,20 +7,20 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 ### FCOS (`fcos.py` → `MDMBFCOS`)
 
 - Single-stage anchor-free detector
-- Integrates MDMB, RECALL, SCA modules (if enabled in `modules/cfg/`)
-- `after_optimizer_step()` hook: passes images+targets to MDMB for missed detection tracking
+- Integrates MDMB, RECALL, FAR modules (if enabled in `modules/cfg/`)
+- `after_optimizer_step()` hook: refreshes MDMB from post-step detections, then updates FAR anchors
 - Forward in train mode: returns `loss_dict`; in eval mode: returns predictions
 
 ### Faster R-CNN (`fasterrcnn.py`)
 
 - Two-stage region proposal detector
-- Integrates MDMB, CFP modules
+- Plain TorchVision FasterRCNN; no research modules are currently wired up
 - Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3
 
 ### DINO (`dino.py` → `DINOWrapper`)
 
 - Transformer-based detector (DEtection with INtroduced queries + Optimized)
-- No custom modules by default
+- External backend builder (see `backend.builder` YAML field); no research modules wired
 - Requires ResNet50 backbone
 
 ## Model Config Fields
