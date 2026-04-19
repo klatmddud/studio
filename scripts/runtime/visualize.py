@@ -152,16 +152,17 @@ def build_confusion_matrix(
                 torch.tensor(gt_boxes, dtype=torch.float32),
             ).numpy()  # [P, G]
 
-            for pi in range(len(pred_boxes)):
-                best_gi, best_iou = -1, iou_thresh
-                for gi in range(len(gt_boxes)):
-                    if not gt_matched[gi] and iou_mat[pi, gi] > best_iou:
+            # GT-centric: 각 GT에 대해 IoU가 가장 높은 미매칭 예측을 선택
+            for gi in range(len(gt_boxes)):
+                best_pi, best_iou = -1, iou_thresh
+                for pi in range(len(pred_boxes)):
+                    if not pred_matched[pi] and iou_mat[pi, gi] > best_iou:
                         best_iou = iou_mat[pi, gi]
-                        best_gi = gi
-                if best_gi >= 0:
-                    gt_matched[best_gi] = True
-                    pred_matched[pi] = True
-                    cm[pred_labels[pi], gt_labels[best_gi]] += 1
+                        best_pi = pi
+                if best_pi >= 0:
+                    gt_matched[gi] = True
+                    pred_matched[best_pi] = True
+                    cm[pred_labels[best_pi], gt_labels[gi]] += 1
 
         for gi, matched in enumerate(gt_matched):
             if not matched:
