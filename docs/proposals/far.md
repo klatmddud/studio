@@ -22,17 +22,32 @@ $$
 
 ## 3. Data Structures
 
-MDMB `_GTRecord` 에 다음을 추가한다.
+FAR 은 MDMB `_GTRecord` 를 수정하지 않는다. 대신 `ForgettingAwareReplay` 모듈이
+**별도의 앵커 뱅크**를 독립적으로 관리한다. 이 설계는 MDMB 체크포인트 포맷을 유지하고
+FAR 을 독립적으로 enable/disable 할 수 있게 한다.
+
+### `_AnchorRecord` (FAR 내부)
 
 ```
-anchor:        torch.Tensor | None   # shape [D], L2-normalized, cpu
-anchor_epoch:  int | None            # 앵커가 저장된 epoch
-anchor_frozen: bool                  # relapse 구간 중 동결 여부
+class _AnchorRecord:
+    class_id:           int              # COCO category ID
+    bbox:               Tensor[4]        # normalized xyxy, post-transform 좌표계, cpu
+    anchor:             Tensor[D]        # L2-normalized feature 벡터, cpu
+    last_updated_epoch: int              # 앵커가 마지막으로 갱신된 epoch
+    frozen:             bool             # relapse 구간 중 동결 여부
 ```
+
+앵커 뱅크는 `ForgettingAwareReplay._anchors: dict[image_id -> list[_AnchorRecord]]` 로 유지된다.
 
 - `anchor` 는 GT 영역에서 추출한 ROI feature 의 L2-normalized 벡터.
 - `D` 는 architecture-dependent ($D_\text{FCOS} \!=\! C_\text{FPN}$, $D_\text{RCNN} \!=\! C_\text{RoI}$).
 - 메모리: 전체 GT 수 $N_\text{GT}$, $D \!\approx\! 256$ 기준 $N_\text{GT} \!\times\! 256 \!\times\! 4\,\text{B}$ → 10k GT 기준 약 10 MB 수준.
+
+### MDMB `_GTRecord` 와의 관계
+
+FAR 은 `_GTRecord` 의 `consecutive_miss_count`, `last_detected_epoch` 를 읽어 relapse 판정에
+활용하지만, `_GTRecord` 자체에 새 필드를 추가하지 않는다.
+(`flush_far_update` 에서 읽은 relapse 상태는 `_AnchorRecord.frozen` 에 반영됨)
 
 ## 4. Anchor Maintenance
 
