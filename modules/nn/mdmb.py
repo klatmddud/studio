@@ -96,11 +96,48 @@ class MDMBObservation:
 
 
 @dataclass(slots=True)
+class _GTRecord:
+    """GT 어노테이션 하나에 대한 시간 축 miss-detection 이력.
+
+    COCO 어노테이션은 epoch 간 고정이므로 (image_id, class_id, bbox)로
+    동일 GT를 추적하며, miss/detected 여부에 상관없이 유지된다.
+    """
+
+    class_id: int
+    bbox: torch.Tensor          # normalized xyxy, shape [4]
+    consecutive_miss_count: int   # 현재 연속 miss 횟수 (detected 시 0)
+    max_consecutive_miss_count: int  # 이 GT가 기록한 최대 연속 miss 횟수
+    last_detected_epoch: int | None  # 마지막으로 detected된 epoch (없으면 None)
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "class_id": self.class_id,
+            "bbox": self.bbox.cpu().tolist(),
+            "consecutive_miss_count": self.consecutive_miss_count,
+            "max_consecutive_miss_count": self.max_consecutive_miss_count,
+            "last_detected_epoch": self.last_detected_epoch,
+        }
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, Any]) -> "_GTRecord":
+        return cls(
+            class_id=int(state["class_id"]),
+            bbox=torch.tensor(state["bbox"], dtype=torch.float32),
+            consecutive_miss_count=int(state.get("consecutive_miss_count", 0)),
+            max_consecutive_miss_count=int(state.get("max_consecutive_miss_count", 0)),
+            last_detected_epoch=state.get("last_detected_epoch"),
+        )
+
+
+@dataclass(slots=True)
 class MDMBEntry:
     image_id: str
     class_id: int
     bbox: torch.Tensor
     miss_type: str
+    consecutive_miss_count: int = 1       # 현재까지 연속 miss된 epoch 수
+    max_consecutive_miss_count: int = 1   # 이 GT의 최대 연속 miss epoch 수
+    last_detected_epoch: int | None = None  # 마지막으로 detected된 epoch
 
     def to_state(self) -> dict[str, Any]:
         return {
@@ -108,6 +145,9 @@ class MDMBEntry:
             "class_id": self.class_id,
             "bbox": self.bbox.cpu(),
             "miss_type": self.miss_type,
+            "consecutive_miss_count": self.consecutive_miss_count,
+            "max_consecutive_miss_count": self.max_consecutive_miss_count,
+            "last_detected_epoch": self.last_detected_epoch,
         }
 
     @classmethod
@@ -117,6 +157,9 @@ class MDMBEntry:
             class_id=int(state["class_id"]),
             bbox=_as_region_tensor(state["bbox"]),
             miss_type=str(state.get("miss_type", "type_a")),
+            consecutive_miss_count=int(state.get("consecutive_miss_count", 1)),
+            max_consecutive_miss_count=int(state.get("max_consecutive_miss_count", 1)),
+            last_detected_epoch=state.get("last_detected_epoch"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -125,6 +168,9 @@ class MDMBEntry:
             "class_id": self.class_id,
             "bbox": self.bbox.tolist(),
             "miss_type": self.miss_type,
+            "consecutive_miss_count": self.consecutive_miss_count,
+            "max_consecutive_miss_count": self.max_consecutive_miss_count,
+            "last_detected_epoch": self.last_detected_epoch,
         }
 
 
@@ -132,14 +178,19 @@ class MissedDetectionMemoryBank(nn.Module):
     """
     MDMB v2 bank keyed by image id.
 
-    Each image stores the current step's missed ground-truth boxes only:
-    image_id -> [MDMBEntry(class_id, normalized_bbox)].
+    Each image stores the current epoch's missed ground-truth boxes:
+    image_id -> [MDMBEntry(class_id, normalized_bbox, temporal_stats)].
+
+    Temporal tracking (_gt_records) persists miss/detect history per GT
+    across epochs, regardless of whether the GT is currently missed.
     """
 
     def __init__(self, config: MDMBConfig) -> None:
         super().__init__()
         self.config = config
         self._bank: dict[str, list[MDMBEntry]] = {}
+        self._gt_records: dict[str, list[_GTRecord]] = {}
+        self._global_max_consecutive_miss: int = 0
         self.current_epoch = 0
 
     def forward(self, features):
@@ -211,6 +262,7 @@ class MissedDetectionMemoryBank(nn.Module):
 
             if gt_boxes_tensor.numel() == 0:
                 self._bank.pop(image_key, None)
+                self._gt_records.pop(image_key, None)
                 continue
 
             pred_boxes_tensor = _as_box_tensor(pred_boxes, device=gt_boxes_tensor.device)
@@ -222,7 +274,15 @@ class MissedDetectionMemoryBank(nn.Module):
                 )
 
             normalized_gt_boxes = normalize_xyxy_boxes(gt_boxes_tensor, image_shape)
+            existing_records = self._gt_records.get(image_key, [])
+            gt_to_record = _match_gt_to_records(
+                normalized_gt_boxes, gt_labels_tensor, existing_records
+            )
+
+            new_records: list[_GTRecord] = []
             missed_entries: list[MDMBEntry] = []
+            epoch = self.current_epoch
+
             for gt_index, (gt_box, gt_label) in enumerate(
                 zip(gt_boxes_tensor, gt_labels_tensor, strict=True)
             ):
@@ -233,16 +293,52 @@ class MissedDetectionMemoryBank(nn.Module):
                     pred_labels=pred_labels_tensor,
                     theta_loc=self.config.match_threshold,
                 )
+
+                rec_idx = gt_to_record[gt_index]
+                if rec_idx is not None:
+                    prev = existing_records[rec_idx]
+                    prev_consecutive = prev.consecutive_miss_count
+                    prev_max = prev.max_consecutive_miss_count
+                    prev_last_detected = prev.last_detected_epoch
+                else:
+                    prev_consecutive = 0
+                    prev_max = 0
+                    prev_last_detected = None
+
                 if miss_type == "detected":
-                    continue
-                missed_entries.append(
-                    MDMBEntry(
-                        image_id=image_key,
+                    new_consecutive = 0
+                    new_max = prev_max
+                    new_last_detected = epoch
+                else:
+                    new_consecutive = prev_consecutive + 1
+                    new_max = max(new_consecutive, prev_max)
+                    new_last_detected = prev_last_detected
+
+                norm_bbox = normalized_gt_boxes[gt_index].cpu()
+                new_records.append(
+                    _GTRecord(
                         class_id=int(gt_label.item()),
-                        bbox=normalized_gt_boxes[gt_index].cpu(),
-                        miss_type=miss_type,
+                        bbox=norm_bbox,
+                        consecutive_miss_count=new_consecutive,
+                        max_consecutive_miss_count=new_max,
+                        last_detected_epoch=new_last_detected,
                     )
                 )
+
+                if miss_type != "detected":
+                    missed_entries.append(
+                        MDMBEntry(
+                            image_id=image_key,
+                            class_id=int(gt_label.item()),
+                            bbox=norm_bbox,
+                            miss_type=miss_type,
+                            consecutive_miss_count=new_consecutive,
+                            max_consecutive_miss_count=new_max,
+                            last_detected_epoch=new_last_detected,
+                        )
+                    )
+
+            self._gt_records[image_key] = new_records
 
             if self.config.max_per_image is not None:
                 missed_entries = missed_entries[: self.config.max_per_image]
@@ -252,6 +348,16 @@ class MissedDetectionMemoryBank(nn.Module):
             else:
                 self._bank.pop(image_key, None)
 
+        # 전체 GT 중 최대 연속 miss count 갱신 (normalized 용도)
+        self._global_max_consecutive_miss = max(
+            (
+                record.max_consecutive_miss_count
+                for records in self._gt_records.values()
+                for record in records
+            ),
+            default=0,
+        )
+
     def observe(self, *args, **kwargs) -> None:
         raise RuntimeError(
             "MDMB v2 no longer supports observation-based updates. "
@@ -260,6 +366,8 @@ class MissedDetectionMemoryBank(nn.Module):
 
     def reset(self) -> None:
         self._bank.clear()
+        self._gt_records.clear()
+        self._global_max_consecutive_miss = 0
         self.current_epoch = 0
 
     def get(self, image_id: Any) -> list[MDMBEntry]:
@@ -334,6 +442,7 @@ class MissedDetectionMemoryBank(nn.Module):
             "num_entries": num_entries,
             "num_type_a": num_type_a,
             "num_type_b": num_type_b,
+            "global_max_consecutive_miss": self._global_max_consecutive_miss,
         }
 
     def __len__(self) -> int:
@@ -347,13 +456,18 @@ class MissedDetectionMemoryBank(nn.Module):
 
     def get_extra_state(self) -> dict[str, Any]:
         return {
-            "version": 3,
+            "version": 4,
             "current_epoch": self.current_epoch,
             "config": self.config.to_dict(),
             "bank": {
                 image_id: [entry.to_state() for entry in entries]
                 for image_id, entries in self._bank.items()
             },
+            "gt_records": {
+                image_id: [r.to_state() for r in records]
+                for image_id, records in self._gt_records.items()
+            },
+            "global_max_consecutive_miss": self._global_max_consecutive_miss,
         }
 
     def set_extra_state(self, state: Mapping[str, Any] | None) -> None:
@@ -369,32 +483,96 @@ class MissedDetectionMemoryBank(nn.Module):
                 pass
         self.current_epoch = int(state.get("current_epoch", 0))
 
-        # Gracefully ignore legacy v1 checkpoints instead of failing the whole load.
-        if int(state.get("version", 0)) != 3:
+        version = int(state.get("version", 0))
+
+        # v1/v2 체크포인트는 bank 구조가 달라 호환 불가 — 빈 상태로 초기화
+        if version < 3:
             self._bank = {}
+            self._gt_records = {}
+            self._global_max_consecutive_miss = 0
             return
 
+        # bank 복원 (v3 / v4 공통)
         raw_bank = state.get("bank", {})
-        if not isinstance(raw_bank, Mapping):
-            self._bank = {}
-            return
-
         restored_bank: dict[str, list[MDMBEntry]] = {}
-        for image_id, raw_entries in raw_bank.items():
-            if not isinstance(raw_entries, Sequence):
-                continue
-            image_key = _normalize_image_id(image_id)
-            entries: list[MDMBEntry] = []
-            for raw_entry in raw_entries:
-                if not isinstance(raw_entry, Mapping):
+        if isinstance(raw_bank, Mapping):
+            for image_id, raw_entries in raw_bank.items():
+                if not isinstance(raw_entries, Sequence):
                     continue
-                entries.append(MDMBEntry.from_state(raw_entry))
-            if entries:
-                restored_bank[image_key] = entries
+                image_key = _normalize_image_id(image_id)
+                entries: list[MDMBEntry] = []
+                for raw_entry in raw_entries:
+                    if not isinstance(raw_entry, Mapping):
+                        continue
+                    entries.append(MDMBEntry.from_state(raw_entry))
+                if entries:
+                    restored_bank[image_key] = entries
         self._bank = restored_bank
+
+        # gt_records / global_max 복원 (v4+)
+        if version >= 4:
+            raw_records = state.get("gt_records", {})
+            restored_records: dict[str, list[_GTRecord]] = {}
+            if isinstance(raw_records, Mapping):
+                for image_id, raw_recs in raw_records.items():
+                    if not isinstance(raw_recs, Sequence):
+                        continue
+                    image_key = _normalize_image_id(image_id)
+                    recs: list[_GTRecord] = []
+                    for raw_rec in raw_recs:
+                        if not isinstance(raw_rec, Mapping):
+                            continue
+                        recs.append(_GTRecord.from_state(raw_rec))
+                    if recs:
+                        restored_records[image_key] = recs
+            self._gt_records = restored_records
+            self._global_max_consecutive_miss = int(
+                state.get("global_max_consecutive_miss", 0)
+            )
+        else:
+            # v3 체크포인트: gt_records 없음 → 빈 상태로 시작 (다음 update()에서 재구성)
+            self._gt_records = {}
+            self._global_max_consecutive_miss = 0
 
 
 MDMB = MissedDetectionMemoryBank
+
+
+def _match_gt_to_records(
+    normalized_gt_boxes: torch.Tensor,
+    gt_labels: torch.Tensor,
+    records: list[_GTRecord],
+    iou_thresh: float = 0.95,
+) -> list[int | None]:
+    """각 GT(행)에 대해 매칭되는 _GTRecord 인덱스를 반환한다. 매칭 없으면 None.
+
+    COCO 어노테이션은 epoch 간 고정이므로 IoU > 0.95로 동일 GT를 안전하게 식별한다.
+    class_id가 다른 record는 매칭 대상에서 제외한다.
+    """
+    num_gt = normalized_gt_boxes.shape[0]
+    if not records or num_gt == 0:
+        return [None] * num_gt
+
+    record_boxes = torch.stack([r.bbox.to(normalized_gt_boxes.device) for r in records])
+    iou_mat = box_ops.box_iou(normalized_gt_boxes, record_boxes)  # [G, R]
+
+    matched: list[int | None] = [None] * num_gt
+    record_used = [False] * len(records)
+
+    for gi in range(num_gt):
+        gt_cls = int(gt_labels[gi].item())
+        best_ri, best_iou = -1, iou_thresh
+        for ri in range(len(records)):
+            if not record_used[ri] and records[ri].class_id == gt_cls:
+                iou = float(iou_mat[gi, ri].item())
+                if iou > best_iou:
+                    best_iou = iou
+                    best_ri = ri
+        if best_ri >= 0:
+            matched[gi] = best_ri
+            record_used[best_ri] = True
+
+    return matched
 
 
 def classify_miss(
