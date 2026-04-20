@@ -15,20 +15,24 @@ from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from modules.nn import MDMBSelectiveLoss
 from modules.nn.far import ForgettingAwareReplay
-from modules.nn.mdmb import MissedDetectionMemoryBank
+from modules.nn.mce import MissConditionedEmbedding
+from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 
 class MDMBFCOS(FCOS):
     """
-    FCOS variant with MDMB-guided RECALL loss reweighting and optional FAR loss.
+    FCOS variant with MDMB-guided loss reweighting and optional FAR/MCE modules.
 
     During training the wrapper can replace the standard aggregated FCOS loss
     with a per-point loss decomposition, then reweight positives / suppress
     nearby negatives using the MDMB bank. After optimizer.step(), it runs an
     extra no-grad inference pass to refresh the MDMB state from final detections
     and (if enabled) to update the FAR anchor bank.
+
+    MCE (Miss-Conditioned class Embedding) multiplies per-point weights by a
+    per-GT factor derived from class prototype similarity and miss streak ratio.
     """
 
     def __init__(
@@ -37,12 +41,14 @@ class MDMBFCOS(FCOS):
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
+        mce: MissConditionedEmbedding | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._recall_ref = weakref.ref(recall) if recall is not None else None
         self._far_ref = weakref.ref(far) if far is not None else None
+        self._mce_ref = weakref.ref(mce) if mce is not None else None
 
     def forward(
         self,
@@ -104,15 +110,18 @@ class MDMBFCOS(FCOS):
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             mdmb = self._get_mdmb()
             recall = self._get_recall()
-            if mdmb is None or recall is None:
+            mce = self._get_mce()
+            use_weighted = mdmb is not None and (recall is not None or mce is not None)
+            if not use_weighted:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
             else:
-                losses = self._compute_recall_loss_dict(
+                losses = self._compute_mdmb_weighted_loss_dict(
                     targets=targets,
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
                     image_shapes=images.image_sizes,
+                    features=features,
                 )
 
             far = self._get_far()
@@ -151,7 +160,7 @@ class MDMBFCOS(FCOS):
             return losses, detections
         return self.eager_outputs(losses, detections)
 
-    def _compute_recall_loss_dict(
+    def _compute_mdmb_weighted_loss_dict(
         self,
         *,
         targets: list[dict[str, torch.Tensor]],
@@ -159,11 +168,13 @@ class MDMBFCOS(FCOS):
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
         image_shapes: list[tuple[int, int]],
+        features: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         mdmb = self._get_mdmb()
         recall = self._get_recall()
-        if mdmb is None or recall is None:
-            raise RuntimeError("RECALL loss requested without MDMB / RECALL modules.")
+        mce = self._get_mce()
+        if mdmb is None:
+            raise RuntimeError("MDMB weighted loss requested without MDMB module.")
 
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
@@ -188,20 +199,50 @@ class MDMBFCOS(FCOS):
                 "image_id",
                 torch.tensor(image_index, device=assignments.device),
             )
-            missed_set = mdmb.get_missed_set_with_type(
-                image_id,
-                gt_boxes,
-                gt_labels,
-                image_shape=image_shapes[image_index],
-            )
 
-            weights, valid = recall.compute_weights(
-                point_gt_indices=assignments,
-                point_boxes=point_boxes,
-                gt_boxes=gt_boxes,
-                missed_set=missed_set,
-                device=assignments.device,
-            )
+            # RECALL: per-point weights from miss type
+            if recall is not None:
+                missed_set = mdmb.get_missed_set_with_type(
+                    image_id,
+                    gt_boxes,
+                    gt_labels,
+                    image_shape=image_shapes[image_index],
+                )
+                weights, valid = recall.compute_weights(
+                    point_gt_indices=assignments,
+                    point_boxes=point_boxes,
+                    gt_boxes=gt_boxes,
+                    missed_set=missed_set,
+                    device=assignments.device,
+                )
+            else:
+                num_points = int(assignments.numel())
+                weights = torch.ones(num_points, dtype=torch.float32, device=assignments.device)
+                valid = torch.ones(num_points, dtype=torch.bool, device=assignments.device)
+
+            # MCE: per-GT weights from prototype similarity × streak ratio
+            if mce is not None:
+                image_key = (
+                    str(image_id.item())
+                    if isinstance(image_id, torch.Tensor)
+                    else str(image_id)
+                )
+                gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shapes[image_index])
+                pooled = mce.pool_features(features, [gt_boxes], [image_shapes[image_index]])
+                mce_gt_weights = mce.compute_gt_weights(
+                    gt_labels=gt_labels,
+                    gt_boxes_norm=gt_boxes_norm,
+                    pooled_features=pooled[0],
+                    mdmb=mdmb,
+                    image_key=image_key,
+                )
+                pos_indices = assignments.clamp(min=0)
+                mce_point_weights = mce_gt_weights[pos_indices].to(
+                    device=assignments.device, dtype=weights.dtype
+                )
+                pos_mask_bool = assignments >= 0
+                weights = weights.clone()
+                weights[pos_mask_bool] = weights[pos_mask_bool] * mce_point_weights[pos_mask_bool]
 
             pos_mask = assignments >= 0
             total_pos += int(pos_mask.sum().item())
@@ -524,6 +565,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._far_ref()
 
+    def _get_mce(self) -> MissConditionedEmbedding | None:
+        if self._mce_ref is None:
+            return None
+        return self._mce_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -540,12 +586,14 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
+        mce: MissConditionedEmbedding | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.mdmb = mdmb
         self.recall = recall
         self.far = far
+        self.mce = mce
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -570,6 +618,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmb=mdmb,
             recall=recall,
             far=far,
+            mce=mce,
             **kwargs,
         )
 
@@ -597,6 +646,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmb: MissedDetectionMemoryBank | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
+        mce: MissConditionedEmbedding | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -607,5 +657,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmb=mdmb,
             recall=recall,
             far=far,
+            mce=mce,
             **kwargs,
         )

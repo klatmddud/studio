@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from modules.nn import (
     build_far_from_yaml,
+    build_mce_from_yaml,
     build_mdmb_from_yaml,
     build_recall_from_yaml,
 )
@@ -31,6 +32,7 @@ MODEL_BUILDERS = {
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FAR_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "far.yaml"
+MCE_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mce.yaml"
 MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
 RECALL_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "recall.yaml"
 
@@ -54,11 +56,13 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
+    num_classes = int(model_config.get("num_classes", 91))
     mdmb = _build_mdmb(normalized_arch)
     recall = _build_recall(normalized_arch)
     far = _build_far(normalized_arch)
+    mce = _build_mce(normalized_arch, num_classes=num_classes)
     if normalized_arch == "fcos":
-        return builder(model_config, mdmb=mdmb, recall=recall, far=far)
+        return builder(model_config, mdmb=mdmb, recall=recall, far=far, mce=mce)
     return builder(model_config, mdmb=mdmb)
 
 
@@ -100,3 +104,11 @@ def _build_far(arch: str) -> nn.Module | None:
     if not FAR_CONFIG_PATH.is_file():
         return None
     return build_far_from_yaml(FAR_CONFIG_PATH, arch=arch)
+
+
+def _build_mce(arch: str, *, num_classes: int) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    if not MCE_CONFIG_PATH.is_file():
+        return None
+    return build_mce_from_yaml(MCE_CONFIG_PATH, arch=arch, num_classes=num_classes)

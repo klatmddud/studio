@@ -1,3 +1,11 @@
+from .mce import (
+    MCE,
+    MCEConfig,
+    MissConditionedEmbedding,
+    build_mce_from_config,
+    build_mce_from_yaml,
+    load_mce_config,
+)
 from .far import (
     FAR,
     FARConfig,
@@ -30,6 +38,12 @@ from .recall import (
 )
 
 __all__ = [
+    "MCE",
+    "MCEConfig",
+    "MissConditionedEmbedding",
+    "build_mce_from_config",
+    "build_mce_from_yaml",
+    "load_mce_config",
     "FAR",
     "FARConfig",
     "ForgettingAwareReplay",

@@ -1,0 +1,8 @@
+enabled: false
+embed_dim: 256
+lambda_mce: 1.0
+min_miss_streak: 1
+match_threshold: 0.95
+feature_keys: ["0", "1", "2", "p6", "p7"]
+roi_output_size: 7
+roi_sampling_ratio: 2

@@ -109,6 +109,43 @@ Key config fields:
 | `warmup_epochs` | `1` | FAR loss/anchor 갱신을 시작하기까지 무시할 초기 epoch 수 |
 | `feature_keys` | `["0","1","2","p6","p7"]` | FPN 레벨 키 (FCOS 기본) |
 
+### MCE — Miss-Conditioned class Embedding (`mce.py`)
+
+클래스별 learnable prototype embedding을 사용하여, 연속으로 미검출된 GT의 detection loss를 동적으로 증폭한다.
+
+- Depends on MDMB being enabled (reads `mdmb._gt_records` for streak state)
+- **Training loss**: FCOS per-point loss에 per-GT multiplier를 곱해 적용 (RECALL과 결합 가능)
+- **Inference**: 영향 없음 — feature를 변환하지 않고 loss weight만 조정
+- **Arch support**: FCOS
+- **Config**: `modules/cfg/mce.yaml`
+
+#### 동작 방식
+
+GT 하나에 대한 loss multiplier:
+
+```
+alpha       = sigmoid( dot(e_c, f_gt) / sqrt(D) )
+streak_ratio = n / w      # n=연속 miss 횟수, w=전체 최대 연속 miss 횟수
+multiplier  = 1 + lambda_mce * (1 - alpha) * streak_ratio
+```
+
+- `e_c`: class c의 learnable prototype embedding (`nn.Embedding`)
+- `f_gt`: GT bbox 위치의 ROI-pooled neck feature (L2 normalized)
+- `alpha`가 낮을수록 (현재 feature가 prototype과 멀수록) multiplier가 커짐
+- `streak_ratio`가 높을수록 (오래 미검출될수록) multiplier가 커짐
+- `min_miss_streak` 미만인 GT는 weight = 1.0 (비활성)
+
+Key config fields:
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `embed_dim` | `256` | class embedding 차원 (neck out_channels와 일치) |
+| `lambda_mce` | `1.0` | multiplier 최대 증폭 스케일 |
+| `min_miss_streak` | `1` | multiplier 적용 최소 연속 miss 횟수 |
+| `match_threshold` | `0.95` | GT-to-record IoU 매칭 임계치 |
+| `feature_keys` | `["0","1","2","p6","p7"]` | FPN 레벨 키 (FCOS 기본) |
+| `roi_output_size` | `7` | ROI pooling spatial 크기 |
+
 ## Module × Architecture Compatibility
 
 | Module | FCOS | Faster R-CNN | DINO |
@@ -116,3 +153,4 @@ Key config fields:
 | MDMB | ✓ | — | — |
 | RECALL | ✓ | — | — |
 | FAR | ✓ | — | — |
+| MCE | ✓ | — | — |
