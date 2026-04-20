@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 lambda_far: 0.1
 anchor_ema_mu: 0.9
 persistence_gamma: 1.0

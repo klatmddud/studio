@@ -1,7 +1,7 @@
 enabled: true
 match_threshold: 0.5
 max_per_image: null
-warmup_epochs: 5
+warmup_epochs: 10
 
 models:
   fcos: {}
