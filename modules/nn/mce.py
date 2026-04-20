@@ -143,34 +143,38 @@ class MissConditionedEmbedding(nn.Module):
         pooled_features: torch.Tensor,
         mdmb: MissedDetectionMemoryBank,
         image_key: str,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute per-GT loss weight multipliers for one image.
+        Compute per-GT loss weight multipliers for one image, split by loss type.
 
         Args:
-            gt_labels:      [N_gt] int64 class IDs.
-            gt_boxes_norm:  [N_gt, 4] normalized xyxy GT boxes.
-            pooled_features:[N_gt, D] ROI-pooled neck features per GT.
-            mdmb:           MDMB instance to read _gt_records from.
-            image_key:      Normalized image ID string.
+            gt_labels:       [N_gt] int64 class IDs.
+            gt_boxes_norm:   [N_gt, 4] normalized xyxy GT boxes.
+            pooled_features: [N_gt, D] ROI-pooled neck features per GT.
+            mdmb:            MDMB instance to read _gt_records and _bank from.
+            image_key:       Normalized image ID string.
 
         Returns:
-            Tensor [N_gt] of float32 multipliers >= 1.0.
+            (cls_weights, reg_weights): each [N_gt] float32, >= 1.0.
+            - type_a miss (localization failure): reg_weights amplified, cls_weights=1.
+            - type_b miss (class failure):        cls_weights amplified, reg_weights=1.
+            - miss_type unknown:                  both amplified.
         """
         n_gt = int(gt_labels.shape[0])
         device = pooled_features.device
-        weights = torch.ones(n_gt, dtype=torch.float32, device=device)
+        cls_weights = torch.ones(n_gt, dtype=torch.float32, device=device)
+        reg_weights = torch.ones(n_gt, dtype=torch.float32, device=device)
 
         global_max = int(getattr(mdmb, "_global_max_consecutive_miss", 0))
         if global_max <= 0:
-            return weights
+            return cls_weights, reg_weights
 
         records_map = getattr(mdmb, "_gt_records", None)
         if not isinstance(records_map, Mapping):
-            return weights
+            return cls_weights, reg_weights
         records: list[_GTRecord] = list(records_map.get(image_key, ()))
         if not records:
-            return weights
+            return cls_weights, reg_weights
 
         matches = _match_boxes_to_records(
             gt_boxes_norm=gt_boxes_norm.cpu(),
@@ -178,6 +182,19 @@ class MissConditionedEmbedding(nn.Module):
             records=records,
             iou_thresh=self.config.match_threshold,
         )
+
+        # Match to bank entries to retrieve miss_type
+        bank_map = getattr(mdmb, "_bank", None)
+        bank_entries = list(bank_map.get(image_key, ())) if isinstance(bank_map, Mapping) else []
+        if bank_entries:
+            bank_matches = _match_boxes_to_records(
+                gt_boxes_norm=gt_boxes_norm.cpu(),
+                gt_labels=gt_labels.cpu(),
+                records=bank_entries,
+                iou_thresh=self.config.match_threshold,
+            )
+        else:
+            bank_matches: list[int | None] = [None] * n_gt
 
         scale = math.sqrt(float(self.config.embed_dim))
         for i in range(n_gt):
@@ -194,13 +211,25 @@ class MissConditionedEmbedding(nn.Module):
             if class_id >= self.num_classes:
                 continue
 
-            e_c = self.embeddings.weight[class_id]                    # [D]
-            f_gt = F.normalize(pooled_features[i], dim=-1, eps=1e-6)  # [D]
+            e_c = self.embeddings.weight[class_id]
+            f_gt = F.normalize(pooled_features[i], dim=-1, eps=1e-6)
             alpha = torch.sigmoid(torch.dot(e_c, f_gt) / scale)
+            amp = 1.0 + self.config.lambda_mce * (1.0 - alpha) * streak_ratio
 
-            weights[i] = 1.0 + self.config.lambda_mce * (1.0 - alpha) * streak_ratio
+            miss_type: str | None = None
+            bank_idx = bank_matches[i]
+            if bank_idx is not None:
+                miss_type = getattr(bank_entries[bank_idx], "miss_type", None)
 
-        return weights
+            if miss_type == "type_a":
+                reg_weights[i] = amp
+            elif miss_type == "type_b":
+                cls_weights[i] = amp
+            else:
+                cls_weights[i] = amp
+                reg_weights[i] = amp
+
+        return cls_weights, reg_weights
 
     def pool_features(
         self,

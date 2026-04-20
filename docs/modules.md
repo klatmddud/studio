@@ -124,16 +124,25 @@ Key config fields:
 GT 하나에 대한 loss multiplier:
 
 ```
-alpha       = sigmoid( dot(e_c, f_gt) / sqrt(D) )
+alpha        = sigmoid( dot(e_c, f_gt) / sqrt(D) )
 streak_ratio = n / w      # n=연속 miss 횟수, w=전체 최대 연속 miss 횟수
-multiplier  = 1 + lambda_mce * (1 - alpha) * streak_ratio
+amp          = 1 + lambda_mce * (1 - alpha) * streak_ratio
 ```
+
+miss_type에 따라 증폭 대상 loss가 달라진다:
+
+| miss_type | cls loss weight | reg+ctr loss weight |
+|---|:---:|:---:|
+| `type_a` (localization miss, ~92%) | 1.0 | `amp` |
+| `type_b` (classification miss, ~8%) | `amp` | 1.0 |
+| 알 수 없음 (bank에 없는 GT) | `amp` | `amp` |
 
 - `e_c`: class c의 learnable prototype embedding (`nn.Embedding`)
 - `f_gt`: GT bbox 위치의 ROI-pooled neck feature (L2 normalized)
 - `alpha`가 낮을수록 (현재 feature가 prototype과 멀수록) multiplier가 커짐
 - `streak_ratio`가 높을수록 (오래 미검출될수록) multiplier가 커짐
 - `min_miss_streak` 미만인 GT는 weight = 1.0 (비활성)
+- miss_type은 `mdmb._bank` (현재 epoch `MDMBEntry`)에서 조회; `_gt_records`는 streak 정보에만 사용
 
 Key config fields:
 

@@ -220,7 +220,7 @@ class MDMBFCOS(FCOS):
                 weights = torch.ones(num_points, dtype=torch.float32, device=assignments.device)
                 valid = torch.ones(num_points, dtype=torch.bool, device=assignments.device)
 
-            # MCE: per-GT weights from prototype similarity × streak ratio
+            # MCE: per-GT weights split by miss_type (type_a→reg, type_b→cls)
             if mce is not None:
                 image_key = (
                     str(image_id.item())
@@ -229,7 +229,7 @@ class MDMBFCOS(FCOS):
                 )
                 gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shapes[image_index])
                 pooled = mce.pool_features(features, [gt_boxes], [image_shapes[image_index]])
-                mce_gt_weights = mce.compute_gt_weights(
+                mce_cls_gt, mce_reg_gt = mce.compute_gt_weights(
                     gt_labels=gt_labels,
                     gt_boxes_norm=gt_boxes_norm,
                     pooled_features=pooled[0],
@@ -237,24 +237,28 @@ class MDMBFCOS(FCOS):
                     image_key=image_key,
                 )
                 pos_indices = assignments.clamp(min=0)
-                mce_point_weights = mce_gt_weights[pos_indices].to(
-                    device=assignments.device, dtype=weights.dtype
-                )
                 pos_mask_bool = assignments >= 0
-                weights = weights.clone()
-                weights[pos_mask_bool] = weights[pos_mask_bool] * mce_point_weights[pos_mask_bool]
+                mce_cls_pt = mce_cls_gt[pos_indices].to(device=assignments.device, dtype=weights.dtype)
+                mce_reg_pt = mce_reg_gt[pos_indices].to(device=assignments.device, dtype=weights.dtype)
+                cls_weights = weights.clone()
+                reg_weights = weights.clone()
+                cls_weights[pos_mask_bool] = cls_weights[pos_mask_bool] * mce_cls_pt[pos_mask_bool]
+                reg_weights[pos_mask_bool] = reg_weights[pos_mask_bool] * mce_reg_pt[pos_mask_bool]
+            else:
+                cls_weights = weights
+                reg_weights = weights
 
             pos_mask = assignments >= 0
             total_pos += int(pos_mask.sum().item())
 
-            weights = weights.to(dtype=raw["cls_losses"].dtype)
+            cls_weights = cls_weights.to(dtype=raw["cls_losses"].dtype)
+            reg_weights = reg_weights.to(dtype=raw["cls_losses"].dtype)
             valid_float = valid.to(dtype=raw["cls_losses"].dtype)
 
-            cls_sum = cls_sum + (raw["cls_losses"] * weights * valid_float).sum()
+            cls_sum = cls_sum + (raw["cls_losses"] * cls_weights * valid_float).sum()
             if bool(pos_mask.any().item()):
-                pos_weights = weights[pos_mask]
-                reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * pos_weights).sum()
-                ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * pos_weights).sum()
+                reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * reg_weights[pos_mask]).sum()
+                ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * reg_weights[pos_mask]).sum()
 
         normalizer = cls_sum.new_tensor(float(max(total_pos, 1)))
         return {
