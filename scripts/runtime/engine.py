@@ -90,7 +90,9 @@ def fit(
 
     for epoch in range(start_epoch, total_epochs):
         _call_model_hook(model, "mdmb", "start_epoch", epoch + 1)
+        _call_model_hook(model, "mdmbpp", "start_epoch", epoch + 1)
         _call_model_hook(model, "far", "start_epoch", epoch + 1)
+        _refresh_hard_replay(train_loader, model, epoch + 1)
         train_metrics = train_one_epoch(
             model=model,
             optimizer=optimizer,
@@ -104,9 +106,12 @@ def fit(
             total_epochs=total_epochs,
         )
         _call_model_hook(model, "mdmb", "end_epoch", epoch + 1)
+        _call_model_hook(model, "mdmbpp", "end_epoch", epoch + 1)
         _call_model_hook(model, "far", "end_epoch", epoch + 1)
         mdmb_summary = _get_mdmb_summary(model)
+        mdmbpp_summary = _get_module_summary(model, "mdmbpp")
         far_summary = _get_module_summary(model, "far")
+        hard_replay_summary = _get_hard_replay_summary(train_loader)
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -114,8 +119,12 @@ def fit(
         }
         if mdmb_summary is not None:
             record["mdmb"] = mdmb_summary
+        if mdmbpp_summary is not None:
+            record["mdmbpp"] = mdmbpp_summary
         if far_summary is not None:
             record["far"] = far_summary
+        if hard_replay_summary is not None:
+            record["hard_replay"] = hard_replay_summary
 
         should_eval = (
             val_loader is not None
@@ -505,6 +514,18 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         parts.append(f"mdmb_entries={int(mdmb_summary.get('num_entries', 0))}")
         parts.append(f"mdmb_images={int(mdmb_summary.get('num_images', 0))}")
 
+    mdmbpp_summary = record.get("mdmbpp")
+    if isinstance(mdmbpp_summary, dict):
+        parts.append(f"mdmbpp_entries={int(mdmbpp_summary.get('num_entries', 0))}")
+        parts.append(f"mdmbpp_mean_severity={float(mdmbpp_summary.get('mean_severity', 0.0)):.3f}")
+
+    hard_replay_summary = record.get("hard_replay")
+    if isinstance(hard_replay_summary, dict):
+        parts.append(f"replay_images={int(hard_replay_summary.get('replay_num_images', 0))}")
+        parts.append(
+            f"replay_ratio={float(hard_replay_summary.get('replay_ratio_effective', 0.0)):.3f}"
+        )
+
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -596,8 +617,10 @@ def _call_after_optimizer_step(
 def _is_optional_mdmb_key(key: str) -> bool:
     return (
         key == "mdmb._extra_state"
+        or key == "mdmbpp._extra_state"
         or key == "far._extra_state"
         or key.startswith("mdmb.")
+        or key.startswith("mdmbpp.")
         or key.startswith("far.")
     )
 
@@ -614,6 +637,30 @@ def _get_module_summary(
     if module is None:
         return None
     summary = getattr(module, "summary", None)
+    if not callable(summary):
+        return None
+    return summary()
+
+
+def _refresh_hard_replay(
+    train_loader,
+    model: torch.nn.Module,
+    epoch: int,
+) -> None:
+    controller = getattr(train_loader, "hard_replay", None)
+    if controller is None:
+        return
+    start_epoch = getattr(controller, "start_epoch", None)
+    if not callable(start_epoch):
+        return
+    start_epoch(mdmbpp=getattr(model, "mdmbpp", None), epoch=epoch)
+
+
+def _get_hard_replay_summary(train_loader) -> dict[str, Any] | None:
+    controller = getattr(train_loader, "hard_replay", None)
+    if controller is None:
+        return None
+    summary = getattr(controller, "summary", None)
     if not callable(summary):
         return None
     return summary()

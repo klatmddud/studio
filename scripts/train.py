@@ -60,7 +60,7 @@ def main() -> None:
         runtime_config=runtime_config,
     )
     device = resolve_device(runtime_config["device"])
-    train_loader, val_loader = build_train_dataloaders(runtime_config)
+    train_loader, val_loader = build_train_dataloaders(runtime_config, arch=arch)
 
     print(f"Starting training: arch={arch} device={device.type}")
     print(f"train_config={runtime_config_path}")

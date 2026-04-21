@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 match_threshold: 0.5
 max_per_image: null
 warmup_epochs: 10

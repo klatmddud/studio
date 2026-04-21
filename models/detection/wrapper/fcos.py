@@ -13,7 +13,7 @@ from torchvision.ops import boxes as box_ops
 from torchvision.ops import sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
-from modules.nn import MDMBSelectiveLoss
+from modules.nn import CanonicalCandidate, MDMBPlus, MDMBSelectiveLoss, PerImageCandidateSummary
 from modules.nn.far import ForgettingAwareReplay
 from modules.nn.mce import MissConditionedEmbedding
 from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
@@ -39,6 +39,7 @@ class MDMBFCOS(FCOS):
         self,
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
+        mdmbpp: MDMBPlus | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
@@ -46,6 +47,7 @@ class MDMBFCOS(FCOS):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
+        self._mdmbpp_ref = weakref.ref(mdmbpp) if mdmbpp is not None else None
         self._recall_ref = weakref.ref(recall) if recall is not None else None
         self._far_ref = weakref.ref(far) if far is not None else None
         self._mce_ref = weakref.ref(mce) if mce is not None else None
@@ -460,6 +462,454 @@ class MDMBFCOS(FCOS):
         return matched_idxs
 
     @torch.no_grad()
+    def _run_post_step_inference(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+    ) -> dict[str, object]:
+        original_image_sizes = [tuple(int(dim) for dim in image.shape[-2:]) for image in images]
+        cloned_targets = (
+            None
+            if targets is None
+            else [{key: value for key, value in target.items()} for target in targets]
+        )
+        transformed_images, transformed_targets = self.transform(images, cloned_targets)
+        features = self.backbone(transformed_images.tensors)
+        if isinstance(features, torch.Tensor):
+            features = OrderedDict([("0", features)])
+
+        feature_list = list(features.values())
+        head_outputs = self.head(feature_list)
+        anchors = self.anchor_generator(transformed_images, feature_list)
+        num_anchors_per_level = [feature.size(2) * feature.size(3) for feature in feature_list]
+
+        split_head_outputs: dict[str, list[torch.Tensor]] = {}
+        for key in head_outputs:
+            split_head_outputs[key] = list(head_outputs[key].split(num_anchors_per_level, dim=1))
+        split_anchors = [list(anchor.split(num_anchors_per_level)) for anchor in anchors]
+
+        detections = self.postprocess_detections(
+            split_head_outputs,
+            split_anchors,
+            transformed_images.image_sizes,
+        )
+        detections = self.transform.postprocess(
+            detections,
+            transformed_images.image_sizes,
+            original_image_sizes,
+        )
+
+        return {
+            "detections": detections,
+            "features": features,
+            "split_head_outputs": split_head_outputs,
+            "split_anchors": split_anchors,
+            "transformed_targets": transformed_targets,
+            "transformed_image_sizes": transformed_images.image_sizes,
+        }
+
+    @torch.no_grad()
+    def flush_post_step_updates(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int | None = None,
+    ) -> None:
+        mdmb = self._get_mdmb()
+        mdmbpp = self._get_mdmbpp()
+        far = self._get_far()
+        if not targets:
+            return
+
+        should_mdmb = mdmb is not None and mdmb.should_update(epoch=epoch)
+        should_mdmbpp = mdmbpp is not None and mdmbpp.should_update(epoch=epoch)
+        should_far = far is not None and mdmb is not None and far.should_apply(epoch=epoch)
+        if not (should_mdmb or should_mdmbpp or should_far):
+            return
+
+        image_ids = [
+            target.get("image_id", torch.tensor(index, device=images[index].device))
+            for index, target in enumerate(targets)
+        ]
+        gt_boxes_list = [target["boxes"] for target in targets]
+        gt_labels_list = [target["labels"] for target in targets]
+        image_shapes = [tuple(int(dim) for dim in image.shape[-2:]) for image in images]
+
+        was_training = self.training
+        try:
+            self.eval()
+            post_step = self._run_post_step_inference(images, targets)
+        finally:
+            if was_training:
+                self.train()
+
+        detections = post_step["detections"]
+        pred_boxes_list = [
+            detection["boxes"] if "boxes" in detection else image.new_zeros((0, 4))
+            for detection, image in zip(detections, images, strict=True)
+        ]
+        pred_labels_list = [
+            detection["labels"] if "labels" in detection else image.new_zeros((0,), dtype=torch.int64)
+            for detection, image in zip(detections, images, strict=True)
+        ]
+        pred_scores_list = [
+            detection["scores"] if "scores" in detection else image.new_zeros((0,), dtype=torch.float32)
+            for detection, image in zip(detections, images, strict=True)
+        ]
+
+        if should_mdmb:
+            mdmb.update(
+                image_ids=image_ids,
+                pred_boxes_list=pred_boxes_list,
+                pred_labels_list=pred_labels_list,
+                gt_boxes_list=gt_boxes_list,
+                gt_labels_list=gt_labels_list,
+                image_shapes=image_shapes,
+                epoch=epoch,
+            )
+
+        transformed_targets = post_step["transformed_targets"]
+        transformed_image_sizes = post_step["transformed_image_sizes"]
+        if should_mdmbpp and isinstance(transformed_targets, list):
+            candidate_summary_list = self._collect_mdmbpp_candidate_summaries(
+                split_head_outputs=post_step["split_head_outputs"],
+                split_anchors=post_step["split_anchors"],
+                image_shapes=transformed_image_sizes,
+                targets=transformed_targets,
+            )
+            mdmbpp.update(
+                image_ids=image_ids,
+                final_boxes_list=pred_boxes_list,
+                final_labels_list=pred_labels_list,
+                final_scores_list=pred_scores_list,
+                gt_boxes_list=gt_boxes_list,
+                gt_labels_list=gt_labels_list,
+                image_shapes=image_shapes,
+                candidate_summary_list=candidate_summary_list,
+                epoch=epoch,
+            )
+
+        if should_far and isinstance(transformed_targets, list):
+            far.update_anchors(
+                image_ids=image_ids,
+                gt_boxes_list=[target["boxes"] for target in transformed_targets],
+                gt_labels_list=[target["labels"] for target in transformed_targets],
+                features=post_step["features"],
+                image_shapes=transformed_image_sizes,
+                mdmb=mdmb,
+                epoch=epoch,
+            )
+
+    def _collect_mdmbpp_candidate_summaries(
+        self,
+        *,
+        split_head_outputs: dict[str, list[torch.Tensor]],
+        split_anchors: list[list[torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+        targets: list[dict[str, torch.Tensor]],
+    ) -> list[PerImageCandidateSummary]:
+        summaries: list[PerImageCandidateSummary] = []
+        cls_levels = split_head_outputs["cls_logits"]
+        reg_levels = split_head_outputs["bbox_regression"]
+        ctr_levels = split_head_outputs["bbox_ctrness"]
+
+        for image_index, target in enumerate(targets):
+            image_id = target.get("image_id", torch.tensor(image_index, device=target["boxes"].device))
+            gt_boxes = target["boxes"]
+            gt_labels = target["labels"].to(dtype=torch.int64)
+            if gt_boxes.numel() == 0:
+                summaries.append(
+                    PerImageCandidateSummary(
+                        image_id=self._stringify_image_id(image_id),
+                        candidates_by_gt_index={},
+                    )
+                )
+                continue
+
+            image_shape = image_shapes[image_index]
+            gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shape).to(device=gt_boxes.device)
+            candidates_by_gt_index = {gt_index: [] for gt_index in range(gt_boxes.shape[0])}
+            seen_by_gt = {gt_index: set() for gt_index in range(gt_boxes.shape[0])}
+
+            level_states: list[dict[str, object]] = []
+            selected_records: list[dict[str, object]] = []
+
+            for level_index, (cls_batch, reg_batch, ctr_batch) in enumerate(
+                zip(cls_levels, reg_levels, ctr_levels, strict=True)
+            ):
+                cls_logits = cls_batch[image_index]
+                box_regression = reg_batch[image_index]
+                ctrness = ctr_batch[image_index].flatten()
+                anchors_per_level = split_anchors[image_index][level_index]
+                boxes_per_level = self._decode_boxes(
+                    box_regression=box_regression,
+                    anchors=anchors_per_level,
+                )
+                boxes_per_level = box_ops.clip_boxes_to_image(boxes_per_level, image_shape)
+                boxes_norm = normalize_xyxy_boxes(boxes_per_level, image_shape).to(device=gt_boxes.device)
+                num_classes = int(cls_logits.shape[-1])
+                class_scores = torch.sqrt(
+                    torch.sigmoid(cls_logits) * torch.sigmoid(ctrness).unsqueeze(-1)
+                )
+                pred_scores, pred_labels = class_scores.max(dim=1)
+                iou_matrix = box_ops.box_iou(gt_boxes_norm, boxes_norm)
+
+                flat_scores = class_scores.flatten()
+                selected_flat = flat_scores.new_zeros((0,), dtype=torch.long)
+                selected_rank: dict[int, int] = {}
+                if flat_scores.numel() > 0:
+                    keep_mask = flat_scores > float(self.score_thresh)
+                    if bool(keep_mask.any().item()):
+                        kept_flat = torch.where(keep_mask)[0]
+                        kept_scores = flat_scores[keep_mask]
+                        num_topk = min(int(kept_flat.numel()), int(self.topk_candidates))
+                        top_scores, top_order = kept_scores.topk(num_topk)
+                        selected_flat = kept_flat[top_order]
+                        for rank, flat_index in enumerate(selected_flat.tolist()):
+                            selected_rank[int(flat_index)] = rank
+                        selected_anchor = torch.div(selected_flat, num_classes, rounding_mode="floor")
+                        selected_labels = torch.remainder(selected_flat, num_classes)
+                        for flat_index, anchor_index, label, score in zip(
+                            selected_flat.tolist(),
+                            selected_anchor.tolist(),
+                            selected_labels.tolist(),
+                            top_scores.tolist(),
+                            strict=True,
+                        ):
+                            selected_records.append(
+                                {
+                                    "level_index": level_index,
+                                    "flat_index": int(flat_index),
+                                    "anchor_index": int(anchor_index),
+                                    "label": int(label),
+                                    "score": float(score),
+                                    "box": boxes_norm[int(anchor_index)],
+                                    "survived_nms": False,
+                                }
+                            )
+
+                level_states.append(
+                    {
+                        "level_index": level_index,
+                        "level_name": f"p{level_index + 3}",
+                        "boxes_norm": boxes_norm,
+                        "class_scores": class_scores,
+                        "pred_scores": pred_scores,
+                        "pred_labels": pred_labels,
+                        "selected_flat": selected_flat,
+                        "selected_flat_set": set(int(value) for value in selected_flat.tolist()),
+                        "selected_rank": selected_rank,
+                        "iou_matrix": iou_matrix,
+                        "num_classes": num_classes,
+                    }
+                )
+
+            nms_survival: dict[tuple[int, int], bool] = {}
+            if selected_records:
+                selected_boxes = torch.stack([record["box"] for record in selected_records], dim=0)
+                selected_scores = torch.tensor(
+                    [record["score"] for record in selected_records],
+                    dtype=torch.float32,
+                    device=selected_boxes.device,
+                )
+                selected_labels = torch.tensor(
+                    [record["label"] for record in selected_records],
+                    dtype=torch.int64,
+                    device=selected_boxes.device,
+                )
+                keep = box_ops.batched_nms(selected_boxes, selected_scores, selected_labels, self.nms_thresh)
+                keep = keep[: self.detections_per_img]
+                keep_indices = {int(index.item()) for index in keep}
+                for selected_index, record in enumerate(selected_records):
+                    survived = selected_index in keep_indices
+                    record["survived_nms"] = survived
+                    nms_survival[(record["level_index"], record["flat_index"])] = survived
+
+            for gt_index in range(gt_boxes.shape[0]):
+                gt_label = int(gt_labels[gt_index].item())
+                for level_state in level_states:
+                    for candidate in self._build_mdmbpp_candidates_for_gt(
+                        level_state=level_state,
+                        gt_index=gt_index,
+                        gt_label=gt_label,
+                        nms_survival=nms_survival,
+                    ):
+                        self._append_unique_mdmbpp_candidate(
+                            candidates_by_gt_index[gt_index],
+                            seen_by_gt[gt_index],
+                            candidate,
+                        )
+
+            summaries.append(
+                PerImageCandidateSummary(
+                    image_id=self._stringify_image_id(image_id),
+                    candidates_by_gt_index=candidates_by_gt_index,
+                )
+            )
+
+        return summaries
+
+    def _build_mdmbpp_candidates_for_gt(
+        self,
+        *,
+        level_state: dict[str, object],
+        gt_index: int,
+        gt_label: int,
+        nms_survival: dict[tuple[int, int], bool],
+    ) -> list[CanonicalCandidate]:
+        boxes_norm = level_state["boxes_norm"]
+        if boxes_norm.shape[0] == 0:
+            return []
+
+        ious = level_state["iou_matrix"][gt_index]
+        num_classes = int(level_state["num_classes"])
+        level_index = int(level_state["level_index"])
+        level_name = str(level_state["level_name"])
+        pred_labels = level_state["pred_labels"]
+        pred_scores = level_state["pred_scores"]
+        class_scores = level_state["class_scores"]
+        selected_flat = level_state["selected_flat"]
+        selected_flat_set = level_state["selected_flat_set"]
+        selected_rank = level_state["selected_rank"]
+
+        candidates: list[CanonicalCandidate] = []
+
+        best_anchor = int(ious.argmax().item())
+        best_label = int(pred_labels[best_anchor].item())
+        best_flat = best_anchor * num_classes + best_label
+        candidates.append(
+            self._make_mdmbpp_candidate(
+                level_index=level_index,
+                level_name=level_name,
+                flat_index=best_flat,
+                anchor_index=best_anchor,
+                label=best_label,
+                score=float(pred_scores[best_anchor].item()),
+                iou_to_gt=float(ious[best_anchor].item()),
+                box=boxes_norm[best_anchor],
+                selected_flat_set=selected_flat_set,
+                selected_rank=selected_rank,
+                nms_survival=nms_survival,
+            )
+        )
+
+        if 0 <= gt_label < num_classes:
+            gt_scores = class_scores[:, gt_label]
+            score_mask = gt_scores > float(self.score_thresh)
+            if bool(score_mask.any().item()):
+                score_indices = torch.nonzero(score_mask, as_tuple=False).flatten()
+                threshold_anchor = int(score_indices[ious[score_indices].argmax()].item())
+                threshold_flat = threshold_anchor * num_classes + gt_label
+                candidates.append(
+                    self._make_mdmbpp_candidate(
+                        level_index=level_index,
+                        level_name=level_name,
+                        flat_index=threshold_flat,
+                        anchor_index=threshold_anchor,
+                        label=gt_label,
+                        score=float(gt_scores[threshold_anchor].item()),
+                        iou_to_gt=float(ious[threshold_anchor].item()),
+                        box=boxes_norm[threshold_anchor],
+                        selected_flat_set=selected_flat_set,
+                        selected_rank=selected_rank,
+                        nms_survival=nms_survival,
+                    )
+                )
+
+            if selected_flat.numel() > 0:
+                selected_gt_mask = torch.remainder(selected_flat, num_classes) == gt_label
+                if bool(selected_gt_mask.any().item()):
+                    selected_gt_flat = selected_flat[selected_gt_mask]
+                    selected_gt_anchor = torch.div(
+                        selected_gt_flat,
+                        num_classes,
+                        rounding_mode="floor",
+                    )
+                    best_selected_pos = int(ious[selected_gt_anchor].argmax().item())
+                    best_selected_anchor = int(selected_gt_anchor[best_selected_pos].item())
+                    best_selected_flat = int(selected_gt_flat[best_selected_pos].item())
+                    candidates.append(
+                        self._make_mdmbpp_candidate(
+                            level_index=level_index,
+                            level_name=level_name,
+                            flat_index=best_selected_flat,
+                            anchor_index=best_selected_anchor,
+                            label=gt_label,
+                            score=float(gt_scores[best_selected_anchor].item()),
+                            iou_to_gt=float(ious[best_selected_anchor].item()),
+                            box=boxes_norm[best_selected_anchor],
+                            selected_flat_set=selected_flat_set,
+                            selected_rank=selected_rank,
+                            nms_survival=nms_survival,
+                        )
+                    )
+
+        return candidates
+
+    def _make_mdmbpp_candidate(
+        self,
+        *,
+        level_index: int,
+        level_name: str,
+        flat_index: int,
+        anchor_index: int,
+        label: int,
+        score: float,
+        iou_to_gt: float,
+        box: torch.Tensor,
+        selected_flat_set: set[int],
+        selected_rank: dict[int, int],
+        nms_survival: dict[tuple[int, int], bool],
+    ) -> CanonicalCandidate:
+        survived_selection = flat_index in selected_flat_set
+        survived_nms = (
+            nms_survival.get((level_index, flat_index))
+            if survived_selection
+            else None
+        )
+        return CanonicalCandidate(
+            stage=f"fcos_{level_name}",
+            box=box.detach().cpu(),
+            score=score,
+            label=label,
+            iou_to_gt=iou_to_gt,
+            survived_selection=survived_selection,
+            survived_nms=survived_nms,
+            rank=selected_rank.get(flat_index),
+            level_or_stage_id=level_name,
+        )
+
+    def _append_unique_mdmbpp_candidate(
+        self,
+        candidates: list[CanonicalCandidate],
+        seen: set[tuple[object, ...]],
+        candidate: CanonicalCandidate,
+    ) -> None:
+        box_key = tuple(round(float(value), 6) for value in candidate.box.tolist())
+        key = (
+            candidate.stage,
+            candidate.label,
+            round(candidate.score, 6),
+            round(candidate.iou_to_gt, 6),
+            candidate.survived_selection,
+            candidate.survived_nms,
+            candidate.rank,
+            box_key,
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    def _stringify_image_id(self, image_id: torch.Tensor | int | str) -> str:
+        if isinstance(image_id, torch.Tensor):
+            if image_id.numel() != 1:
+                raise ValueError("FCOS image_id tensor must contain a single scalar value.")
+            image_id = image_id.item()
+        return str(image_id)
+
+    @torch.no_grad()
     def flush_mdmb_update(
         self,
         images: list[torch.Tensor],
@@ -559,6 +1009,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._mdmb_ref()
 
+    def _get_mdmbpp(self) -> MDMBPlus | None:
+        if self._mdmbpp_ref is None:
+            return None
+        return self._mdmbpp_ref()
+
     def _get_recall(self) -> MDMBSelectiveLoss | None:
         if self._recall_ref is None:
             return None
@@ -588,6 +1043,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        mdmbpp: MDMBPlus | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
@@ -595,6 +1051,7 @@ class FCOSWrapper(BaseDetectionWrapper):
     ) -> None:
         super().__init__()
         self.mdmb = mdmb
+        self.mdmbpp = mdmbpp
         self.recall = recall
         self.far = far
         self.mce = mce
@@ -620,6 +1077,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             detections_per_img=head.get("detections_per_img", 100),
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
+            mdmbpp=mdmbpp,
             recall=recall,
             far=far,
             mce=mce,
@@ -634,12 +1092,10 @@ class FCOSWrapper(BaseDetectionWrapper):
         *,
         epoch_index: int | None = None,
     ) -> None:
-        if self.mdmb is None:
+        if self.mdmb is None and self.mdmbpp is None and self.far is None:
             return
         epoch = None if epoch_index is None else int(epoch_index) + 1
-        self.model.flush_mdmb_update(images, targets, epoch=epoch)
-        if self.far is not None:
-            self.model.flush_far_update(images, targets, epoch=epoch)
+        self.model.flush_post_step_updates(images, targets, epoch=epoch)
 
     @classmethod
     def from_yaml(
@@ -648,6 +1104,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
+        mdmbpp: MDMBPlus | None = None,
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
@@ -659,6 +1116,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             pre_neck=pre_neck,
             post_neck=post_neck,
             mdmb=mdmb,
+            mdmbpp=mdmbpp,
             recall=recall,
             far=far,
             mce=mce,

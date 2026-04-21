@@ -1,165 +1,149 @@
 # Research Modules
 
-All modules live in `modules/nn/` and are configured via `modules/cfg/*.yaml`.
-**All modules are disabled by default.**
+Research features are configured from `modules/cfg/*.yaml`.
+`mdmb`, `mdmbpp`, `recall`, `far`, and `mce` live in `modules/nn/`.
+`hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
+because it operates at the data-loading layer.
+
+**All research modules are disabled by default.**
 
 ## Enabling a Module
 
-Edit the corresponding `modules/cfg/<module>.yaml`:
+Edit the corresponding YAML file in `modules/cfg/`:
 
 ```yaml
-enabled: true   # set to true to activate
+enabled: true
 ```
 
-Per-architecture overrides can be set in the same file:
+Per-architecture overrides use the `models:` mapping:
 
 ```yaml
-fcos:
-  some_param: value
-fasterrcnn:
-  some_param: other_value
+models:
+  fcos:
+    enabled: true
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false
 ```
 
 ## Module Overview
 
-### MDMB — Missed Detection Memory Bank (`mdmb.py`)
+### MDMB - Missed Detection Memory Bank (`modules/nn/mdmb.py`)
 
-Tracks false-negative detections (missed objects) across training batches with **temporal tracking** per GT.
+Tracks false-negative GTs over time.
 
-- **Hooks**: `start_epoch()`, `end_epoch()` called by `engine.fit()`
-- **Hook**: `after_optimizer_step(images, targets, epoch_index)` called after each optimizer step
-- **Summary**: `mdmb.summary()` → logged as `mdmb_entries`, `mdmb_images` in `history.json`
-- **Arch support**: FCOS
-- **Config**: `modules/cfg/mdmb.yaml`
+- Hooks: `start_epoch()`, `end_epoch()`
+- FCOS hook: `after_optimizer_step(images, targets, epoch_index)`
+- Summary: `mdmb.summary()`
+- Config: `modules/cfg/mdmb.yaml`
+- Arch support: FCOS
 
-#### 데이터 구조
+Key state:
 
-| 구조체 | 설명 |
-|---|---|
-| `MDMBEntry` | bank에 저장되는 miss-detected GT 정보 |
-| `_GTRecord` | epoch 간 GT별 이력을 추적하는 내부 persistent 레코드 |
+- `MDMBEntry`: unresolved miss entry stored in the bank
+- `_GTRecord`: persistent per-GT temporal record
 
-**`MDMBEntry` 필드** (bank에서 조회 가능):
+### MDMB++ - Structured Failure Memory (`modules/nn/mdmbpp.py`)
 
-| 필드 | 타입 | 설명 |
-|---|---|---|
-| `image_id` | `str` | COCO image ID |
-| `class_id` | `int` | COCO category ID |
-| `bbox` | `Tensor[4]` | normalized xyxy bbox |
-| `miss_type` | `str` | `"type_a"` (위치 miss) / `"type_b"` (클래스 miss) |
-| `consecutive_miss_count` | `int` | 현재까지 연속으로 miss된 epoch 수 |
-| `max_consecutive_miss_count` | `int` | 이 GT가 기록한 최대 연속 miss epoch 수 |
-| `last_detected_epoch` | `int \| None` | 마지막으로 detected된 epoch (없으면 `None`) |
+Stores structured miss state for each unresolved GT rather than only a miss flag.
 
-**Bank 수준 속성**:
+- Hooks: `start_epoch()`, `end_epoch()`
+- Update API: `mdmbpp.update(...)`
+- Summary: `mdmbpp.summary()`
+- Config: `modules/cfg/mdmbpp.yaml`
+- Arch support: FCOS
 
-| 속성 | 설명 |
-|---|---|
-| `bank._global_max_consecutive_miss` | 전체 GT 중 최대 연속 miss 횟수 (normalized 용도) |
-| `bank.summary()["global_max_consecutive_miss"]` | 동일 값, `history.json`에 기록됨 |
+Key state:
 
-#### 동작 방식 (epoch T)
+- `CanonicalCandidate`: detector-specific candidate normalized into a common schema
+- `SupportSnapshot`: last successful support state
+- `GTFailureRecord`: persistent per-GT history
+- `MDMBPlusEntry`: unresolved miss entry with `failure_type`, `severity`, and candidate context
 
-1. 각 GT에 대해 `classify_miss()` 실행 → detected / type_a / type_b 판정
-2. 이전 epoch의 `_GTRecord`와 IoU > 0.95 매칭으로 동일 GT 식별
-3. **detected** → `consecutive_miss_count = 0`, `last_detected_epoch = T` 기록 (bank에서 제거)
-4. **miss** → `consecutive_miss_count = prev + 1`, `max_consecutive_miss_count` 갱신 후 bank에 저장
-5. `_global_max_consecutive_miss` = 전체 `_GTRecord`의 `max_consecutive_miss_count` 최댓값
+Useful read APIs for downstream modules:
 
-#### 체크포인트 호환성
+- `mdmbpp.get_image_entries(image_id)`
+- `mdmbpp.get_replay_priority(image_id)`
+- `mdmbpp.get_dense_targets(image_id)`
+- `mdmbpp.get_record(gt_uid)`
 
-| version | 동작 |
-|---|---|
-| v4 (현재) | `_gt_records`, `_global_max_consecutive_miss` 완전 복원 |
-| v3 | bank 복원, `_gt_records`는 빈 상태로 시작 (다음 update()에서 재구성) |
-| v1/v2 | bank 초기화 (구조 비호환) |
+### Hard Replay (`scripts/runtime/hard_replay.py`)
 
-### RECALL — Selective Loss Reweighting (`recall.py`)
+Data-layer replay that redistributes training exposure toward images whose GTs remain unresolved in
+`MDMB++`.
 
-Uses MDMB observations to upweight losses on missed detections.
+- Planner: `HardReplayPlanner.build_epoch_index(...)`
+- Sampler: `MixedReplayBatchSampler`
+- Controller: `HardReplayController`
+- Config: `modules/cfg/hard_replay.yaml`
+- Arch support: FCOS
 
-- Depends on MDMB being enabled
-- **Arch support**: FCOS
-- **Config**: `modules/cfg/recall.yaml`
+Current scope is the minimal first version:
 
-### FAR — Forgetting-Aware feature Replay (`far.py`)
+- Epoch-level `ReplayIndex`
+- Image-level replay only
+- Mixed batch composition
 
-Pulls a feature-level consistency loss toward a frozen per-GT anchor captured when the
-object was last successfully detected, so that GTs which **relapse** (previously detected,
-currently missed) receive a dedicated pressure signal.
+Current implementation does **not** enable:
 
-- Depends on MDMB being enabled (reads `mdmb._gt_records` for relapse state)
-- **Hooks**: `start_epoch()`, `end_epoch()` called by `engine.fit()`
-- **Anchor update**: runs inside `after_optimizer_step` via `MDMBFCOS.flush_far_update(...)`, after MDMB has been refreshed
-- **Training loss**: `far.compute_loss(...)` adds a `far` entry to the FCOS loss dict
-- **Summary**: `far.summary()` → logged as `far` in `history.json`
-- **Arch support**: FCOS
-- **Config**: `modules/cfg/far.yaml`
-- **Design**: see [docs/proposals/far.md](proposals/far.md)
+- Crop replay
+- Copy-paste replay
+- Pair replay
 
-Key config fields:
+Important behavior:
 
-| 필드 | 기본값 | 설명 |
-|---|---|---|
-| `lambda_far` | `0.1` | FAR loss scale |
-| `anchor_ema_mu` | `0.9` | anchor EMA 계수 (detected 상태 유지 시) |
-| `persistence_gamma` | `1.0` | 연속 miss streak 기반 가중 증폭 계수 |
-| `min_relapse_streak` | `1` | relapse로 판정하여 anchor를 freeze할 최소 연속 miss 수 |
-| `match_threshold` | `0.95` | GT-to-anchor IoU 매칭 임계치 |
-| `warmup_epochs` | `1` | FAR loss/anchor 갱신을 시작하기까지 무시할 초기 epoch 수 |
-| `feature_keys` | `["0","1","2","p6","p7"]` | FPN 레벨 키 (FCOS 기본) |
+- Replay weight uses `1 + beta * sum(severity)` per image, clipped by `max_image_weight`
+- Sampling weight applies `temperature` as an exponent
+- Replay candidates are filtered by `replay_recency_window`
+- Per-image replay repeats are capped by `max_replays_per_gt_per_epoch`
 
-### MCE — Miss-Conditioned class Embedding (`mce.py`)
+### RECALL - Selective Loss Reweighting (`modules/nn/recall.py`)
 
-클래스별 learnable prototype embedding을 사용하여, 연속으로 미검출된 GT의 detection loss를 동적으로 증폭한다.
+Uses MDMB observations to upweight losses on hard GTs.
 
-- Depends on MDMB being enabled (reads `mdmb._gt_records` for streak state)
-- **Training loss**: FCOS per-point loss에 per-GT multiplier를 곱해 적용 (RECALL과 결합 가능)
-- **Inference**: 영향 없음 — feature를 변환하지 않고 loss weight만 조정
-- **Arch support**: FCOS
-- **Config**: `modules/cfg/mce.yaml`
+- Depends on MDMB
+- Config: `modules/cfg/recall.yaml`
+- Arch support: FCOS
 
-#### 동작 방식
+### FAR - Forgetting-Aware Replay (`modules/nn/far.py`)
 
-GT 하나에 대한 loss multiplier:
+Applies a feature-level consistency loss toward a frozen anchor captured when a GT was last
+detected successfully.
 
-```
-alpha        = sigmoid( dot(e_c, f_gt) / sqrt(D) )
-streak_ratio = n / w      # n=연속 miss 횟수, w=전체 최대 연속 miss 횟수
-amp          = 1 + lambda_mce * (1 - alpha) * streak_ratio
-```
+- Depends on MDMB
+- Hooks: `start_epoch()`, `end_epoch()`
+- Training loss: `far.compute_loss(...)`
+- Summary: `far.summary()`
+- Config: `modules/cfg/far.yaml`
+- Arch support: FCOS
 
-miss_type에 따라 증폭 대상 loss가 달라진다:
+### MCE - Miss-Conditioned class Embedding (`modules/nn/mce.py`)
 
-| miss_type | cls loss weight | reg+ctr loss weight |
-|---|:---:|:---:|
-| `type_a` (localization miss, ~92%) | 1.0 | `amp` |
-| `type_b` (classification miss, ~8%) | `amp` | 1.0 |
-| 알 수 없음 (bank에 없는 GT) | `amp` | `amp` |
+Uses a learnable class prototype embedding to amplify loss on GTs that remain hard under MDMB
+streak statistics.
 
-- `e_c`: class c의 learnable prototype embedding (`nn.Embedding`)
-- `f_gt`: GT bbox 위치의 ROI-pooled neck feature (L2 normalized)
-- `alpha`가 낮을수록 (현재 feature가 prototype과 멀수록) multiplier가 커짐
-- `streak_ratio`가 높을수록 (오래 미검출될수록) multiplier가 커짐
-- `min_miss_streak` 미만인 GT는 weight = 1.0 (비활성)
-- miss_type은 `mdmb._bank` (현재 epoch `MDMBEntry`)에서 조회; `_gt_records`는 streak 정보에만 사용
+- Depends on MDMB
+- Training path: integrated into FCOS loss computation
+- Config: `modules/cfg/mce.yaml`
+- Arch support: FCOS
 
-Key config fields:
+## Runtime Integration
 
-| 필드 | 기본값 | 설명 |
-|---|---|---|
-| `embed_dim` | `256` | class embedding 차원 (neck out_channels와 일치) |
-| `lambda_mce` | `1.0` | multiplier 최대 증폭 스케일 |
-| `min_miss_streak` | `1` | multiplier 적용 최소 연속 miss 횟수 |
-| `match_threshold` | `0.95` | GT-to-record IoU 매칭 임계치 |
-| `feature_keys` | `["0","1","2","p6","p7"]` | FPN 레벨 키 (FCOS 기본) |
-| `roi_output_size` | `7` | ROI pooling spatial 크기 |
+FCOS currently wires the following path:
 
-## Module × Architecture Compatibility
+1. `registry.py` builds `mdmb`, `mdmbpp`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
+2. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
+3. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
+4. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
+
+## Compatibility
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|:---:|:---:|:---:|
-| MDMB | ✓ | — | — |
-| RECALL | ✓ | — | — |
-| FAR | ✓ | — | — |
-| MCE | ✓ | — | — |
+| MDMB | yes | no | no |
+| MDMB++ | yes | no | no |
+| Hard Replay | yes | no | no |
+| RECALL | yes | no | no |
+| FAR | yes | no | no |
+| MCE | yes | no | no |

@@ -9,6 +9,12 @@ from pycocotools.coco import COCO
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as F
 
+from .hard_replay import (
+    HARD_REPLAY_CONFIG_PATH,
+    HardReplayController,
+    build_hard_replay_controller_from_yaml,
+)
+
 
 class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
     def __init__(self, images_dir: str | Path, annotations_path: str | Path) -> None:
@@ -38,10 +44,17 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
 
 def build_train_dataloaders(
     config: dict[str, Any],
+    *,
+    arch: str | None = None,
 ) -> tuple[DataLoader[Any], DataLoader[Any] | None]:
     train_dataset = CocoDetectionDataset(
         config["data"]["train_images"],
         config["data"]["train_annotations"],
+    )
+    hard_replay = _build_hard_replay_controller(
+        config,
+        dataset=train_dataset,
+        arch=arch,
     )
     train_loader = _build_loader(
         train_dataset,
@@ -49,7 +62,10 @@ def build_train_dataloaders(
         num_workers=config["loader"]["num_workers"],
         pin_memory=config["loader"]["pin_memory"],
         shuffle=config["loader"]["shuffle"],
+        batch_sampler=None if hard_replay is None else hard_replay.batch_sampler,
     )
+    if hard_replay is not None:
+        train_loader.hard_replay = hard_replay
 
     val_images = config["data"].get("val_images")
     val_annotations = config["data"].get("val_annotations")
@@ -96,15 +112,40 @@ def _build_loader(
     num_workers: int,
     pin_memory: bool,
     shuffle: bool,
+    batch_sampler=None,
 ) -> DataLoader[Any]:
+    loader_kwargs = {
+        "dataset": dataset,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_fn,
+        "persistent_workers": num_workers > 0,
+    }
+    if batch_sampler is not None:
+        loader_kwargs["batch_sampler"] = batch_sampler
+    else:
+        loader_kwargs["batch_size"] = batch_size
+        loader_kwargs["shuffle"] = shuffle
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
-        persistent_workers=num_workers > 0,
+        **loader_kwargs,
+    )
+
+
+def _build_hard_replay_controller(
+    config: dict[str, Any],
+    *,
+    dataset: Dataset[Any],
+    arch: str | None,
+) -> HardReplayController | None:
+    if not HARD_REPLAY_CONFIG_PATH.is_file():
+        return None
+    return build_hard_replay_controller_from_yaml(
+        HARD_REPLAY_CONFIG_PATH,
+        dataset=dataset,
+        batch_size=config["loader"]["batch_size"],
+        shuffle=config["loader"]["shuffle"],
+        seed=int(config["seed"]),
+        arch=arch,
     )
 
 
