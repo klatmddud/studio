@@ -12,6 +12,8 @@ from torchvision.transforms import functional as F
 from .hard_replay import (
     HARD_REPLAY_CONFIG_PATH,
     HardReplayController,
+    ReplayCrop,
+    ReplayIndex,
     build_hard_replay_controller_from_yaml,
 )
 
@@ -42,6 +44,74 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
         return image_tensor, target
 
 
+class CounterfactualReplayDataset(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
+    requires_fresh_workers_per_epoch = True
+
+    def __init__(self, base_dataset: CocoDetectionDataset) -> None:
+        self.base_dataset = base_dataset
+        self.images_dir = base_dataset.images_dir
+        self.annotations_path = base_dataset.annotations_path
+        self.coco = base_dataset.coco
+        self.image_ids = base_dataset.image_ids
+        self._replay_index = ReplayIndex.empty(enabled=False)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset) + len(self._replay_index.replay_crops)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, dict[str, Any]]:
+        base_size = len(self.base_dataset)
+        if index < base_size:
+            return self.base_dataset[index]
+
+        crop_index = index - base_size
+        replay_crops = self._replay_index.replay_crops
+        if crop_index < 0 or crop_index >= len(replay_crops):
+            raise IndexError(f"FCDR replay crop index out of range: {crop_index}")
+        return self._build_replay_crop_sample(replay_crops[crop_index], crop_index=crop_index)
+
+    def set_replay_index(self, replay_index: ReplayIndex) -> None:
+        self._replay_index = replay_index
+
+    def _build_replay_crop_sample(
+        self,
+        replay_crop: ReplayCrop,
+        *,
+        crop_index: int,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        source_image_id = self.image_ids[replay_crop.dataset_index]
+        image_info = self.coco.loadImgs([source_image_id])[0]
+        image_path = _resolve_image_path(self.images_dir, image_info["file_name"])
+        crop_x1, crop_y1, crop_x2, crop_y2 = replay_crop.crop_box_abs
+
+        with Image.open(image_path) as image:
+            image = image.convert("RGB")
+            crop = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+            crop_width, crop_height = crop.size
+            image_tensor = F.to_tensor(crop)
+
+        ann_ids = self.coco.getAnnIds(imgIds=[source_image_id])
+        annotations = self.coco.loadAnns(ann_ids)
+        crop_annotations = _clip_annotations_to_crop(
+            annotations,
+            crop_box_abs=replay_crop.crop_box_abs,
+        )
+
+        synthetic_image_id = -(int(crop_index) + 1)
+        target = _build_target(
+            synthetic_image_id,
+            crop_width,
+            crop_height,
+            crop_annotations,
+        )
+        target["is_replay"] = torch.tensor(True, dtype=torch.bool)
+        target["source_image_id"] = _source_image_id_tensor(source_image_id)
+        target["replay_gt_uid"] = replay_crop.gt_uid
+        target["replay_failure_type"] = replay_crop.failure_type
+        target["replay_mode"] = replay_crop.mode
+        target["replay_severity"] = torch.tensor(replay_crop.severity, dtype=torch.float32)
+        return image_tensor, target
+
+
 def build_train_dataloaders(
     config: dict[str, Any],
     *,
@@ -56,8 +126,14 @@ def build_train_dataloaders(
         dataset=train_dataset,
         arch=arch,
     )
+    loader_dataset: Dataset[Any] = train_dataset
+    if hard_replay is not None and hard_replay.config.fcdr.enabled:
+        replay_dataset = CounterfactualReplayDataset(train_dataset)
+        hard_replay.attach_replay_dataset(replay_dataset)
+        loader_dataset = replay_dataset
+
     train_loader = _build_loader(
-        train_dataset,
+        loader_dataset,
         batch_size=config["loader"]["batch_size"],
         num_workers=config["loader"]["num_workers"],
         pin_memory=config["loader"]["pin_memory"],
@@ -119,7 +195,8 @@ def _build_loader(
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "collate_fn": collate_fn,
-        "persistent_workers": num_workers > 0,
+        "persistent_workers": num_workers > 0
+        and not bool(getattr(dataset, "requires_fresh_workers_per_epoch", False)),
     }
     if batch_sampler is not None:
         loader_kwargs["batch_sampler"] = batch_sampler
@@ -239,3 +316,49 @@ def _build_target(
         "area": area_tensor,
         "iscrowd": crowd_tensor,
     }
+
+
+def _clip_annotations_to_crop(
+    annotations: list[dict[str, Any]],
+    *,
+    crop_box_abs: tuple[int, int, int, int],
+) -> list[dict[str, Any]]:
+    crop_x1, crop_y1, crop_x2, crop_y2 = crop_box_abs
+    clipped: list[dict[str, Any]] = []
+    for annotation in annotations:
+        raw_bbox = annotation.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+            continue
+        x, y, w, h = [float(value) for value in raw_bbox]
+        box_x1 = x
+        box_y1 = y
+        box_x2 = x + max(0.0, w)
+        box_y2 = y + max(0.0, h)
+
+        inter_x1 = max(box_x1, float(crop_x1))
+        inter_y1 = max(box_y1, float(crop_y1))
+        inter_x2 = min(box_x2, float(crop_x2))
+        inter_y2 = min(box_y2, float(crop_y2))
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            continue
+
+        clipped_annotation = dict(annotation)
+        clipped_width = inter_x2 - inter_x1
+        clipped_height = inter_y2 - inter_y1
+        clipped_annotation["bbox"] = [
+            inter_x1 - float(crop_x1),
+            inter_y1 - float(crop_y1),
+            clipped_width,
+            clipped_height,
+        ]
+        clipped_annotation["area"] = clipped_width * clipped_height
+        clipped.append(clipped_annotation)
+    return clipped
+
+
+def _source_image_id_tensor(image_id: Any) -> torch.Tensor:
+    try:
+        value = int(image_id)
+    except (TypeError, ValueError):
+        value = abs(hash(str(image_id))) % (2**31)
+    return torch.tensor(value, dtype=torch.int64)

@@ -28,6 +28,15 @@ from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 
+def _is_replay_target(target: dict[str, object]) -> bool:
+    raw = target.get("is_replay", False)
+    if isinstance(raw, torch.Tensor):
+        if raw.numel() == 0:
+            return False
+        return bool(raw.detach().flatten()[0].item())
+    return bool(raw)
+
+
 class MDMBFCOS(FCOS):
     """
     FCOS variant with MDMB-guided loss reweighting and optional FAR/MCE modules.
@@ -730,6 +739,16 @@ class MDMBFCOS(FCOS):
         far = self._get_far()
         if not targets:
             return
+
+        non_replay = [
+            (image, target)
+            for image, target in zip(images, targets, strict=True)
+            if not _is_replay_target(target)
+        ]
+        if not non_replay:
+            return
+        images = [image for image, _ in non_replay]
+        targets = [target for _, target in non_replay]
 
         should_mdmb = mdmb is not None and mdmb.should_update(epoch=epoch)
         should_mdmbpp = mdmbpp is not None and mdmbpp.should_update(epoch=epoch)

@@ -85,12 +85,12 @@ Data-layer replay that redistributes training exposure toward images whose GTs r
 Current scope is the minimal first version:
 
 - Epoch-level `ReplayIndex`
-- Image-level replay only
+- Image-level replay
+- FCDR crop replay when `fcdr.enabled: true`
 - Mixed batch composition
 
 Current implementation does **not** enable:
 
-- Crop replay
 - Copy-paste replay
 - Pair replay
 
@@ -100,6 +100,9 @@ Important behavior:
 - Sampling weight applies `temperature` as an exponent
 - Replay candidates are filtered by `replay_recency_window`
 - Per-image replay repeats are capped by `max_replays_per_gt_per_epoch`
+- FCDR crop replay creates virtual crop indices after the base dataset range
+- FCDR replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++/FAR memory updates
+- FCDR crop replay uses `fcdr.counterfactual_ratio` to split replay slots between image-level replay and crop-level replay
 
 ### Candidate Densification (`modules/nn/candidate_densification.py`)
 

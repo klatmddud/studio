@@ -8,6 +8,18 @@ replacement: true
 max_replays_per_gt_per_epoch: 4
 replay_recency_window: 3
 
+# FCDR is only active when the top-level Hard Replay enabled flag is also true.
+fcdr:
+  enabled: false
+  counterfactual_ratio: 0.5
+  min_severity: 0.0
+  max_crops_per_gt_per_epoch: 1
+  crop_context_scale: 1.0
+  min_crop_context_px: 16
+  overlap_threshold: 0.1
+  copy_paste_prob: 0.0
+  pair_replay_prob: 0.0
+
 models:
   fcos: {}
   fasterrcnn:
