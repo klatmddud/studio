@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `recall`, `far`, and `mce` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `marc`, `recall`, `far`, and `mce` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
 because it operates at the data-loading layer.
 
@@ -143,8 +143,29 @@ Current scope is the minimal first version:
 - No auxiliary loss is added
 - Repair targets are selected by MDMB++ `failure_type`, `severity`, and relapse state
 - Default behavior only converts unassigned FCOS points into positives for the hard GT
+- Repaired FCOS points must keep their centers inside the target GT box so bbox regression and centerness targets stay finite
 - Existing positive assignments are not stolen unless `allow_positive_reassignment: true`
 - If Candidate Densification is also enabled, FAAR runs first so dense supervision sees the repaired assignment
+
+### MARC - Miss-Aware Ranking Calibration (`modules/nn/marc.py`)
+
+Training-time ranking calibration for hard GTs stored in `MDMB++`.
+
+- Depends on MDMB++
+- Hooks: `start_epoch()`, `end_epoch()`
+- Planning API: `marc.plan(mdmbpp, targets, image_shapes)`
+- Training path: FCOS adds a `marc` auxiliary ranking loss after FAAR and before Candidate Densification
+- Summary: `marc.summary()`
+- Config: `modules/cfg/marc.yaml`
+- Arch support: FCOS
+
+Current scope is the minimal first version:
+
+- FCOS only
+- No assignment, data sampling, or inference behavior is changed
+- Ranking targets are selected from MDMB++ `score_suppression`, `nms_suppression`, `cls_confusion`, and `loc_near_miss`
+- `candidate_missing` is excluded by default because there may be no meaningful candidate to rank
+- Positive candidates use GT-class score and IoU; negatives use wrong-class confusers, same-class suppressors, and high-score local distractors
 
 ### RECALL - Selective Loss Reweighting (`modules/nn/recall.py`)
 
@@ -180,9 +201,9 @@ streak statistics.
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
-2. FCOS forward reads `model.mdmbpp` through FAAR and Candidate Densification when enabled.
-3. FAAR repairs `matched_idxs`; Candidate Densification can then add `candidate_dense` auxiliary loss.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `marc`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
+2. FCOS forward reads `model.mdmbpp` through FAAR, MARC, and Candidate Densification when enabled.
+3. FAAR repairs `matched_idxs`; MARC can add `marc` ranking loss; Candidate Densification can add `candidate_dense` auxiliary loss.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
 6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
@@ -196,6 +217,7 @@ FCOS currently wires the following path:
 | Hard Replay | yes | no | no |
 | Candidate Densification | yes | no | no |
 | FAAR | yes | no | no |
+| MARC | yes | no | no |
 | RECALL | yes | no | no |
 | FAR | yes | no | no |
 | MCE | yes | no | no |

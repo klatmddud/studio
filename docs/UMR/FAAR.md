@@ -102,11 +102,12 @@ $$
 FCOS 구현은 기본 `_match_anchors_to_targets()` 실행 직후 동작한다.
 
 1. hard GT 중심과 크기로 repair region을 만든다.
-2. 기본값에서는 `matched_idxs == -1`인 background point만 후보로 둔다.
-3. `respect_fcos_scale_range: true`이면 FCOS scale range를 먼저 존중한다.
-4. 후보가 없고 `allow_adjacent_levels: true`이면 인접 FPN level까지 완화한다.
-5. 그래도 후보가 없고 `allow_nearest_center_fallback: true`이면 assignment 조건을 만족하는 가장 가까운 point를 고른다.
-6. 선택된 point의 `matched_idxs`를 hard GT index로 바꾼다.
+2. FCOS regression/centerness target이 유효하도록 중심이 GT box 내부에 있는 point만 후보로 둔다.
+3. 기본값에서는 `matched_idxs == -1`인 background point만 후보로 둔다.
+4. `respect_fcos_scale_range: true`이면 FCOS scale range를 먼저 존중한다.
+5. 후보가 없고 `allow_adjacent_levels: true`이면 인접 FPN level까지 완화한다.
+6. 그래도 후보가 없고 `allow_nearest_center_fallback: true`이면 GT box 내부 assignment 조건을 만족하는 가장 가까운 point를 고른다.
+7. 선택된 point의 `matched_idxs`를 hard GT index로 바꾼다.
 
 기본값에서는 기존 positive assignment를 빼앗지 않는다. `allow_positive_reassignment: true`를 켜면 기존 positive point 재할당을 허용하지만, 기존 GT와 target hard GT의 IoU가 `protect_existing_positive_iou` 이상이면 보호한다.
 

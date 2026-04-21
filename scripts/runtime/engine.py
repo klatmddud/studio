@@ -93,6 +93,7 @@ def fit(
         _call_model_hook(model, "mdmbpp", "start_epoch", epoch + 1)
         _call_model_hook(model, "far", "start_epoch", epoch + 1)
         _call_model_hook(model, "faar", "start_epoch", epoch + 1)
+        _call_model_hook(model, "marc", "start_epoch", epoch + 1)
         _call_model_hook(model, "candidate_densifier", "start_epoch", epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
         train_metrics = train_one_epoch(
@@ -111,11 +112,13 @@ def fit(
         _call_model_hook(model, "mdmbpp", "end_epoch", epoch + 1)
         _call_model_hook(model, "far", "end_epoch", epoch + 1)
         _call_model_hook(model, "faar", "end_epoch", epoch + 1)
+        _call_model_hook(model, "marc", "end_epoch", epoch + 1)
         _call_model_hook(model, "candidate_densifier", "end_epoch", epoch + 1)
         mdmb_summary = _get_mdmb_summary(model)
         mdmbpp_summary = _get_module_summary(model, "mdmbpp")
         far_summary = _get_module_summary(model, "far")
         faar_summary = _get_module_summary(model, "faar")
+        marc_summary = _get_module_summary(model, "marc")
         candidate_densifier_summary = _get_module_summary(model, "candidate_densifier")
         hard_replay_summary = _get_hard_replay_summary(train_loader)
 
@@ -131,6 +134,8 @@ def fit(
             record["far"] = far_summary
         if faar_summary is not None:
             record["faar"] = faar_summary
+        if marc_summary is not None:
+            record["marc"] = marc_summary
         if candidate_densifier_summary is not None:
             record["candidate_densification"] = candidate_densifier_summary
         if hard_replay_summary is not None:
@@ -551,6 +556,11 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         parts.append(f"faar_points={int(faar_summary.get('repair_points', 0))}")
         parts.append(f"faar_targets={int(faar_summary.get('repair_targets', 0))}")
 
+    marc_summary = record.get("marc")
+    if isinstance(marc_summary, dict):
+        parts.append(f"marc_losses={int(marc_summary.get('rank_losses', 0))}")
+        parts.append(f"marc_neg={int(marc_summary.get('rank_negatives', 0))}")
+
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -645,11 +655,13 @@ def _is_optional_mdmb_key(key: str) -> bool:
         or key == "mdmbpp._extra_state"
         or key == "far._extra_state"
         or key == "faar._extra_state"
+        or key == "marc._extra_state"
         or key == "candidate_densifier._extra_state"
         or key.startswith("mdmb.")
         or key.startswith("mdmbpp.")
         or key.startswith("far.")
         or key.startswith("faar.")
+        or key.startswith("marc.")
         or key.startswith("candidate_densifier.")
     )
 

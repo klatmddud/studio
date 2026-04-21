@@ -8,12 +8,13 @@ UMR (Universal Miss Recovery) 는 detection 학습 중 반복적으로 놓치는
 2. 그 기록을 이용해 다음 학습 step 또는 다음 epoch에서 해당 객체를 다시 "보게" 만든다.
 3. FCOS, Faster R-CNN, DINO처럼 candidate 생성 방식이 다른 detector에도 동일한 상위 원리로 적용한다.
 
-UMR은 기본 세 개의 하위 구성 요소와 assignment-level 확장 모듈로 이뤄진다.
+UMR은 기본 세 개의 하위 구성 요소와 assignment/ranking-level 확장 모듈로 이뤄진다.
 
 1. `MDMB++`: miss failure memory를 구조적으로 저장하는 공통 메모리 계층
 2. `Hard Replay`: MDMB++의 정보를 이용해 학습 데이터 분포를 hard case 중심으로 재편하는 입력 단계 모듈
 3. `Candidate Densification`: MDMB++의 정보를 이용해 hard GT 주변에 더 많은 training candidate를 공급하는 구조 단계 모듈
 4. `FAAR`: MDMB++의 정보를 이용해 hard GT의 main assignment를 직접 보정하는 구조 단계 모듈
+5. `MARC`: MDMB++의 정보를 이용해 hard GT 주변 candidate ranking을 보정하는 ranking 단계 모듈
 
 UMR의 기본 입장은 간단하다. 기존 reweighting 계열은 이미 존재하는 positive나 loss term에만 압력을 준다. 그러나 chronic miss는 애초에 모델이 해당 객체를 충분히 보지 못했거나, 적절한 candidate가 형성되지 않았거나, ranking 과정에서 반복적으로 탈락하는 경우가 많다. 따라서 UMR은 `loss amplification`이 아니라 `recovery opportunity creation`을 목표로 한다.
 
@@ -37,6 +38,7 @@ UMR은 이 문제를 다음 방식으로 해결한다.
 - `Hard Replay`가 데이터 분포를 hard object 중심으로 재조정한다.
 - `Candidate Densification`이 detector-specific adapter를 통해 hard GT 주변에 recovery candidate를 추가한다.
 - `FAAR`가 hard GT에 main detector loss가 직접 걸리도록 assignment를 보정한다.
+- `MARC`가 올바른 후보가 confuser/suppressor보다 높은 rank를 갖도록 보정한다.
 
 즉 UMR은 "놓친 객체를 더 세게 혼내는" 프레임워크가 아니라, "놓친 객체를 다시 맞힐 수 있는 기회를 더 많이 만든다"는 프레임워크다.
 
@@ -60,6 +62,7 @@ UMR은 학습 시에만 활성화되고, inference에는 영향을 주지 않는
 - Hard Replay: data pipeline에만 영향
 - Candidate Densification: training candidate 또는 auxiliary supervision에만 영향
 - FAAR: training assignment에만 영향
+- MARC: training ranking loss에만 영향
 - inference path: 변경 없음
 
 ### 3.3 Recoverability-oriented memory
@@ -78,10 +81,11 @@ UMR 학습은 아래 순서로 동작한다.
 
 1. DataLoader가 `Hard Replay` 정책에 따라 hard image / hard object를 더 자주 샘플링한다.
 2. 모델 forward에서 `FAAR`가 현재 memory를 참고하여 hard GT의 assignment를 보정한다.
-3. `Candidate Densification`이 hard GT 주변 candidate budget을 늘린다.
-4. base detector loss와 densification auxiliary loss를 계산한다.
-5. `optimizer.step()` 이후, post-step prediction과 intermediate candidate summary를 이용해 `MDMB++`를 갱신한다.
-6. epoch 종료 시점에 MDMB++의 누적 통계를 바탕으로 replay index와 densification priority를 갱신한다.
+3. `MARC`가 hard GT 주변 candidate ranking을 보정하는 auxiliary loss를 계산한다.
+4. `Candidate Densification`이 hard GT 주변 candidate budget을 늘린다.
+5. base detector loss, ranking loss, densification auxiliary loss를 계산한다.
+6. `optimizer.step()` 이후, post-step prediction과 intermediate candidate summary를 이용해 `MDMB++`를 갱신한다.
+7. epoch 종료 시점에 MDMB++의 누적 통계를 바탕으로 replay index와 densification priority를 갱신한다.
 
 이를 함수 수준으로 쓰면 다음과 같다.
 
@@ -91,7 +95,7 @@ for epoch in range(num_epochs):
     sampler = hard_replay.build_sampler(dataset, replay_index)
 
     for images, targets in loader(sampler=sampler):
-        outputs = model(images, targets)  # FCOS wrapper internally runs FAAR and densification.
+        outputs = model(images, targets)  # FCOS wrapper internally runs FAAR, MARC, and densification.
         loss = outputs["det_loss"] + lambda_dense * outputs.get("dense_loss", 0.0)
         loss.backward()
         optimizer.step()

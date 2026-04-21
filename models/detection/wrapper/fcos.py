@@ -21,6 +21,7 @@ from modules.nn import (
     FailureAwareAssignmentRepair,
     MDMBPlus,
     MDMBSelectiveLoss,
+    MissAwareRankingCalibration,
     PerImageCandidateSummary,
     RepairPlan,
 )
@@ -74,6 +75,7 @@ class MDMBFCOS(FCOS):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        marc: MissAwareRankingCalibration | None = None,
         mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
@@ -84,6 +86,7 @@ class MDMBFCOS(FCOS):
         self._recall_ref = weakref.ref(recall) if recall is not None else None
         self._far_ref = weakref.ref(far) if far is not None else None
         self._faar_ref = weakref.ref(faar) if faar is not None else None
+        self._marc_ref = weakref.ref(marc) if marc is not None else None
         self._mce_ref = weakref.ref(mce) if mce is not None else None
         self._candidate_densifier_ref = (
             weakref.ref(candidate_densifier) if candidate_densifier is not None else None
@@ -192,6 +195,39 @@ class MDMBFCOS(FCOS):
                     image_shapes=images.image_sizes,
                     features=features,
                 )
+
+            marc = self._get_marc()
+            if marc is not None and marc.should_apply(mdmbpp=mdmbpp):
+                ranking_plan = marc.plan(
+                    mdmbpp=mdmbpp,
+                    targets=targets,
+                    image_shapes=images.image_sizes,
+                )
+                (
+                    marc_loss,
+                    rank_losses,
+                    rank_negatives,
+                    skipped_no_positive,
+                    skipped_no_negative,
+                ) = marc.compute_loss(
+                    ranking_plan=ranking_plan,
+                    targets=targets,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    image_shapes=images.image_sizes,
+                    decode_boxes_fn=self._decode_boxes,
+                )
+                marc.record_rank_step(
+                    ranking_plan=ranking_plan,
+                    rank_losses=rank_losses,
+                    rank_negatives=rank_negatives,
+                    loss=marc_loss if rank_losses > 0 else None,
+                    skipped_no_positive=skipped_no_positive,
+                    skipped_no_negative=skipped_no_negative,
+                )
+                if rank_losses > 0:
+                    losses = dict(losses)
+                    losses["marc"] = marc_loss
 
             candidate_densifier = self._get_candidate_densifier()
             if candidate_densifier is not None and candidate_densifier.should_apply(mdmbpp=mdmbpp):
@@ -753,18 +789,25 @@ class MDMBFCOS(FCOS):
         region_max = gt_center + half_size
 
         centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
+        inside_gt_mask = (
+            (centers[:, 0] > gt_box[0])
+            & (centers[:, 0] < gt_box[2])
+            & (centers[:, 1] > gt_box[1])
+            & (centers[:, 1] < gt_box[3])
+        )
         region_mask = (
             (centers[:, 0] >= region_min[0])
             & (centers[:, 0] <= region_max[0])
             & (centers[:, 1] >= region_min[1])
             & (centers[:, 1] <= region_max[1])
         )
+        candidate_scope_mask = region_mask & inside_gt_mask
         availability_mask, skipped_existing_positive = self._faar_availability_mask(
             repair_target=repair_target,
             assignments=assignments,
             used_points=used_points,
             gt_boxes=gt_boxes,
-            count_scope_mask=region_mask,
+            count_scope_mask=candidate_scope_mask,
             faar=faar,
         )
 
@@ -776,7 +819,7 @@ class MDMBFCOS(FCOS):
                 num_anchors_per_level=num_anchors_per_level,
             )
 
-        candidate_mask = region_mask & availability_mask & scale_mask
+        candidate_mask = candidate_scope_mask & availability_mask & scale_mask
         point_indices = self._take_nearest_faar_points(
             candidate_mask=candidate_mask,
             centers=centers,
@@ -794,7 +837,7 @@ class MDMBFCOS(FCOS):
                 anchors_per_image=anchors_per_image,
                 num_anchors_per_level=num_anchors_per_level,
             )
-            candidate_mask = region_mask & availability_mask & adjacent_mask
+            candidate_mask = candidate_scope_mask & availability_mask & adjacent_mask
             point_indices = self._take_nearest_faar_points(
                 candidate_mask=candidate_mask,
                 centers=centers,
@@ -806,7 +849,7 @@ class MDMBFCOS(FCOS):
                 return point_indices, skipped_existing_positive
 
         if faar.config.allow_nearest_center_fallback:
-            candidate_mask = availability_mask
+            candidate_mask = inside_gt_mask & availability_mask
             point_indices = self._take_nearest_faar_points(
                 candidate_mask=candidate_mask,
                 centers=centers,
@@ -1653,6 +1696,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._faar_ref()
 
+    def _get_marc(self) -> MissAwareRankingCalibration | None:
+        if self._marc_ref is None:
+            return None
+        return self._marc_ref()
+
     def _get_mce(self) -> MissConditionedEmbedding | None:
         if self._mce_ref is None:
             return None
@@ -1681,6 +1729,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        marc: MissAwareRankingCalibration | None = None,
         mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
@@ -1691,6 +1740,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         self.recall = recall
         self.far = far
         self.faar = faar
+        self.marc = marc
         self.mce = mce
         self.candidate_densifier = candidate_densifier
 
@@ -1719,6 +1769,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             recall=recall,
             far=far,
             faar=faar,
+            marc=marc,
             mce=mce,
             candidate_densifier=candidate_densifier,
             **kwargs,
@@ -1748,6 +1799,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        marc: MissAwareRankingCalibration | None = None,
         mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
@@ -1762,6 +1814,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             recall=recall,
             far=far,
             faar=faar,
+            marc=marc,
             mce=mce,
             candidate_densifier=candidate_densifier,
             **kwargs,

@@ -1,5 +1,5 @@
 enabled: false
-warmup_epochs: 10
+warmup_epochs: 0
 detected_iou_threshold: 0.5
 near_iou_threshold: 0.1
 class_iou_threshold: 0.5

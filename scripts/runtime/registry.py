@@ -9,6 +9,7 @@ from modules.nn import (
     build_candidate_densifier_from_yaml,
     build_faar_from_yaml,
     build_far_from_yaml,
+    build_marc_from_yaml,
     build_mce_from_yaml,
     build_mdmb_from_yaml,
     build_mdmbpp_from_yaml,
@@ -39,6 +40,7 @@ CANDIDATE_DENSIFICATION_CONFIG_PATH = (
 )
 FAAR_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "faar.yaml"
 FAR_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "far.yaml"
+MARC_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "marc.yaml"
 MCE_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mce.yaml"
 MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
 MDMBPP_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmbpp.yaml"
@@ -70,6 +72,7 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
     recall = _build_recall(normalized_arch)
     far = _build_far(normalized_arch)
     faar = _build_faar(normalized_arch)
+    marc = _build_marc(normalized_arch)
     mce = _build_mce(normalized_arch, num_classes=num_classes)
     candidate_densifier = _build_candidate_densifier(normalized_arch)
     if normalized_arch == "fcos":
@@ -80,6 +83,7 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
             recall=recall,
             far=far,
             faar=faar,
+            marc=marc,
             mce=mce,
             candidate_densifier=candidate_densifier,
         )
@@ -140,6 +144,14 @@ def _build_faar(arch: str) -> nn.Module | None:
     if not FAAR_CONFIG_PATH.is_file():
         return None
     return build_faar_from_yaml(FAAR_CONFIG_PATH, arch=arch)
+
+
+def _build_marc(arch: str) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    if not MARC_CONFIG_PATH.is_file():
+        return None
+    return build_marc_from_yaml(MARC_CONFIG_PATH, arch=arch)
 
 
 def _build_mce(arch: str, *, num_classes: int) -> nn.Module | None:
