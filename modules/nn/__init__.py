@@ -1,3 +1,12 @@
+from .candidate_densification import (
+    CandidateDensificationConfig,
+    CandidateDensifier,
+    DensePlan,
+    DenseTarget,
+    build_candidate_densifier_from_config,
+    build_candidate_densifier_from_yaml,
+    load_candidate_densification_config,
+)
 from .mce import (
     MCE,
     MCEConfig,
@@ -53,6 +62,10 @@ from .recall import (
 
 __all__ = [
     "MCE",
+    "CandidateDensificationConfig",
+    "CandidateDensifier",
+    "DensePlan",
+    "DenseTarget",
     "MCEConfig",
     "MissConditionedEmbedding",
     "build_mce_from_config",
@@ -77,6 +90,8 @@ __all__ = [
     "MDMBSelectiveLoss",
     "RECALL",
     "RECALLConfig",
+    "build_candidate_densifier_from_config",
+    "build_candidate_densifier_from_yaml",
     "build_far_from_config",
     "build_far_from_yaml",
     "build_mdmb_from_config",
@@ -87,6 +102,7 @@ __all__ = [
     "build_recall_from_yaml",
     "classify_failure",
     "cxcywh_to_xyxy",
+    "load_candidate_densification_config",
     "load_far_config",
     "load_mdmb_config",
     "load_mdmbpp_config",

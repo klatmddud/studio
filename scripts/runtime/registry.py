@@ -6,6 +6,7 @@ from typing import Any
 import torch.nn as nn
 
 from modules.nn import (
+    build_candidate_densifier_from_yaml,
     build_far_from_yaml,
     build_mce_from_yaml,
     build_mdmb_from_yaml,
@@ -32,6 +33,9 @@ MODEL_BUILDERS = {
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CANDIDATE_DENSIFICATION_CONFIG_PATH = (
+    PROJECT_ROOT / "modules" / "cfg" / "candidate_densification.yaml"
+)
 FAR_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "far.yaml"
 MCE_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mce.yaml"
 MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
@@ -64,8 +68,17 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
     recall = _build_recall(normalized_arch)
     far = _build_far(normalized_arch)
     mce = _build_mce(normalized_arch, num_classes=num_classes)
+    candidate_densifier = _build_candidate_densifier(normalized_arch)
     if normalized_arch == "fcos":
-        return builder(model_config, mdmb=mdmb, mdmbpp=mdmbpp, recall=recall, far=far, mce=mce)
+        return builder(
+            model_config,
+            mdmb=mdmb,
+            mdmbpp=mdmbpp,
+            recall=recall,
+            far=far,
+            mce=mce,
+            candidate_densifier=candidate_densifier,
+        )
     return builder(model_config, mdmb=mdmb)
 
 
@@ -123,3 +136,14 @@ def _build_mce(arch: str, *, num_classes: int) -> nn.Module | None:
     if not MCE_CONFIG_PATH.is_file():
         return None
     return build_mce_from_yaml(MCE_CONFIG_PATH, arch=arch, num_classes=num_classes)
+
+
+def _build_candidate_densifier(arch: str) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    if not CANDIDATE_DENSIFICATION_CONFIG_PATH.is_file():
+        return None
+    return build_candidate_densifier_from_yaml(
+        CANDIDATE_DENSIFICATION_CONFIG_PATH,
+        arch=arch,
+    )

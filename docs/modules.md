@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `recall`, `far`, and `mce` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `candidate_densification`, `recall`, `far`, and `mce` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
 because it operates at the data-loading layer.
 
@@ -101,6 +101,26 @@ Important behavior:
 - Replay candidates are filtered by `replay_recency_window`
 - Per-image replay repeats are capped by `max_replays_per_gt_per_epoch`
 
+### Candidate Densification (`modules/nn/candidate_densification.py`)
+
+Training-time auxiliary positive point densification for hard GTs stored in `MDMB++`.
+
+- Depends on MDMB++
+- Hooks: `start_epoch()`, `end_epoch()`
+- Planning API: `candidate_densifier.plan(mdmbpp, targets, image_shapes)`
+- Training path: FCOS adds a `candidate_dense` auxiliary loss when dense points are selected
+- Summary: `candidate_densifier.summary()`
+- Config: `modules/cfg/candidate_densification.yaml`
+- Arch support: FCOS
+
+Current scope is the minimal first version:
+
+- FCOS only
+- Base FCOS assignment is unchanged
+- Dense positives are selected from points near hard GT centers
+- Default behavior uses only points that were background under the base FCOS assignment
+- Loss weight uses linear warmup through `lambda_dense`
+
 ### RECALL - Selective Loss Reweighting (`modules/nn/recall.py`)
 
 Uses MDMB observations to upweight losses on hard GTs.
@@ -135,10 +155,11 @@ streak statistics.
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
-2. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
-3. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
-4. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
+2. FCOS forward reads `model.mdmbpp` through `candidate_densifier` and adds `candidate_dense` loss when enabled.
+3. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
+4. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
+5. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
 
 ## Compatibility
 
@@ -147,6 +168,7 @@ FCOS currently wires the following path:
 | MDMB | yes | no | no |
 | MDMB++ | yes | no | no |
 | Hard Replay | yes | no | no |
+| Candidate Densification | yes | no | no |
 | RECALL | yes | no | no |
 | FAR | yes | no | no |
 | MCE | yes | no | no |

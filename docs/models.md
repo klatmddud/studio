@@ -7,7 +7,8 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 ### FCOS (`fcos.py` → `MDMBFCOS`)
 
 - Single-stage anchor-free detector
-- Integrates MDMB, MDMB++, RECALL, FAR, MCE modules (if enabled in `modules/cfg/`)
+- Integrates MDMB, MDMB++, Candidate Densification, RECALL, FAR, MCE modules (if enabled in `modules/cfg/`)
+- Candidate Densification adds a training-only `candidate_dense` auxiliary loss for MDMB++ hard GTs without changing the base FCOS assignment
 - `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass, then refreshes MDMB / MDMB++ and updates FAR anchors
 - Forward in train mode: returns `loss_dict`; in eval mode: returns predictions
 

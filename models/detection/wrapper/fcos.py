@@ -13,7 +13,14 @@ from torchvision.ops import boxes as box_ops
 from torchvision.ops import sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
-from modules.nn import CanonicalCandidate, MDMBPlus, MDMBSelectiveLoss, PerImageCandidateSummary
+from modules.nn import (
+    CandidateDensifier,
+    CanonicalCandidate,
+    DensePlan,
+    MDMBPlus,
+    MDMBSelectiveLoss,
+    PerImageCandidateSummary,
+)
 from modules.nn.far import ForgettingAwareReplay
 from modules.nn.mce import MissConditionedEmbedding
 from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
@@ -43,6 +50,7 @@ class MDMBFCOS(FCOS):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
+        candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -51,6 +59,9 @@ class MDMBFCOS(FCOS):
         self._recall_ref = weakref.ref(recall) if recall is not None else None
         self._far_ref = weakref.ref(far) if far is not None else None
         self._mce_ref = weakref.ref(mce) if mce is not None else None
+        self._candidate_densifier_ref = (
+            weakref.ref(candidate_densifier) if candidate_densifier is not None else None
+        )
 
     def forward(
         self,
@@ -111,6 +122,7 @@ class MDMBFCOS(FCOS):
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             mdmb = self._get_mdmb()
+            mdmbpp = self._get_mdmbpp()
             recall = self._get_recall()
             mce = self._get_mce()
             use_weighted = mdmb is not None and (recall is not None or mce is not None)
@@ -125,6 +137,31 @@ class MDMBFCOS(FCOS):
                     image_shapes=images.image_sizes,
                     features=features,
                 )
+
+            candidate_densifier = self._get_candidate_densifier()
+            if candidate_densifier is not None and candidate_densifier.should_apply(mdmbpp=mdmbpp):
+                dense_plan = candidate_densifier.plan(
+                    mdmbpp=mdmbpp,
+                    targets=targets,
+                    image_shapes=images.image_sizes,
+                )
+                dense_loss, dense_points = self._compute_candidate_dense_loss(
+                    dense_plan=dense_plan,
+                    targets=targets,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    matched_idxs=matched_idxs,
+                    image_shapes=images.image_sizes,
+                    candidate_densifier=candidate_densifier,
+                )
+                candidate_densifier.record_dense_step(
+                    num_targets=len(dense_plan),
+                    num_points=dense_points,
+                    loss=dense_loss if dense_points > 0 else None,
+                )
+                if dense_points > 0:
+                    losses = dict(losses)
+                    losses["candidate_dense"] = dense_loss
 
             far = self._get_far()
             if far is not None and mdmb is not None and far.should_apply():
@@ -349,6 +386,178 @@ class MDMBFCOS(FCOS):
             "gt_boxes": gt_boxes,
             "gt_labels": gt_labels,
         }
+
+    def _compute_candidate_dense_loss(
+        self,
+        *,
+        dense_plan: DensePlan,
+        targets: list[dict[str, torch.Tensor]],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        image_shapes: list[tuple[int, int]],
+        candidate_densifier: CandidateDensifier,
+    ) -> tuple[torch.Tensor, int]:
+        cls_template = head_outputs["cls_logits"]
+        dense_sum = cls_template.new_zeros(())
+        dense_points = 0
+
+        for image_index, target in enumerate(targets):
+            image_id = target.get(
+                "image_id",
+                torch.tensor(image_index, device=anchors[image_index].device),
+            )
+            dense_targets = dense_plan.for_image(image_id)
+            if not dense_targets:
+                continue
+
+            cls_logits = head_outputs["cls_logits"][image_index]
+            bbox_regression = head_outputs["bbox_regression"][image_index]
+            bbox_ctrness = head_outputs["bbox_ctrness"][image_index].flatten()
+            anchors_per_image = anchors[image_index]
+            assignments = matched_idxs[image_index]
+            gt_boxes = target["boxes"]
+            gt_labels = target["labels"].to(device=cls_logits.device, dtype=torch.int64)
+
+            used_points = torch.zeros(
+                anchors_per_image.shape[0],
+                dtype=torch.bool,
+                device=anchors_per_image.device,
+            )
+            selected_points: list[torch.Tensor] = []
+            selected_gt_indices: list[torch.Tensor] = []
+
+            for dense_target in dense_targets:
+                if dense_target.gt_index < 0 or dense_target.gt_index >= gt_boxes.shape[0]:
+                    continue
+                point_indices = self._select_candidate_dense_points(
+                    dense_target=dense_target,
+                    anchors_per_image=anchors_per_image,
+                    assignments=assignments,
+                    used_points=used_points,
+                    candidate_densifier=candidate_densifier,
+                )
+                if point_indices.numel() == 0:
+                    continue
+                used_points[point_indices] = True
+                selected_points.append(point_indices)
+                selected_gt_indices.append(
+                    torch.full(
+                        (point_indices.numel(),),
+                        int(dense_target.gt_index),
+                        dtype=torch.long,
+                        device=point_indices.device,
+                    )
+                )
+
+            if not selected_points:
+                continue
+
+            point_indices = torch.cat(selected_points, dim=0)
+            gt_indices = torch.cat(selected_gt_indices, dim=0)
+            matched_gt_labels = gt_labels[gt_indices]
+            valid_label_mask = (
+                (matched_gt_labels >= 0)
+                & (matched_gt_labels < cls_logits.shape[1])
+            )
+            if not bool(valid_label_mask.any().item()):
+                continue
+
+            point_indices = point_indices[valid_label_mask]
+            gt_indices = gt_indices[valid_label_mask]
+            matched_gt_labels = matched_gt_labels[valid_label_mask]
+            matched_gt_boxes = gt_boxes[gt_indices].to(
+                device=cls_logits.device,
+                dtype=anchors_per_image.dtype,
+            )
+
+            cls_targets = torch.zeros(
+                (point_indices.numel(), cls_logits.shape[1]),
+                dtype=cls_logits.dtype,
+                device=cls_logits.device,
+            )
+            cls_targets[
+                torch.arange(point_indices.numel(), device=cls_logits.device),
+                matched_gt_labels,
+            ] = 1.0
+            cls_losses = sigmoid_focal_loss(
+                cls_logits[point_indices],
+                cls_targets,
+                reduction="none",
+            ).sum(dim=-1)
+
+            pred_boxes = self._decode_boxes(
+                box_regression=bbox_regression[point_indices],
+                anchors=anchors_per_image[point_indices],
+            )
+            pred_boxes = box_ops.clip_boxes_to_image(pred_boxes, image_shapes[image_index])
+            giou = box_ops.generalized_box_iou(pred_boxes, matched_gt_boxes)
+            reg_losses = 1.0 - torch.diagonal(giou)
+
+            ctr_targets = self._compute_centerness_targets(
+                anchors=anchors_per_image[point_indices],
+                gt_boxes=matched_gt_boxes,
+            )
+            ctr_losses = F.binary_cross_entropy_with_logits(
+                bbox_ctrness[point_indices],
+                ctr_targets,
+                reduction="none",
+            )
+
+            dense_sum = dense_sum + cls_losses.sum() + reg_losses.sum() + ctr_losses.sum()
+            dense_points += int(point_indices.numel())
+
+        if dense_points <= 0:
+            return dense_sum, 0
+
+        normalizer = dense_sum.new_tensor(float(dense_points))
+        loss = dense_sum / normalizer
+        return loss * float(candidate_densifier.loss_weight()), dense_points
+
+    def _select_candidate_dense_points(
+        self,
+        *,
+        dense_target,
+        anchors_per_image: torch.Tensor,
+        assignments: torch.Tensor,
+        used_points: torch.Tensor,
+        candidate_densifier: CandidateDensifier,
+    ) -> torch.Tensor:
+        budget = int(dense_target.budget)
+        if budget <= 0 or anchors_per_image.numel() == 0:
+            return anchors_per_image.new_zeros((0,), dtype=torch.long)
+
+        gt_box = dense_target.bbox.to(
+            device=anchors_per_image.device,
+            dtype=anchors_per_image.dtype,
+        )
+        gt_center = (gt_box[:2] + gt_box[2:]) * 0.5
+        gt_size = (gt_box[2:] - gt_box[:2]).clamp(min=1.0)
+        scale = float(candidate_densifier.region_scale_for(dense_target.severity))
+        half_size = (gt_size * scale * 0.5).clamp(min=1.0)
+        region_min = gt_center - half_size
+        region_max = gt_center + half_size
+
+        centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
+        candidate_mask = (
+            (centers[:, 0] >= region_min[0])
+            & (centers[:, 0] <= region_max[0])
+            & (centers[:, 1] >= region_min[1])
+            & (centers[:, 1] <= region_max[1])
+            & (~used_points)
+        )
+        if candidate_densifier.config.require_unassigned_points:
+            candidate_mask &= assignments < 0
+
+        candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+        if candidate_indices.numel() == 0:
+            return candidate_indices
+
+        normalized_offsets = (centers[candidate_indices] - gt_center).abs() / half_size
+        distances = normalized_offsets.max(dim=1).values
+        count = min(budget, int(candidate_indices.numel()))
+        nearest = torch.argsort(distances)[:count]
+        return candidate_indices[nearest]
 
     def _compute_centerness_targets(
         self,
@@ -1029,6 +1238,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._mce_ref()
 
+    def _get_candidate_densifier(self) -> CandidateDensifier | None:
+        if self._candidate_densifier_ref is None:
+            return None
+        return self._candidate_densifier_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -1047,6 +1261,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
+        candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -1055,6 +1270,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         self.recall = recall
         self.far = far
         self.mce = mce
+        self.candidate_densifier = candidate_densifier
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -1081,6 +1297,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             recall=recall,
             far=far,
             mce=mce,
+            candidate_densifier=candidate_densifier,
             **kwargs,
         )
 
@@ -1108,6 +1325,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         recall: MDMBSelectiveLoss | None = None,
         far: ForgettingAwareReplay | None = None,
         mce: MissConditionedEmbedding | None = None,
+        candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -1120,5 +1338,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             recall=recall,
             far=far,
             mce=mce,
+            candidate_densifier=candidate_densifier,
             **kwargs,
         )
