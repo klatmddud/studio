@@ -80,6 +80,216 @@ class FCDRConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectReplayCropConfig:
+    enabled: bool = False
+    context_scale: float = 1.0
+    min_context_px: int = 16
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "ObjectReplayCropConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            context_scale=float(data.get("context_scale", 1.0)),
+            min_context_px=int(data.get("min_context_px", 16)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.context_scale < 0.0:
+            raise ValueError("Object Replay crop context_scale must be >= 0.")
+        if self.min_context_px < 0:
+            raise ValueError("Object Replay crop min_context_px must be >= 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "context_scale": self.context_scale,
+            "min_context_px": self.min_context_px,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectReplayCopyPasteConfig:
+    enabled: bool = False
+    paste_scale: float = 1.0
+    max_paste_overlap: float = 0.3
+    max_attempts: int = 20
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None = None,
+    ) -> "ObjectReplayCopyPasteConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            paste_scale=float(data.get("paste_scale", 1.0)),
+            max_paste_overlap=float(data.get("max_paste_overlap", 0.3)),
+            max_attempts=int(data.get("max_attempts", 20)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.paste_scale <= 0.0:
+            raise ValueError("Object Replay copy_paste paste_scale must be > 0.")
+        if not 0.0 <= self.max_paste_overlap <= 1.0:
+            raise ValueError(
+                "Object Replay copy_paste max_paste_overlap must satisfy 0 <= value <= 1."
+            )
+        if self.max_attempts < 1:
+            raise ValueError("Object Replay copy_paste max_attempts must be >= 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "paste_scale": self.paste_scale,
+            "max_paste_overlap": self.max_paste_overlap,
+            "max_attempts": self.max_attempts,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectReplayPairConfig:
+    enabled: bool = False
+    require_same_batch: bool = True
+    min_replay_slots: int = 2
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "ObjectReplayPairConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            require_same_batch=bool(data.get("require_same_batch", True)),
+            min_replay_slots=int(data.get("min_replay_slots", 2)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.min_replay_slots < 2:
+            raise ValueError("Object Replay pair min_replay_slots must be >= 2.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "require_same_batch": self.require_same_batch,
+            "min_replay_slots": self.min_replay_slots,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectReplayConfig:
+    enabled: bool = False
+    crop_ratio: float = 0.4
+    copy_paste_ratio: float = 0.3
+    pair_ratio: float = 0.3
+    crop: ObjectReplayCropConfig = field(default_factory=ObjectReplayCropConfig)
+    copy_paste: ObjectReplayCopyPasteConfig = field(
+        default_factory=ObjectReplayCopyPasteConfig
+    )
+    pair: ObjectReplayPairConfig = field(default_factory=ObjectReplayPairConfig)
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "ObjectReplayConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            crop_ratio=float(data.get("crop_ratio", 0.4)),
+            copy_paste_ratio=float(data.get("copy_paste_ratio", 0.3)),
+            pair_ratio=float(data.get("pair_ratio", 0.3)),
+            crop=ObjectReplayCropConfig.from_mapping(
+                data.get("crop") if isinstance(data.get("crop"), Mapping) else None
+            ),
+            copy_paste=ObjectReplayCopyPasteConfig.from_mapping(
+                data.get("copy_paste")
+                if isinstance(data.get("copy_paste"), Mapping)
+                else None
+            ),
+            pair=ObjectReplayPairConfig.from_mapping(
+                data.get("pair") if isinstance(data.get("pair"), Mapping) else None
+            ),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for name, value in {
+            "crop_ratio": self.crop_ratio,
+            "copy_paste_ratio": self.copy_paste_ratio,
+            "pair_ratio": self.pair_ratio,
+        }.items():
+            if value < 0.0:
+                raise ValueError(f"Object Replay {name} must be >= 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "crop_ratio": self.crop_ratio,
+            "copy_paste_ratio": self.copy_paste_ratio,
+            "pair_ratio": self.pair_ratio,
+            "crop": self.crop.to_dict(),
+            "copy_paste": self.copy_paste.to_dict(),
+            "pair": self.pair.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayLossConfig:
+    enabled: bool = False
+    cls_weight: float = 1.0
+    reg_weight: float = 1.0
+    ctr_weight: float = 1.0
+    crop_box_weight: float = 1.5
+    pasted_box_weight: float = 2.0
+    pair_box_weight: float = 1.5
+    max_weight: float = 3.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "ReplayLossConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            cls_weight=float(data.get("cls_weight", 1.0)),
+            reg_weight=float(data.get("reg_weight", 1.0)),
+            ctr_weight=float(data.get("ctr_weight", 1.0)),
+            crop_box_weight=float(data.get("crop_box_weight", 1.5)),
+            pasted_box_weight=float(data.get("pasted_box_weight", 2.0)),
+            pair_box_weight=float(data.get("pair_box_weight", 1.5)),
+            max_weight=float(data.get("max_weight", 3.0)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for name, value in {
+            "cls_weight": self.cls_weight,
+            "reg_weight": self.reg_weight,
+            "ctr_weight": self.ctr_weight,
+            "crop_box_weight": self.crop_box_weight,
+            "pasted_box_weight": self.pasted_box_weight,
+            "pair_box_weight": self.pair_box_weight,
+            "max_weight": self.max_weight,
+        }.items():
+            if value <= 0.0:
+                raise ValueError(f"Replay loss {name} must be > 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "cls_weight": self.cls_weight,
+            "reg_weight": self.reg_weight,
+            "ctr_weight": self.ctr_weight,
+            "crop_box_weight": self.crop_box_weight,
+            "pasted_box_weight": self.pasted_box_weight,
+            "pair_box_weight": self.pair_box_weight,
+            "max_weight": self.max_weight,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class HardReplayConfig:
     enabled: bool = False
     beta: float = 1.0
@@ -92,6 +302,8 @@ class HardReplayConfig:
     replay_recency_window: int = 3
     arch: str | None = None
     fcdr: FCDRConfig = field(default_factory=FCDRConfig)
+    object_replay: ObjectReplayConfig = field(default_factory=ObjectReplayConfig)
+    loss: ReplayLossConfig = field(default_factory=ReplayLossConfig)
 
     @classmethod
     def from_mapping(
@@ -119,6 +331,22 @@ class HardReplayConfig:
         if isinstance(override_fcdr, Mapping):
             fcdr_data.update(override_fcdr)
 
+        object_replay_data: dict[str, Any] = {}
+        top_object_replay = data.get("object_replay", {})
+        if isinstance(top_object_replay, Mapping):
+            object_replay_data.update(top_object_replay)
+        override_object_replay = overrides.get("object_replay", {})
+        if isinstance(override_object_replay, Mapping):
+            object_replay_data.update(override_object_replay)
+
+        loss_data: dict[str, Any] = {}
+        top_loss = data.get("loss", {})
+        if isinstance(top_loss, Mapping):
+            loss_data.update(top_loss)
+        override_loss = overrides.get("loss", {})
+        if isinstance(override_loss, Mapping):
+            loss_data.update(override_loss)
+
         config = cls(
             enabled=bool(overrides.get("enabled", data.get("enabled", False))),
             beta=float(overrides.get("beta", data.get("beta", 1.0))),
@@ -142,6 +370,8 @@ class HardReplayConfig:
             ),
             arch=normalized_arch,
             fcdr=FCDRConfig.from_mapping(fcdr_data),
+            object_replay=ObjectReplayConfig.from_mapping(object_replay_data),
+            loss=ReplayLossConfig.from_mapping(loss_data),
         )
         config.validate()
         return config
@@ -175,15 +405,18 @@ class HardReplayConfig:
             "replay_recency_window": self.replay_recency_window,
             "arch": self.arch,
             "fcdr": self.fcdr.to_dict(),
+            "object_replay": self.object_replay.to_dict(),
+            "loss": self.loss.to_dict(),
         }
 
 
 @dataclass(frozen=True, slots=True)
-class ReplayCrop:
+class ReplaySampleSpec:
     dataset_index: int
     gt_uid: str
     image_id: str
     class_id: int
+    kind: str
     failure_type: str
     mode: str
     crop_box_abs: tuple[int, int, int, int]
@@ -192,12 +425,25 @@ class ReplayCrop:
     support_box_abs: tuple[int, int, int, int] | None
     sampling_weight: float
     replay_cap: int
+    loss_weight: float
+    cls_loss_weight: float
+    reg_loss_weight: float
+    ctr_loss_weight: float
+    pair_id: str | None = None
+    role: str | None = None
+    target_dataset_index: int | None = None
+    target_image_id: str | None = None
+    paste_box_abs: tuple[int, int, int, int] | None = None
+
+
+ReplayCrop = ReplaySampleSpec
 
 
 @dataclass(frozen=True, slots=True)
 class ReplayIndex:
     enabled: bool
     image_weights: dict[str, float] = field(default_factory=dict)
+    replay_samples: list[ReplaySampleSpec] = field(default_factory=list)
     replay_crops: list[ReplayCrop] = field(default_factory=list)
     replay_gt_ids: set[str] = field(default_factory=set)
     replay_dataset_indices: list[int] = field(default_factory=list)
@@ -224,6 +470,7 @@ class ReplayIndex:
                 "warmup_active": bool(warmup_active),
                 "replay_num_images": 0,
                 "replay_num_crops": 0,
+                "replay_num_object_samples": 0,
                 "replay_num_active_gt": 0,
                 "replay_mean_image_weight": 0.0,
                 "replay_mean_gt_severity": 0.0,
@@ -236,6 +483,15 @@ class ReplayIndex:
                 "fcdr_ratio_effective": 0.0,
                 "fcdr_samples": 0,
                 "fcdr_unique_crops": 0,
+                "object_replay_enabled": False,
+                "replay_num_crop_specs": 0,
+                "replay_num_copy_paste_specs": 0,
+                "replay_num_pair_specs": 0,
+                "replay_crop_samples": 0,
+                "replay_copy_paste_samples": 0,
+                "replay_pair_samples": 0,
+                "replay_loss_enabled": False,
+                "replay_loss_weight_mean": 0.0,
             },
         )
 
@@ -271,9 +527,10 @@ class HardReplayPlanner:
         active_gt_counts: dict[int, int] = {}
         replay_caps: dict[int, int] = {}
         severity_sum = 0.0
-        replay_crops: list[ReplayCrop] = []
+        replay_samples: list[ReplaySampleSpec] = []
         fcdr_failure_counts: Counter[str] = Counter()
         fcdr_mode_counts: Counter[str] = Counter()
+        replay_skipped_counts: Counter[str] = Counter()
 
         for dataset_index, image_id in enumerate(image_ids):
             image_key = str(image_id)
@@ -297,17 +554,19 @@ class HardReplayPlanner:
             for entry in entries:
                 replay_gt_ids.add(entry.gt_uid)
 
-            image_replay_crops = self._build_replay_crops(
+            image_replay_samples, image_skipped = self._build_replay_samples(
                 mdmbpp=mdmbpp,
                 dataset=dataset,
                 dataset_index=dataset_index,
                 image_id=image_id,
                 entries=entries,
+                epoch=epoch,
             )
-            replay_crops.extend(image_replay_crops)
-            for crop in image_replay_crops:
-                fcdr_failure_counts[crop.failure_type] += 1
-                fcdr_mode_counts[crop.mode] += 1
+            replay_samples.extend(image_replay_samples)
+            replay_skipped_counts.update(image_skipped)
+            for sample in image_replay_samples:
+                fcdr_failure_counts[sample.failure_type] += 1
+                fcdr_mode_counts[sample.mode] += 1
 
         active_images = len(replay_dataset_indices)
         mean_image_weight = 0.0
@@ -319,15 +578,17 @@ class HardReplayPlanner:
             mean_gt_severity = severity_sum / float(len(replay_gt_ids))
 
         fcdr_summary = self._build_fcdr_summary(
-            replay_crops=replay_crops,
+            replay_samples=replay_samples,
             failure_counts=fcdr_failure_counts,
             mode_counts=fcdr_mode_counts,
+            skipped_counts=replay_skipped_counts,
         )
 
         return ReplayIndex(
             enabled=True,
             image_weights=image_weights,
-            replay_crops=replay_crops,
+            replay_samples=replay_samples,
+            replay_crops=replay_samples,
             replay_gt_ids=replay_gt_ids,
             replay_dataset_indices=replay_dataset_indices,
             replay_sampling_weights=torch.tensor(replay_sampling_weights, dtype=torch.float32),
@@ -338,7 +599,8 @@ class HardReplayPlanner:
                 "epoch": int(epoch),
                 "warmup_active": False,
                 "replay_num_images": active_images,
-                "replay_num_crops": len(replay_crops),
+                "replay_num_crops": sum(1 for sample in replay_samples if sample.kind == "crop"),
+                "replay_num_object_samples": len(replay_samples),
                 "replay_num_active_gt": len(replay_gt_ids),
                 "replay_mean_image_weight": mean_image_weight,
                 "replay_mean_gt_severity": mean_gt_severity,
@@ -379,6 +641,8 @@ class HardReplayPlanner:
                     if enabled and self.config.fcdr.enabled
                     else 0.0
                 ),
+                "object_replay_enabled": bool(enabled and self.config.object_replay.enabled),
+                "replay_loss_enabled": bool(enabled and self.config.loss.enabled),
             }
         )
         return replay_index
@@ -404,7 +668,7 @@ class HardReplayPlanner:
                 selected.append(entry)
         return selected
 
-    def _build_replay_crops(
+    def _build_replay_samples(
         self,
         *,
         mdmbpp: MDMBPlus,
@@ -412,23 +676,25 @@ class HardReplayPlanner:
         dataset_index: int,
         image_id: Any,
         entries: Sequence[MDMBPlusEntry],
-    ) -> list[ReplayCrop]:
-        if not self.config.fcdr.enabled:
-            return []
+        epoch: int,
+    ) -> tuple[list[ReplaySampleSpec], Counter[str]]:
+        skipped_counts: Counter[str] = Counter()
+        if not self._object_replay_enabled():
+            return [], skipped_counts
 
         coco = getattr(dataset, "coco", None)
         image_ids = getattr(dataset, "image_ids", None)
         if coco is None or not isinstance(image_ids, Sequence):
-            return []
+            return [], skipped_counts
 
         image_info = coco.imgs.get(image_id)
         if not isinstance(image_info, Mapping):
-            return []
+            return [], skipped_counts
 
         width = int(image_info.get("width", 0))
         height = int(image_info.get("height", 0))
         if width <= 0 or height <= 0:
-            return []
+            return [], skipped_counts
 
         annotations = []
         get_ann_ids = getattr(coco, "getAnnIds", None)
@@ -436,11 +702,11 @@ class HardReplayPlanner:
         if callable(get_ann_ids) and callable(load_anns):
             annotations = list(load_anns(get_ann_ids(imgIds=[image_id])))
 
-        crops: list[ReplayCrop] = []
+        samples: list[ReplaySampleSpec] = []
         for entry in entries:
             if entry.failure_type == "detected":
                 continue
-            if entry.severity < self.config.fcdr.min_severity:
+            if entry.severity < self._object_replay_min_severity():
                 continue
 
             source_box = _normalized_box_to_abs(entry.bbox, width=width, height=height)
@@ -453,7 +719,7 @@ class HardReplayPlanner:
             if support is not None:
                 support_box = _normalized_box_to_abs(support.box, width=width, height=height)
 
-            mode = _select_fcdr_mode(entry=entry, record=record)
+            mode = self._select_replay_mode(entry=entry, record=record)
             base_box = source_box
             if entry.failure_type == "nms_suppression":
                 base_box = _union_with_overlapping_annotations(
@@ -461,53 +727,290 @@ class HardReplayPlanner:
                     annotations=annotations,
                     width=width,
                     height=height,
-                    overlap_threshold=self.config.fcdr.overlap_threshold,
+                    overlap_threshold=self._object_replay_overlap_threshold(),
                 )
 
             crop_box = _expand_box_abs(
                 base_box,
                 image_width=width,
                 image_height=height,
-                context_scale=self.config.fcdr.crop_context_scale,
-                min_context_px=self.config.fcdr.min_crop_context_px,
+                context_scale=self._object_replay_crop_context_scale(),
+                min_context_px=self._object_replay_min_context_px(),
             )
             if crop_box is None:
                 continue
 
-            raw_weight = 1.0 + self.config.beta * float(entry.severity)
-            clipped_weight = min(self.config.max_image_weight, raw_weight)
-            clipped_weight = max(self.config.min_replay_weight, clipped_weight)
-            sampling_weight = clipped_weight**self.config.temperature
-
-            crops.append(
-                ReplayCrop(
-                    dataset_index=int(dataset_index),
-                    gt_uid=entry.gt_uid,
-                    image_id=str(image_id),
-                    class_id=entry.class_id,
-                    failure_type=str(entry.failure_type),
-                    mode=mode,
-                    crop_box_abs=crop_box,
-                    source_bbox_abs=source_box,
-                    severity=entry.severity,
-                    support_box_abs=support_box,
-                    sampling_weight=float(sampling_weight),
-                    replay_cap=self.config.fcdr.max_crops_per_gt_per_epoch,
+            if self._crop_replay_enabled():
+                samples.append(
+                    self._make_replay_sample(
+                        kind="crop",
+                        dataset_index=dataset_index,
+                        image_id=image_id,
+                        entry=entry,
+                        mode=mode,
+                        crop_box=crop_box,
+                        source_box=source_box,
+                        support_box=support_box,
+                        role=None,
+                    )
                 )
+
+            if self._copy_paste_replay_enabled():
+                copy_paste_sample = self._build_copy_paste_sample(
+                    dataset=dataset,
+                    dataset_index=dataset_index,
+                    image_id=image_id,
+                    entry=entry,
+                    source_box=source_box,
+                    mode=mode,
+                    epoch=epoch,
+                )
+                if copy_paste_sample is not None:
+                    samples.append(copy_paste_sample)
+                else:
+                    skipped_counts["copy_paste"] += 1
+
+            if self._pair_replay_enabled() and support_box is not None:
+                pair_id = f"{entry.gt_uid}:epoch:{int(epoch)}"
+                support_crop_box = _expand_box_abs(
+                    support_box,
+                    image_width=width,
+                    image_height=height,
+                    context_scale=self._object_replay_crop_context_scale(),
+                    min_context_px=self._object_replay_min_context_px(),
+                )
+                if support_crop_box is not None:
+                    samples.append(
+                        self._make_replay_sample(
+                            kind="pair_miss",
+                            dataset_index=dataset_index,
+                            image_id=image_id,
+                            entry=entry,
+                            mode="pair_miss_crop",
+                            crop_box=crop_box,
+                            source_box=source_box,
+                            support_box=support_box,
+                            role="miss",
+                            pair_id=pair_id,
+                        )
+                    )
+                    samples.append(
+                        self._make_replay_sample(
+                            kind="pair_support",
+                            dataset_index=dataset_index,
+                            image_id=image_id,
+                            entry=entry,
+                            mode="pair_support_crop",
+                            crop_box=support_crop_box,
+                            source_box=support_box,
+                            support_box=support_box,
+                            role="support",
+                            pair_id=pair_id,
+                        )
+                    )
+            elif self._pair_replay_enabled():
+                skipped_counts["pair"] += 1
+
+        return samples, skipped_counts
+
+    def _make_replay_sample(
+        self,
+        *,
+        kind: str,
+        dataset_index: int,
+        image_id: Any,
+        entry: MDMBPlusEntry,
+        mode: str,
+        crop_box: tuple[int, int, int, int],
+        source_box: tuple[int, int, int, int],
+        support_box: tuple[int, int, int, int] | None,
+        role: str | None,
+        pair_id: str | None = None,
+        target_dataset_index: int | None = None,
+        target_image_id: str | None = None,
+        paste_box: tuple[int, int, int, int] | None = None,
+    ) -> ReplaySampleSpec:
+        sampling_weight = self._entry_sampling_weight(entry)
+        loss_weight = self._loss_weight_for_kind(kind)
+        return ReplaySampleSpec(
+            dataset_index=int(dataset_index),
+            gt_uid=entry.gt_uid,
+            image_id=str(image_id),
+            class_id=entry.class_id,
+            kind=kind,
+            failure_type=str(entry.failure_type),
+            mode=mode,
+            crop_box_abs=crop_box,
+            source_bbox_abs=source_box,
+            severity=entry.severity,
+            support_box_abs=support_box,
+            sampling_weight=sampling_weight,
+            replay_cap=self._object_replay_cap(),
+            loss_weight=loss_weight,
+            cls_loss_weight=self._component_loss_weight(loss_weight, self.config.loss.cls_weight),
+            reg_loss_weight=self._component_loss_weight(loss_weight, self.config.loss.reg_weight),
+            ctr_loss_weight=self._component_loss_weight(loss_weight, self.config.loss.ctr_weight),
+            pair_id=pair_id,
+            role=role,
+            target_dataset_index=target_dataset_index,
+            target_image_id=target_image_id,
+            paste_box_abs=paste_box,
+        )
+
+    def _build_copy_paste_sample(
+        self,
+        *,
+        dataset: Any,
+        dataset_index: int,
+        image_id: Any,
+        entry: MDMBPlusEntry,
+        source_box: tuple[int, int, int, int],
+        mode: str,
+        epoch: int,
+    ) -> ReplaySampleSpec | None:
+        coco = getattr(dataset, "coco", None)
+        image_ids = getattr(dataset, "image_ids", None)
+        if coco is None or not isinstance(image_ids, Sequence) or len(image_ids) == 0:
+            return None
+
+        object_width = max(1, source_box[2] - source_box[0])
+        object_height = max(1, source_box[3] - source_box[1])
+        paste_width = max(1, int(round(object_width * self.config.object_replay.copy_paste.paste_scale)))
+        paste_height = max(1, int(round(object_height * self.config.object_replay.copy_paste.paste_scale)))
+
+        target_candidates = _ordered_target_indices(
+            dataset_size=len(image_ids),
+            source_index=dataset_index,
+            key=f"{entry.gt_uid}:{epoch}:copy_paste",
+        )
+        for target_dataset_index in target_candidates:
+            target_image_id = image_ids[target_dataset_index]
+            image_info = coco.imgs.get(target_image_id)
+            if not isinstance(image_info, Mapping):
+                continue
+            target_width = int(image_info.get("width", 0))
+            target_height = int(image_info.get("height", 0))
+            if target_width <= 0 or target_height <= 0:
+                continue
+            if paste_width > target_width or paste_height > target_height:
+                continue
+
+            annotations = []
+            get_ann_ids = getattr(coco, "getAnnIds", None)
+            load_anns = getattr(coco, "loadAnns", None)
+            if callable(get_ann_ids) and callable(load_anns):
+                annotations = list(load_anns(get_ann_ids(imgIds=[target_image_id])))
+
+            paste_box = _find_paste_box(
+                target_width=target_width,
+                target_height=target_height,
+                paste_width=paste_width,
+                paste_height=paste_height,
+                annotations=annotations,
+                max_overlap=self.config.object_replay.copy_paste.max_paste_overlap,
+                max_attempts=self.config.object_replay.copy_paste.max_attempts,
+                key=f"{entry.gt_uid}:{epoch}:{target_image_id}",
+            )
+            if paste_box is None:
+                continue
+
+            return self._make_replay_sample(
+                kind="copy_paste",
+                dataset_index=dataset_index,
+                image_id=image_id,
+                entry=entry,
+                mode=f"{mode}_copy_paste",
+                crop_box=source_box,
+                source_box=source_box,
+                support_box=None,
+                role="paste",
+                target_dataset_index=int(target_dataset_index),
+                target_image_id=str(target_image_id),
+                paste_box=paste_box,
             )
 
-        return crops
+        return None
+
+    def _entry_sampling_weight(self, entry: MDMBPlusEntry) -> float:
+        raw_weight = 1.0 + self.config.beta * float(entry.severity)
+        clipped_weight = min(self.config.max_image_weight, raw_weight)
+        clipped_weight = max(self.config.min_replay_weight, clipped_weight)
+        return float(clipped_weight**self.config.temperature)
+
+    def _object_replay_enabled(self) -> bool:
+        return bool(self.config.object_replay.enabled or self.config.fcdr.enabled)
+
+    def _crop_replay_enabled(self) -> bool:
+        if self.config.object_replay.enabled:
+            return bool(self.config.object_replay.crop.enabled)
+        return bool(self.config.fcdr.enabled)
+
+    def _copy_paste_replay_enabled(self) -> bool:
+        return bool(
+            self.config.object_replay.enabled
+            and self.config.object_replay.copy_paste.enabled
+        )
+
+    def _pair_replay_enabled(self) -> bool:
+        return bool(self.config.object_replay.enabled and self.config.object_replay.pair.enabled)
+
+    def _object_replay_cap(self) -> int:
+        if self.config.object_replay.enabled:
+            return self.config.max_replays_per_gt_per_epoch
+        return self.config.fcdr.max_crops_per_gt_per_epoch
+
+    def _object_replay_min_severity(self) -> float:
+        return self.config.fcdr.min_severity if self.config.fcdr.enabled else 0.0
+
+    def _object_replay_overlap_threshold(self) -> float:
+        return self.config.fcdr.overlap_threshold if self.config.fcdr.enabled else 0.1
+
+    def _object_replay_crop_context_scale(self) -> float:
+        if self.config.object_replay.enabled:
+            return self.config.object_replay.crop.context_scale
+        return self.config.fcdr.crop_context_scale
+
+    def _object_replay_min_context_px(self) -> int:
+        if self.config.object_replay.enabled:
+            return self.config.object_replay.crop.min_context_px
+        return self.config.fcdr.min_crop_context_px
+
+    def _select_replay_mode(self, *, entry: MDMBPlusEntry, record: Any) -> str:
+        if self.config.fcdr.enabled:
+            return _select_fcdr_mode(entry=entry, record=record)
+        return "severity_context_crop"
+
+    def _loss_weight_for_kind(self, kind: str) -> float:
+        if not self.config.loss.enabled:
+            return 1.0
+        if kind == "copy_paste":
+            return min(self.config.loss.max_weight, self.config.loss.pasted_box_weight)
+        if kind in {"pair_miss", "pair_support"}:
+            return min(self.config.loss.max_weight, self.config.loss.pair_box_weight)
+        return min(self.config.loss.max_weight, self.config.loss.crop_box_weight)
+
+    def _component_loss_weight(self, base_weight: float, component_weight: float) -> float:
+        if not self.config.loss.enabled:
+            return 1.0
+        return min(self.config.loss.max_weight, float(base_weight) * float(component_weight))
 
     def _build_fcdr_summary(
         self,
         *,
-        replay_crops: Sequence[ReplayCrop],
+        replay_samples: Sequence[ReplaySampleSpec],
         failure_counts: Counter[str],
         mode_counts: Counter[str],
+        skipped_counts: Counter[str],
     ) -> dict[str, float | int | bool]:
+        kind_counts = Counter(sample.kind for sample in replay_samples)
+        mean_loss_weight = 0.0
+        if replay_samples:
+            mean_loss_weight = sum(sample.loss_weight for sample in replay_samples) / float(
+                len(replay_samples)
+            )
         summary: dict[str, float | int | bool] = {
             "fcdr_enabled": bool(self.config.fcdr.enabled),
-            "fcdr_num_crops": int(len(replay_crops)),
+            "fcdr_num_crops": int(kind_counts.get("crop", 0)),
             "fcdr_counterfactual_ratio_requested": (
                 self.config.fcdr.counterfactual_ratio if self.config.fcdr.enabled else 0.0
             ),
@@ -516,11 +1019,22 @@ class HardReplayPlanner:
             "fcdr_unique_crops": 0,
             "fcdr_copy_paste_prob": self.config.fcdr.copy_paste_prob,
             "fcdr_pair_replay_prob": self.config.fcdr.pair_replay_prob,
+            "object_replay_enabled": bool(self.config.object_replay.enabled),
+            "replay_num_object_samples": int(len(replay_samples)),
+            "replay_num_crop_specs": int(kind_counts.get("crop", 0)),
+            "replay_num_copy_paste_specs": int(kind_counts.get("copy_paste", 0)),
+            "replay_num_pair_specs": int(
+                kind_counts.get("pair_miss", 0) + kind_counts.get("pair_support", 0)
+            ),
+            "replay_loss_enabled": bool(self.config.loss.enabled),
+            "replay_loss_weight_mean": mean_loss_weight,
         }
         for failure_type, count in failure_counts.items():
             summary[f"fcdr_failure_{failure_type}"] = int(count)
         for mode, count in mode_counts.items():
             summary[f"fcdr_policy_{mode}"] = int(count)
+        for kind, count in skipped_counts.items():
+            summary[f"replay_skipped_{kind}"] = int(count)
         return summary
 
 
@@ -663,6 +1177,70 @@ def _box_iou_abs(
     return float(intersection) / float(union)
 
 
+def _ordered_target_indices(
+    *,
+    dataset_size: int,
+    source_index: int,
+    key: str,
+) -> list[int]:
+    if dataset_size <= 0:
+        return []
+    start = _stable_hash_int(key) % dataset_size
+    ordered = [(start + offset) % dataset_size for offset in range(dataset_size)]
+    if source_index in ordered and dataset_size > 1:
+        ordered.remove(source_index)
+        ordered.append(source_index)
+    return ordered
+
+
+def _find_paste_box(
+    *,
+    target_width: int,
+    target_height: int,
+    paste_width: int,
+    paste_height: int,
+    annotations: Sequence[Mapping[str, Any]],
+    max_overlap: float,
+    max_attempts: int,
+    key: str,
+) -> tuple[int, int, int, int] | None:
+    max_left = target_width - paste_width
+    max_top = target_height - paste_height
+    if max_left < 0 or max_top < 0:
+        return None
+
+    existing_boxes = [
+        box
+        for annotation in annotations
+        if (
+            box := _annotation_bbox_to_abs(
+                annotation,
+                width=target_width,
+                height=target_height,
+            )
+        )
+        is not None
+    ]
+    base = _stable_hash_int(key)
+    for attempt in range(max_attempts):
+        left = 0 if max_left == 0 else (base + attempt * 9973) % (max_left + 1)
+        top = 0 if max_top == 0 else (base // 7919 + attempt * 6151) % (max_top + 1)
+        paste_box = (left, top, left + paste_width, top + paste_height)
+        if not existing_boxes:
+            return paste_box
+        max_iou = max(_box_iou_abs(paste_box, box) for box in existing_boxes)
+        if max_iou <= max_overlap:
+            return paste_box
+    return None
+
+
+def _stable_hash_int(value: str) -> int:
+    result = 0
+    for char in value:
+        result = (result * 131 + ord(char)) % 2_147_483_647
+    return result
+
+
 class MixedReplayBatchSampler(Sampler[list[int]]):
     def __init__(
         self,
@@ -672,6 +1250,9 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         shuffle: bool,
         replay_ratio: float,
         counterfactual_ratio: float,
+        object_replay_ratios: Mapping[str, float] | None = None,
+        pair_requires_same_batch: bool = True,
+        pair_min_replay_slots: int = 2,
         replacement: bool,
         seed: int,
     ) -> None:
@@ -680,6 +1261,12 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self.shuffle = bool(shuffle)
         self.replay_ratio = float(replay_ratio)
         self.counterfactual_ratio = float(counterfactual_ratio)
+        self.object_replay_ratios = {
+            str(key): max(0.0, float(value))
+            for key, value in dict(object_replay_ratios or {}).items()
+        }
+        self.pair_requires_same_batch = bool(pair_requires_same_batch)
+        self.pair_min_replay_slots = int(pair_min_replay_slots)
         self.replacement = bool(replacement)
         self.seed = int(seed)
         self.epoch = 0
@@ -702,7 +1289,9 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self._replay_index = replay_index
         self.epoch = int(epoch)
         replay_is_active = self.replay_count > 0 and (
-            bool(replay_index.replay_dataset_indices) or bool(replay_index.replay_crops)
+            bool(replay_index.replay_dataset_indices)
+            or bool(replay_index.replay_samples)
+            or bool(replay_index.replay_crops)
         )
         self._active_replay_count = self.replay_count if replay_is_active else 0
         self._active_base_count = self.batch_size - self._active_replay_count
@@ -734,20 +1323,17 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             base_indices = list(range(self.dataset_size))
 
         num_batches = len(self)
-        replay_schedule = self._build_replay_schedule(
+        replay_batches = self._build_replay_schedule(
+            num_batches=num_batches,
             total_replay_samples=num_batches * self._active_replay_count,
             generator=generator,
         )
-        replay_cursor = 0
         replay_counts: Counter[int] = Counter()
 
-        for batch_start in range(0, self.dataset_size, self._active_base_count):
+        for batch_number, batch_start in enumerate(range(0, self.dataset_size, self._active_base_count)):
             batch = list(base_indices[batch_start : batch_start + self._active_base_count])
-            if self._active_replay_count > 0 and replay_cursor < len(replay_schedule):
-                replay_slice = replay_schedule[
-                    replay_cursor : replay_cursor + self._active_replay_count
-                ]
-                replay_cursor += len(replay_slice)
+            if self._active_replay_count > 0 and batch_number < len(replay_batches):
+                replay_slice = replay_batches[batch_number]
                 batch.extend(replay_slice)
                 replay_counts.update(replay_slice)
 
@@ -757,38 +1343,118 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
 
             yield batch
 
-        self._finalize_summary(replay_counts, total_replay_samples=len(replay_schedule))
+        self._finalize_summary(
+            replay_counts,
+            total_replay_samples=sum(len(batch) for batch in replay_batches),
+        )
 
     def _build_replay_schedule(
         self,
         *,
+        num_batches: int,
         total_replay_samples: int,
         generator: torch.Generator,
-    ) -> list[int]:
+    ) -> list[list[int]]:
         if total_replay_samples <= 0:
             return []
 
-        crop_samples = 0
-        if self.counterfactual_ratio > 0.0 and self._replay_index.replay_crops:
-            crop_samples = int(round(total_replay_samples * self.counterfactual_ratio))
-            crop_samples = max(1, min(total_replay_samples, crop_samples))
-
-        image_samples = total_replay_samples - crop_samples
-        schedule = self._build_image_replay_schedule(
-            total_replay_samples=image_samples,
+        allocations = self._allocate_replay_slots(
+            slots_per_batch=self._active_replay_count,
+            num_batches=num_batches,
+        )
+        image_pool = self._build_image_replay_schedule(
+            total_replay_samples=allocations["image"],
             generator=generator,
         )
-        schedule.extend(
-            self._build_crop_replay_schedule(
-                total_replay_samples=crop_samples,
-                generator=generator,
-            )
+        crop_pool = self._build_object_replay_schedule(
+            kind="crop",
+            total_replay_samples=allocations["crop"],
+            generator=generator,
+        )
+        copy_pool = self._build_object_replay_schedule(
+            kind="copy_paste",
+            total_replay_samples=allocations["copy_paste"],
+            generator=generator,
+        )
+        pair_pool = self._build_pair_replay_schedule(
+            total_pairs=allocations["pair"] // 2,
+            generator=generator,
         )
 
-        if len(schedule) > 1:
-            order = torch.randperm(len(schedule), generator=generator).tolist()
-            schedule = [schedule[index] for index in order]
-        return schedule
+        pools = {
+            "image": image_pool,
+            "crop": crop_pool,
+            "copy_paste": copy_pool,
+        }
+        cursors = {"image": 0, "crop": 0, "copy_paste": 0, "pair": 0}
+        replay_batches: list[list[int]] = []
+
+        for _ in range(num_batches):
+            replay_slice: list[int] = []
+            if cursors["pair"] < len(pair_pool):
+                replay_slice.extend(pair_pool[cursors["pair"]])
+                cursors["pair"] += 1
+
+            for kind in ("copy_paste", "crop", "image"):
+                pool = pools[kind]
+                while len(replay_slice) < self._active_replay_count and cursors[kind] < len(pool):
+                    replay_slice.append(pool[cursors[kind]])
+                    cursors[kind] += 1
+
+            if self.shuffle and len(replay_slice) > 1:
+                order = torch.randperm(len(replay_slice), generator=generator).tolist()
+                replay_slice = [replay_slice[index] for index in order]
+            replay_batches.append(replay_slice[: self._active_replay_count])
+
+        return replay_batches
+
+    def _allocate_replay_slots(
+        self,
+        *,
+        slots_per_batch: int,
+        num_batches: int,
+    ) -> dict[str, int]:
+        total_slots = slots_per_batch * num_batches
+        if total_slots <= 0:
+            return {"image": 0, "crop": 0, "copy_paste": 0, "pair": 0}
+
+        ratios = dict(self.object_replay_ratios)
+        if not ratios and self.counterfactual_ratio > 0.0:
+            ratios = {"crop": self.counterfactual_ratio}
+
+        pair_ratio = ratios.get("pair", 0.0)
+        pair_slots = 0
+        if (
+            pair_ratio > 0.0
+            and slots_per_batch >= self.pair_min_replay_slots
+            and self._pair_groups()
+        ):
+            pair_slots_per_batch = int(round(slots_per_batch * pair_ratio))
+            pair_slots_per_batch = max(2, pair_slots_per_batch)
+            pair_slots_per_batch = min(slots_per_batch, pair_slots_per_batch)
+            pair_slots_per_batch -= pair_slots_per_batch % 2
+            pair_slots = pair_slots_per_batch * num_batches
+
+        remaining_slots = total_slots - pair_slots
+        crop_slots = 0
+        if ratios.get("crop", 0.0) > 0.0 and self._samples_by_kind("crop"):
+            crop_slots = int(round(total_slots * ratios["crop"]))
+        copy_slots = 0
+        if ratios.get("copy_paste", 0.0) > 0.0 and self._samples_by_kind("copy_paste"):
+            copy_slots = int(round(total_slots * ratios["copy_paste"]))
+
+        if crop_slots + copy_slots > remaining_slots:
+            scale = remaining_slots / float(max(crop_slots + copy_slots, 1))
+            crop_slots = int(math.floor(crop_slots * scale))
+            copy_slots = int(math.floor(copy_slots * scale))
+
+        image_slots = max(0, total_slots - pair_slots - crop_slots - copy_slots)
+        return {
+            "image": image_slots,
+            "crop": crop_slots,
+            "copy_paste": copy_slots,
+            "pair": pair_slots,
+        }
 
     def _build_image_replay_schedule(
         self,
@@ -834,34 +1500,35 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         )
         return [expanded_indices[index] for index in chosen.tolist()]
 
-    def _build_crop_replay_schedule(
+    def _build_object_replay_schedule(
         self,
         *,
+        kind: str,
         total_replay_samples: int,
         generator: torch.Generator,
     ) -> list[int]:
         if total_replay_samples <= 0:
             return []
-        replay_crops = list(self._replay_index.replay_crops)
-        if not replay_crops:
+        replay_samples = self._samples_by_kind(kind)
+        if not replay_samples:
             return []
 
         virtual_offset = self.dataset_size
         if not self.replacement:
-            sample_count = min(total_replay_samples, len(replay_crops))
+            sample_count = min(total_replay_samples, len(replay_samples))
             weights = torch.tensor(
-                [max(float(crop.sampling_weight), 1e-6) for crop in replay_crops],
+                [max(float(sample.sampling_weight), 1e-6) for _, sample in replay_samples],
                 dtype=torch.float32,
             )
             chosen = torch.multinomial(weights, sample_count, replacement=False, generator=generator)
-            return [virtual_offset + index for index in chosen.tolist()]
+            return [virtual_offset + replay_samples[index][0] for index in chosen.tolist()]
 
         expanded_indices: list[int] = []
         expanded_weights: list[float] = []
-        for crop_index, crop in enumerate(replay_crops):
-            cap = max(1, int(crop.replay_cap))
-            expanded_indices.extend([virtual_offset + crop_index] * cap)
-            expanded_weights.extend([max(float(crop.sampling_weight), 1e-6)] * cap)
+        for sample_index, sample in replay_samples:
+            cap = max(1, int(sample.replay_cap))
+            expanded_indices.extend([virtual_offset + sample_index] * cap)
+            expanded_weights.extend([max(float(sample.sampling_weight), 1e-6)] * cap)
 
         if not expanded_indices:
             return []
@@ -875,6 +1542,61 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             generator=generator,
         )
         return [expanded_indices[index] for index in chosen.tolist()]
+
+    def _build_pair_replay_schedule(
+        self,
+        *,
+        total_pairs: int,
+        generator: torch.Generator,
+    ) -> list[tuple[int, int]]:
+        if total_pairs <= 0:
+            return []
+        groups = self._pair_groups()
+        if not groups:
+            return []
+
+        virtual_offset = self.dataset_size
+        expanded_pairs: list[tuple[int, int]] = []
+        expanded_weights: list[float] = []
+        for miss_index, support_index, weight, cap in groups:
+            expanded_pairs.extend([(virtual_offset + miss_index, virtual_offset + support_index)] * cap)
+            expanded_weights.extend([max(float(weight), 1e-6)] * cap)
+
+        if not expanded_pairs:
+            return []
+
+        sample_count = min(total_pairs, len(expanded_pairs))
+        weights = torch.tensor(expanded_weights, dtype=torch.float32)
+        chosen = torch.multinomial(weights, sample_count, replacement=False, generator=generator)
+        return [expanded_pairs[index] for index in chosen.tolist()]
+
+    def _samples_by_kind(self, kind: str) -> list[tuple[int, ReplaySampleSpec]]:
+        samples = self._replay_index.replay_samples or self._replay_index.replay_crops
+        return [
+            (index, sample)
+            for index, sample in enumerate(samples)
+            if sample.kind == kind
+        ]
+
+    def _pair_groups(self) -> list[tuple[int, int, float, int]]:
+        samples = self._replay_index.replay_samples or self._replay_index.replay_crops
+        by_pair: dict[str, dict[str, tuple[int, ReplaySampleSpec]]] = {}
+        for index, sample in enumerate(samples):
+            if sample.kind not in {"pair_miss", "pair_support"} or sample.pair_id is None:
+                continue
+            role = sample.role or ("miss" if sample.kind == "pair_miss" else "support")
+            by_pair.setdefault(sample.pair_id, {})[role] = (index, sample)
+
+        groups: list[tuple[int, int, float, int]] = []
+        for roles in by_pair.values():
+            if "miss" not in roles or "support" not in roles:
+                continue
+            miss_index, miss_sample = roles["miss"]
+            support_index, support_sample = roles["support"]
+            weight = max(miss_sample.sampling_weight, support_sample.sampling_weight)
+            cap = max(1, min(miss_sample.replay_cap, support_sample.replay_cap))
+            groups.append((miss_index, support_index, weight, cap))
+        return groups
 
     def _finalize_summary(
         self,
@@ -898,6 +1620,17 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
                 if dataset_index >= self.dataset_size
             }
         )
+        replay_samples = self._replay_index.replay_samples or self._replay_index.replay_crops
+        object_kind_counts: Counter[str] = Counter()
+        object_loss_sum = 0.0
+        object_loss_samples = 0
+        for sample_index, count in crop_replay_counts.items():
+            if sample_index < 0 or sample_index >= len(replay_samples):
+                continue
+            sample = replay_samples[sample_index]
+            object_kind_counts[sample.kind] += int(count)
+            object_loss_sum += float(sample.loss_weight) * int(count)
+            object_loss_samples += int(count)
 
         replay_exposure_per_gt = 0.0
         num_active_gt = int(self._replay_index.summary.get("replay_num_active_gt", 0))
@@ -912,10 +1645,19 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         if total_samples > 0:
             effective_ratio = total_replay_samples / float(total_samples)
 
-        fcdr_samples = int(sum(crop_replay_counts.values()))
+        fcdr_enabled = bool(self._replay_index.summary.get("fcdr_enabled", False))
+        fcdr_samples = int(object_kind_counts.get("crop", 0)) if fcdr_enabled else 0
         fcdr_ratio_effective = 0.0
         if total_replay_samples > 0:
             fcdr_ratio_effective = fcdr_samples / float(total_replay_samples)
+        fcdr_unique_crops = 0
+        if fcdr_enabled:
+            fcdr_unique_crops = sum(
+                1
+                for sample_index in crop_replay_counts
+                if 0 <= sample_index < len(replay_samples)
+                and replay_samples[sample_index].kind == "crop"
+            )
 
         self._last_summary = {
             **dict(self._replay_index.summary),
@@ -926,7 +1668,18 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             "replay_unique_images": int(len(image_replay_counts)),
             "fcdr_samples": fcdr_samples,
             "fcdr_ratio_effective": fcdr_ratio_effective,
-            "fcdr_unique_crops": int(len(crop_replay_counts)),
+            "fcdr_unique_crops": int(fcdr_unique_crops),
+            "replay_crop_samples": int(object_kind_counts.get("crop", 0)),
+            "replay_copy_paste_samples": int(object_kind_counts.get("copy_paste", 0)),
+            "replay_pair_samples": int(
+                object_kind_counts.get("pair_miss", 0)
+                + object_kind_counts.get("pair_support", 0)
+            ),
+            "replay_loss_weight_mean": (
+                object_loss_sum / float(object_loss_samples)
+                if object_loss_samples > 0
+                else float(self._replay_index.summary.get("replay_loss_weight_mean", 0.0))
+            ),
         }
 
 
@@ -992,6 +1745,9 @@ def build_hard_replay_controller_from_yaml(
         counterfactual_ratio=(
             config.fcdr.counterfactual_ratio if config.fcdr.enabled else 0.0
         ),
+        object_replay_ratios=_object_replay_ratios(config),
+        pair_requires_same_batch=config.object_replay.pair.require_same_batch,
+        pair_min_replay_slots=config.object_replay.pair.min_replay_slots,
         replacement=config.replacement,
         seed=seed,
     )
@@ -1000,3 +1756,18 @@ def build_hard_replay_controller_from_yaml(
         dataset=dataset,
         batch_sampler=batch_sampler,
     )
+
+
+def _object_replay_ratios(config: HardReplayConfig) -> dict[str, float]:
+    if config.object_replay.enabled:
+        ratios: dict[str, float] = {}
+        if config.object_replay.crop.enabled:
+            ratios["crop"] = config.object_replay.crop_ratio
+        if config.object_replay.copy_paste.enabled:
+            ratios["copy_paste"] = config.object_replay.copy_paste_ratio
+        if config.object_replay.pair.enabled:
+            ratios["pair"] = config.object_replay.pair_ratio
+        return ratios
+    if config.fcdr.enabled:
+        return {"crop": config.fcdr.counterfactual_ratio}
+    return {}

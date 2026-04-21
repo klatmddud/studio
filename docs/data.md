@@ -52,17 +52,22 @@ When `modules/cfg/hard_replay.yaml` is enabled for the active architecture:
 - Each epoch still walks the full base dataset once, then injects replay samples into each batch
   according to `replay_ratio`
 
-When top-level Hard Replay `enabled: true` and `fcdr.enabled: true`, the train dataset is wrapped
-by `CounterfactualReplayDataset`.
+When top-level Hard Replay `enabled: true` and either `object_replay.enabled: true` or
+`fcdr.enabled: true`, the train dataset is wrapped by `HardReplayDatasetWrapper`.
 The wrapper keeps original dataset indices unchanged and maps virtual indices after the base
-dataset range to FCDR crop replay samples. Replay crop targets include `is_replay: true`,
-`source_image_id`, `replay_gt_uid`, `replay_failure_type`, and `replay_mode` metadata.
+dataset range to replay samples.
 
-FCDR replay indices are regenerated every epoch from MDMB++. Because worker dataset copies would
+Supported replay sample kinds:
+
+- `crop`: crop a hard GT with context and remap boxes to crop coordinates
+- `copy_paste`: paste a rectangular hard-object crop into a sampled target image
+- `pair_miss` / `pair_support`: expose current miss and support crops for the same `gt_uid`
+
+Replay targets include `is_replay`, `replay_kind`, `source_image_id`, `replay_gt_uid`,
+`replay_pair_id`, `replay_role`, `replay_loss_weight`, and `replay_box_weights` metadata.
+
+Replay indices are regenerated every epoch from MDMB++. Because worker dataset copies would
 otherwise keep stale replay indices, the loader disables persistent workers for this wrapper.
-
-The current FCDR implementation enables crop replay only. Copy-paste replay and strict pair replay
-remain disabled extension points.
 
 ## DataLoader Config
 

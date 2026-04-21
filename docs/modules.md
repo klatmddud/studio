@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `candidate_densification`, `recall`, `far`, and `mce` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `recall`, `far`, and `mce` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
 because it operates at the data-loading layer.
 
@@ -80,19 +80,18 @@ Data-layer replay that redistributes training exposure toward images whose GTs r
 - Sampler: `MixedReplayBatchSampler`
 - Controller: `HardReplayController`
 - Config: `modules/cfg/hard_replay.yaml`
-- Arch support: FCOS
+- Arch support: data-layer replay is model-agnostic; replay-aware loss weighting is FCOS-only
 
 Current scope is the minimal first version:
 
 - Epoch-level `ReplayIndex`
 - Image-level replay
+- Object-level crop replay through `object_replay.crop`
+- Rectangular copy-paste replay through `object_replay.copy_paste`
+- Support/miss pair replay through `object_replay.pair`
 - FCDR crop replay when `fcdr.enabled: true`
 - Mixed batch composition
-
-Current implementation does **not** enable:
-
-- Copy-paste replay
-- Pair replay
+- FCOS replay-aware per-GT loss weighting through replay target metadata
 
 Important behavior:
 
@@ -100,9 +99,11 @@ Important behavior:
 - Sampling weight applies `temperature` as an exponent
 - Replay candidates are filtered by `replay_recency_window`
 - Per-image replay repeats are capped by `max_replays_per_gt_per_epoch`
-- FCDR crop replay creates virtual crop indices after the base dataset range
-- FCDR replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++/FAR memory updates
-- FCDR crop replay uses `fcdr.counterfactual_ratio` to split replay slots between image-level replay and crop-level replay
+- Object replay creates virtual indices after the base dataset range
+- Replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++/FAR memory updates
+- Pair replay keeps `pair_miss` and `pair_support` in the same mini-batch when replay slots allow it
+- FCDR is retained as a failure-conditioned policy preset over the object replay path
+- FCOS applies `replay_box_weights` only to positive points matched to replay-weighted GTs
 
 ### Candidate Densification (`modules/nn/candidate_densification.py`)
 
@@ -123,6 +124,27 @@ Current scope is the minimal first version:
 - Dense positives are selected from points near hard GT centers
 - Default behavior uses only points that were background under the base FCOS assignment
 - Loss weight uses linear warmup through `lambda_dense`
+
+### FAAR - Failure-Aware Assignment Repair (`modules/nn/faar.py`)
+
+Training-time assignment repair for hard GTs stored in `MDMB++`.
+
+- Depends on MDMB++
+- Hooks: `start_epoch()`, `end_epoch()`
+- Planning API: `faar.plan(mdmbpp, targets, image_shapes)`
+- Training path: FCOS repairs `matched_idxs` after the base assignment and before loss computation
+- Summary: `faar.summary()`
+- Config: `modules/cfg/faar.yaml`
+- Arch support: FCOS
+
+Current scope is the minimal first version:
+
+- FCOS only
+- No auxiliary loss is added
+- Repair targets are selected by MDMB++ `failure_type`, `severity`, and relapse state
+- Default behavior only converts unassigned FCOS points into positives for the hard GT
+- Existing positive assignments are not stolen unless `allow_positive_reassignment: true`
+- If Candidate Densification is also enabled, FAAR runs first so dense supervision sees the repaired assignment
 
 ### RECALL - Selective Loss Reweighting (`modules/nn/recall.py`)
 
@@ -158,11 +180,12 @@ streak statistics.
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
-2. FCOS forward reads `model.mdmbpp` through `candidate_densifier` and adds `candidate_dense` loss when enabled.
-3. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
-4. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
-5. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
+2. FCOS forward reads `model.mdmbpp` through FAAR and Candidate Densification when enabled.
+3. FAAR repairs `matched_idxs`; Candidate Densification can then add `candidate_dense` auxiliary loss.
+4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
+5. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
+6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
 
 ## Compatibility
 
@@ -172,6 +195,7 @@ FCOS currently wires the following path:
 | MDMB++ | yes | no | no |
 | Hard Replay | yes | no | no |
 | Candidate Densification | yes | no | no |
+| FAAR | yes | no | no |
 | RECALL | yes | no | no |
 | FAR | yes | no | no |
 | MCE | yes | no | no |
