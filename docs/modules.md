@@ -68,6 +68,9 @@ Useful read APIs for downstream modules:
 - `mdmbpp.get_dense_targets(image_id)`
 - `mdmbpp.get_record(gt_uid)`
 
+Implementation note: MDMB++ stores persistent memory tensors on CPU, but transient IoU checks align
+GT, label, and score tensors to the final-detection device before calling TorchVision box ops.
+
 ### Hard Replay (`scripts/runtime/hard_replay.py`)
 
 Data-layer replay that redistributes training exposure toward images whose GTs remain unresolved in

@@ -1193,6 +1193,10 @@ def _find_best_final_detection(
     if final_boxes.numel() == 0:
         return None
 
+    gt_box = gt_box.to(device=final_boxes.device)
+    final_labels = final_labels.to(device=final_boxes.device)
+    final_scores = final_scores.to(device=final_boxes.device)
+
     ious = box_ops.box_iou(gt_box.unsqueeze(0), final_boxes)[0]
     label_mask = final_labels == int(gt_label)
     if not bool(label_mask.any().item()):
