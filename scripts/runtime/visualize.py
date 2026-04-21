@@ -28,22 +28,20 @@ _MDMB_KEYS = [
 ]
 
 
-# ─── training curves ──────────────────────────────────────────────────────────
-
 def plot_loss_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
-    records = [r for r in history if "train" in r]
+    records = [record for record in history if "train" in record]
     if not records:
         return
 
     all_keys: set[str] = set()
-    for r in records:
-        all_keys.update(k for k in r["train"] if k not in _LOSS_SKIP)
-    sorted_keys = sorted(all_keys, key=lambda k: (k != "loss", k))
+    for record in records:
+        all_keys.update(key for key in record["train"] if key not in _LOSS_SKIP)
+    sorted_keys = sorted(all_keys, key=lambda key: (key != "loss", key))
 
-    epochs = [r["epoch"] for r in records]
+    epochs = [record["epoch"] for record in records]
     fig, ax = plt.subplots(figsize=(10, 6))
     for key in sorted_keys:
-        values = [r["train"].get(key, float("nan")) for r in records]
+        values = [record["train"].get(key, float("nan")) for record in records]
         label = "total_loss" if key == "loss" else key
         ax.plot(epochs, values, label=label, linewidth=2.0 if key == "loss" else 1.2)
 
@@ -57,14 +55,14 @@ def plot_loss_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
 
 
 def plot_map_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
-    records = [r for r in history if "val" in r]
+    records = [record for record in history if "val" in record]
     if not records:
         return
 
-    epochs = [r["epoch"] for r in records]
+    epochs = [record["epoch"] for record in records]
     fig, ax = plt.subplots(figsize=(10, 6))
     for key, label in _MAP_KEYS:
-        values = [r["val"].get(key, float("nan")) for r in records]
+        values = [record["val"].get(key, float("nan")) for record in records]
         ax.plot(epochs, values, label=label, linewidth=1.8, marker="o", markersize=3)
 
     ax.set_xlabel("Epoch")
@@ -78,14 +76,14 @@ def plot_map_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
 
 
 def plot_mdmb_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
-    records = [r for r in history if r.get("mdmb") is not None]
+    records = [record for record in history if record.get("mdmb") is not None]
     if not records:
         return
 
-    epochs = [r["epoch"] for r in records]
+    epochs = [record["epoch"] for record in records]
     fig, ax = plt.subplots(figsize=(10, 6))
     for key, label in _MDMB_KEYS:
-        values = [r["mdmb"].get(key, 0) for r in records]
+        values = [record["mdmb"].get(key, 0) for record in records]
         ax.plot(epochs, values, label=label, linewidth=1.8, marker="o", markersize=3)
 
     ax.set_xlabel("Epoch")
@@ -97,14 +95,13 @@ def plot_mdmb_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
     _save_figure(fig, output_dir / "figures" / "mdmb.png")
 
 
-# ─── confusion matrix ─────────────────────────────────────────────────────────
-
 def build_confusion_matrix(
     predictions: list[dict[str, Any]],
     data_loader,
-    iou_thresh: float = 0.5,
+    iou_thresh: float = 0.45,
+    conf_thresh: float = 0.25,
 ) -> tuple[np.ndarray, list[str]]:
-    """Build confusion matrix from COCO-format predictions and a CocoDetectionDataset.
+    """Build a YOLO-compatible confusion matrix from COCO-format predictions.
 
     Returns (cm, class_names) where cm has shape [nc+1, nc+1] indexed as [pred, true].
     Index nc is background (FP column / FN row).
@@ -112,67 +109,91 @@ def build_confusion_matrix(
     coco = data_loader.dataset.coco
     cat_ids = sorted(coco.cats.keys())
     class_names = [coco.cats[cid]["name"] for cid in cat_ids] + ["background"]
-    cat_to_idx = {cid: i for i, cid in enumerate(cat_ids)}
-    nc = len(cat_ids)
-    bg = nc
-    cm = np.zeros((nc + 1, nc + 1), dtype=np.int64)
+    cat_to_idx = {cid: index for index, cid in enumerate(cat_ids)}
+    num_classes = len(cat_ids)
+    background = num_classes
+    cm = np.zeros((num_classes + 1, num_classes + 1), dtype=np.int64)
 
     preds_by_image: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for p in predictions:
-        preds_by_image[int(p["image_id"])].append(p)
+    for prediction in predictions:
+        preds_by_image[int(prediction["image_id"])].append(prediction)
 
-    for img_id in coco.imgs:
-        ann_ids = coco.getAnnIds(imgIds=[img_id], iscrowd=False)
-        anns = coco.loadAnns(ann_ids)
+    for image_id in coco.imgs:
+        ann_ids = coco.getAnnIds(imgIds=[image_id], iscrowd=False)
+        annotations = coco.loadAnns(ann_ids)
 
         gt_boxes: list[list[float]] = []
         gt_labels: list[int] = []
-        for ann in anns:
-            cid = ann["category_id"]
-            if cid not in cat_to_idx:
+        for annotation in annotations:
+            category_id = annotation["category_id"]
+            if category_id not in cat_to_idx:
                 continue
-            x, y, w, h = ann["bbox"]
-            gt_boxes.append([x, y, x + w, y + h])
-            gt_labels.append(cat_to_idx[cid])
+            x, y, width, height = annotation["bbox"]
+            gt_boxes.append([x, y, x + width, y + height])
+            gt_labels.append(cat_to_idx[category_id])
 
-        img_preds = sorted(preds_by_image.get(img_id, []), key=lambda p: -p["score"])
+        image_predictions = sorted(
+            (
+                prediction
+                for prediction in preds_by_image.get(image_id, [])
+                if float(prediction.get("score", 0.0)) > float(conf_thresh)
+            ),
+            key=lambda prediction: -float(prediction.get("score", 0.0)),
+        )
         pred_boxes: list[list[float]] = []
         pred_labels: list[int] = []
-        for p in img_preds:
-            x, y, w, h = p["bbox"]
-            pred_boxes.append([x, y, x + w, y + h])
-            pred_labels.append(cat_to_idx.get(p["category_id"], bg))
+        for prediction in image_predictions:
+            x, y, width, height = prediction["bbox"]
+            pred_boxes.append([x, y, x + width, y + height])
+            pred_labels.append(cat_to_idx.get(prediction["category_id"], background))
 
         gt_matched = [False] * len(gt_boxes)
         pred_matched = [False] * len(pred_boxes)
 
         if gt_boxes and pred_boxes:
-            iou_mat = box_iou(
-                torch.tensor(pred_boxes, dtype=torch.float32),
+            iou_matrix = box_iou(
                 torch.tensor(gt_boxes, dtype=torch.float32),
-            ).numpy()  # [P, G]
+                torch.tensor(pred_boxes, dtype=torch.float32),
+            ).numpy()  # [G, P]
 
-            # GT-centric: 각 GT에 대해 IoU가 가장 높은 미매칭 예측을 선택
-            for gi in range(len(gt_boxes)):
-                best_pi, best_iou = -1, iou_thresh
-                for pi in range(len(pred_boxes)):
-                    if not pred_matched[pi] and iou_mat[pi, gi] > best_iou:
-                        best_iou = iou_mat[pi, gi]
-                        best_pi = pi
-                if best_pi >= 0:
-                    gt_matched[gi] = True
-                    pred_matched[best_pi] = True
-                    cm[pred_labels[best_pi], gt_labels[gi]] += 1
+            for gt_index, pred_index in _match_yolo_confusion_pairs(iou_matrix, iou_thresh):
+                gt_matched[gt_index] = True
+                pred_matched[pred_index] = True
+                cm[pred_labels[pred_index], gt_labels[gt_index]] += 1
 
-        for gi, matched in enumerate(gt_matched):
+        for gt_index, matched in enumerate(gt_matched):
             if not matched:
-                cm[bg, gt_labels[gi]] += 1
+                cm[background, gt_labels[gt_index]] += 1
 
-        for pi, matched in enumerate(pred_matched):
+        for pred_index, matched in enumerate(pred_matched):
             if not matched:
-                cm[pred_labels[pi], bg] += 1
+                cm[pred_labels[pred_index], background] += 1
 
     return cm, class_names
+
+
+def _match_yolo_confusion_pairs(
+    iou_matrix: np.ndarray,
+    iou_thresh: float,
+) -> np.ndarray:
+    gt_indices, pred_indices = np.where(iou_matrix > float(iou_thresh))
+    if gt_indices.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    matches = np.stack(
+        (
+            gt_indices,
+            pred_indices,
+            iou_matrix[gt_indices, pred_indices],
+        ),
+        axis=1,
+    )
+    if matches.shape[0] > 1:
+        matches = matches[matches[:, 2].argsort()[::-1]]
+        matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+        matches = matches[matches[:, 2].argsort()[::-1]]
+        matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+    return matches[:, :2].astype(np.int64)
 
 
 def plot_confusion_matrices(
@@ -203,8 +224,6 @@ def plot_confusion_matrices(
     )
 
 
-# ─── MDMB per-class bar chart ─────────────────────────────────────────────────
-
 def plot_mdmb_per_class(
     model: torch.nn.Module,
     data_loader,
@@ -216,15 +235,15 @@ def plot_mdmb_per_class(
 
     coco = data_loader.dataset.coco
     cat_ids = sorted(coco.cats.keys())
-    cat_to_idx = {cid: i for i, cid in enumerate(cat_ids)}
+    cat_to_idx = {cid: index for index, cid in enumerate(cat_ids)}
     class_names = [coco.cats[cid]["name"] for cid in cat_ids]
 
     counts = np.zeros(len(cat_ids), dtype=np.int64)
     for _, entries in mdmb.items():
         for entry in entries:
-            idx = cat_to_idx.get(int(entry.class_id))
-            if idx is not None:
-                counts[idx] += 1
+            index = cat_to_idx.get(int(entry.class_id))
+            if index is not None:
+                counts[index] += 1
 
     if counts.sum() == 0:
         return
@@ -242,8 +261,6 @@ def plot_mdmb_per_class(
     _save_figure(fig, output_dir / "figures" / "mdmb_per_class.png")
 
 
-# ─── internal helpers ─────────────────────────────────────────────────────────
-
 def _plot_single_cm(
     cm: np.ndarray,
     class_names: list[str],
@@ -251,12 +268,11 @@ def _plot_single_cm(
     title: str,
     normalize: bool,
 ) -> None:
-    nc = len(class_names)
-    cell_size = max(0.55, 8.0 / nc)
-    fig_size = max(8, nc * cell_size)
+    num_classes = len(class_names)
+    cell_size = max(0.55, 8.0 / num_classes)
+    fig_size = max(8, num_classes * cell_size)
     fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.85))
 
-    # Annotate only non-zero cells
     if normalize:
         annot = np.where(cm > 0, np.round(cm, 2).astype(str), "")
     else:
@@ -287,4 +303,4 @@ def _save_figure(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[visualize] saved → {path}")
+    print(f"[visualize] saved -> {path}")

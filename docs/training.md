@@ -171,6 +171,10 @@ Additional outputs:
 - `{output_dir}/metadata/train.yaml`
 - `{output_dir}/metadata/run.json`
 
+Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
+filtered with `score > 0.25`, GT/prediction pairs use global one-to-one matching at `IoU > 0.45`,
+and `confusion_matrix_normalized.png` is normalized by true-class column.
+
 ## CLI Flags
 
 ```bash

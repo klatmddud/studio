@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 amp_type_a: 2.5
 amp_type_b: 1.5
 ignore_iou_threshold: 0.3
