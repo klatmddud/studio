@@ -19,14 +19,12 @@ from modules.nn import (
     CanonicalCandidate,
     DensePlan,
     FailureAwareAssignmentRepair,
+    FailureAwareNegativeGradientShielding,
     MDMBPlus,
-    MDMBSelectiveLoss,
     MissAwareRankingCalibration,
     PerImageCandidateSummary,
     RepairPlan,
 )
-from modules.nn.far import ForgettingAwareReplay
-from modules.nn.mce import MissConditionedEmbedding
 from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
@@ -55,16 +53,12 @@ def _has_replay_box_weights(targets: list[dict[str, torch.Tensor]] | None) -> bo
 
 class MDMBFCOS(FCOS):
     """
-    FCOS variant with MDMB-guided loss reweighting and optional FAR/MCE modules.
+    FCOS variant with MDMB/MDMB++ memory updates and optional UMR training modules.
 
-    During training the wrapper can replace the standard aggregated FCOS loss
-    with a per-point loss decomposition, then reweight positives / suppress
-    nearby negatives using the MDMB bank. After optimizer.step(), it runs an
-    extra no-grad inference pass to refresh the MDMB state from final detections
-    and (if enabled) to update the FAR anchor bank.
-
-    MCE (Miss-Conditioned class Embedding) multiplies per-point weights by a
-    per-GT factor derived from class prototype similarity and miss streak ratio.
+    During training the wrapper can repair assignments, add ranking/dense
+    auxiliary losses, and apply replay-aware per-GT loss weights. After
+    optimizer.step(), it runs an extra no-grad inference pass to refresh MDMB
+    and MDMB++ state from final detections.
     """
 
     def __init__(
@@ -72,22 +66,18 @@ class MDMBFCOS(FCOS):
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        recall: MDMBSelectiveLoss | None = None,
-        far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        fang: FailureAwareNegativeGradientShielding | None = None,
         marc: MissAwareRankingCalibration | None = None,
-        mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._mdmbpp_ref = weakref.ref(mdmbpp) if mdmbpp is not None else None
-        self._recall_ref = weakref.ref(recall) if recall is not None else None
-        self._far_ref = weakref.ref(far) if far is not None else None
         self._faar_ref = weakref.ref(faar) if faar is not None else None
+        self._fang_ref = weakref.ref(fang) if fang is not None else None
         self._marc_ref = weakref.ref(marc) if marc is not None else None
-        self._mce_ref = weakref.ref(mce) if mce is not None else None
         self._candidate_densifier_ref = (
             weakref.ref(candidate_densifier) if candidate_densifier is not None else None
         )
@@ -150,10 +140,7 @@ class MDMBFCOS(FCOS):
             if targets is None:
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
-            mdmb = self._get_mdmb()
             mdmbpp = self._get_mdmbpp()
-            recall = self._get_recall()
-            mce = self._get_mce()
             faar = self._get_faar()
             if faar is not None and faar.should_apply(mdmbpp=mdmbpp):
                 repair_plan = faar.plan(
@@ -180,20 +167,44 @@ class MDMBFCOS(FCOS):
                     skipped_no_candidate_points=skipped_no_candidate_points,
                     skipped_existing_positive=skipped_existing_positive,
                 )
-            use_weighted = (
-                (mdmb is not None and (recall is not None or mce is not None))
-                or _has_replay_box_weights(targets)
-            )
-            if not use_weighted:
+            fang = self._get_fang()
+            fang_class_weights: list[torch.Tensor] | None = None
+            use_fang = False
+            if fang is not None and fang.should_apply(mdmbpp=mdmbpp):
+                shield_plan = fang.plan(
+                    mdmbpp=mdmbpp,
+                    targets=targets,
+                    image_shapes=images.image_sizes,
+                )
+                (
+                    fang_class_weights,
+                    shield_points,
+                    skipped_no_candidate_points,
+                    shield_weight_sum,
+                ) = fang.compute_class_weights(
+                    shield_plan=shield_plan,
+                    targets=targets,
+                    anchors=anchors,
+                    matched_idxs=matched_idxs,
+                    num_classes=int(head_outputs["cls_logits"].shape[-1]),
+                )
+                fang.record_shield_step(
+                    shield_plan=shield_plan,
+                    shield_points=shield_points,
+                    skipped_no_candidate_points=skipped_no_candidate_points,
+                    shield_weight_sum=shield_weight_sum,
+                )
+                use_fang = True
+            use_weighted = _has_replay_box_weights(targets)
+            if not use_weighted and not use_fang:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
             else:
-                losses = self._compute_mdmb_weighted_loss_dict(
+                losses = self._compute_replay_weighted_loss_dict(
                     targets=targets,
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
-                    image_shapes=images.image_sizes,
-                    features=features,
+                    class_loss_weights=fang_class_weights,
                 )
 
             marc = self._get_marc()
@@ -254,25 +265,6 @@ class MDMBFCOS(FCOS):
                     losses = dict(losses)
                     losses["candidate_dense"] = dense_loss
 
-            far = self._get_far()
-            if far is not None and mdmb is not None and far.should_apply():
-                far_loss = far.compute_loss(
-                    image_ids=[
-                        target.get(
-                            "image_id",
-                            torch.tensor(idx, device=images.tensors.device),
-                        )
-                        for idx, target in enumerate(targets)
-                    ],
-                    gt_boxes_list=[target["boxes"] for target in targets],
-                    gt_labels_list=[target["labels"] for target in targets],
-                    features=features,
-                    image_shapes=images.image_sizes,
-                    mdmb=mdmb,
-                )
-                if far_loss.requires_grad or float(far_loss.detach().item()) != 0.0:
-                    losses = dict(losses)
-                    losses["far"] = far_loss
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
             for key in head_outputs:
@@ -290,22 +282,15 @@ class MDMBFCOS(FCOS):
             return losses, detections
         return self.eager_outputs(losses, detections)
 
-    def _compute_mdmb_weighted_loss_dict(
+    def _compute_replay_weighted_loss_dict(
         self,
         *,
         targets: list[dict[str, torch.Tensor]],
         head_outputs: dict[str, torch.Tensor],
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
-        image_shapes: list[tuple[int, int]],
-        features: dict[str, torch.Tensor],
+        class_loss_weights: list[torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
-        mdmb = self._get_mdmb()
-        recall = self._get_recall()
-        mce = self._get_mce()
-        if mdmb is None and (recall is not None or mce is not None):
-            raise RuntimeError("MDMB weighted loss requested without MDMB module.")
-
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
         reg_sum = cls_template.new_zeros(())
@@ -321,62 +306,9 @@ class MDMBFCOS(FCOS):
                 matched_idxs_per_image=matched_idxs[image_index],
             )
             assignments = raw["assignments"]
-            point_boxes = raw["point_boxes"]
-            gt_boxes = raw["gt_boxes"]
-            gt_labels = raw["gt_labels"]
-
-            image_id = target.get(
-                "image_id",
-                torch.tensor(image_index, device=assignments.device),
-            )
-
-            # RECALL: per-point weights from miss type
-            if recall is not None and mdmb is not None:
-                missed_set = mdmb.get_missed_set_with_type(
-                    image_id,
-                    gt_boxes,
-                    gt_labels,
-                    image_shape=image_shapes[image_index],
-                )
-                weights, valid = recall.compute_weights(
-                    point_gt_indices=assignments,
-                    point_boxes=point_boxes,
-                    gt_boxes=gt_boxes,
-                    missed_set=missed_set,
-                    device=assignments.device,
-                )
-            else:
-                num_points = int(assignments.numel())
-                weights = torch.ones(num_points, dtype=torch.float32, device=assignments.device)
-                valid = torch.ones(num_points, dtype=torch.bool, device=assignments.device)
-
-            # MCE: per-GT weights split by miss_type (type_a→reg, type_b→cls)
-            if mce is not None and mdmb is not None:
-                image_key = (
-                    str(image_id.item())
-                    if isinstance(image_id, torch.Tensor)
-                    else str(image_id)
-                )
-                gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shapes[image_index])
-                pooled = mce.pool_features(features, [gt_boxes], [image_shapes[image_index]])
-                mce_cls_gt, mce_reg_gt = mce.compute_gt_weights(
-                    gt_labels=gt_labels,
-                    gt_boxes_norm=gt_boxes_norm,
-                    pooled_features=pooled[0],
-                    mdmb=mdmb,
-                    image_key=image_key,
-                )
-                pos_indices = assignments.clamp(min=0)
-                pos_mask_bool = assignments >= 0
-                mce_cls_pt = mce_cls_gt[pos_indices].to(device=assignments.device, dtype=weights.dtype)
-                mce_reg_pt = mce_reg_gt[pos_indices].to(device=assignments.device, dtype=weights.dtype)
-                cls_weights = weights.clone()
-                reg_weights = weights.clone()
-                cls_weights[pos_mask_bool] = cls_weights[pos_mask_bool] * mce_cls_pt[pos_mask_bool]
-                reg_weights[pos_mask_bool] = reg_weights[pos_mask_bool] * mce_reg_pt[pos_mask_bool]
-            else:
-                cls_weights = weights
-                reg_weights = weights
+            num_points = int(assignments.numel())
+            cls_weights = torch.ones(num_points, dtype=torch.float32, device=assignments.device)
+            reg_weights = torch.ones(num_points, dtype=torch.float32, device=assignments.device)
             ctr_weights = reg_weights.clone()
 
             pos_mask = assignments >= 0
@@ -401,12 +333,26 @@ class MDMBFCOS(FCOS):
                 key="replay_ctr_box_weights",
             )
 
-            cls_weights = cls_weights.to(dtype=raw["cls_losses"].dtype)
-            reg_weights = reg_weights.to(dtype=raw["cls_losses"].dtype)
-            ctr_weights = ctr_weights.to(dtype=raw["cls_losses"].dtype)
-            valid_float = valid.to(dtype=raw["cls_losses"].dtype)
+            cls_losses_by_class = raw["cls_losses_by_class"]
+            cls_weights = cls_weights.to(dtype=cls_losses_by_class.dtype)
+            reg_weights = reg_weights.to(dtype=cls_losses_by_class.dtype)
+            ctr_weights = ctr_weights.to(dtype=cls_losses_by_class.dtype)
 
-            cls_sum = cls_sum + (raw["cls_losses"] * cls_weights * valid_float).sum()
+            cls_weight_matrix = cls_weights.unsqueeze(1)
+            if class_loss_weights is not None:
+                image_class_weights = class_loss_weights[image_index].to(
+                    device=cls_losses_by_class.device,
+                    dtype=cls_losses_by_class.dtype,
+                )
+                if image_class_weights.shape != cls_losses_by_class.shape:
+                    raise ValueError(
+                        "FANG class weights must match FCOS class loss shape. "
+                        f"Got {tuple(image_class_weights.shape)} and "
+                        f"{tuple(cls_losses_by_class.shape)}."
+                    )
+                cls_weight_matrix = cls_weight_matrix * image_class_weights
+
+            cls_sum = cls_sum + (cls_losses_by_class * cls_weight_matrix).sum()
             if bool(pos_mask.any().item()):
                 reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * reg_weights[pos_mask]).sum()
                 ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * ctr_weights[pos_mask]).sum()
@@ -518,8 +464,10 @@ class MDMBFCOS(FCOS):
                 reduction="none",
             )
 
-        raw_cls = sigmoid_focal_loss(cls_logits, gt_classes_targets, reduction="none").sum(dim=-1)
+        raw_cls_by_class = sigmoid_focal_loss(cls_logits, gt_classes_targets, reduction="none")
+        raw_cls = raw_cls_by_class.sum(dim=-1)
         return {
+            "cls_losses_by_class": raw_cls_by_class,
             "cls_losses": raw_cls,
             "reg_losses": raw_reg,
             "ctr_losses": raw_ctr,
@@ -1158,7 +1106,6 @@ class MDMBFCOS(FCOS):
 
         return {
             "detections": detections,
-            "features": features,
             "split_head_outputs": split_head_outputs,
             "split_anchors": split_anchors,
             "transformed_targets": transformed_targets,
@@ -1175,7 +1122,6 @@ class MDMBFCOS(FCOS):
     ) -> None:
         mdmb = self._get_mdmb()
         mdmbpp = self._get_mdmbpp()
-        far = self._get_far()
         if not targets:
             return
 
@@ -1191,8 +1137,7 @@ class MDMBFCOS(FCOS):
 
         should_mdmb = mdmb is not None and mdmb.should_update(epoch=epoch)
         should_mdmbpp = mdmbpp is not None and mdmbpp.should_update(epoch=epoch)
-        should_far = far is not None and mdmb is not None and far.should_apply(epoch=epoch)
-        if not (should_mdmb or should_mdmbpp or should_far):
+        if not (should_mdmb or should_mdmbpp):
             return
 
         image_ids = [
@@ -1254,17 +1199,6 @@ class MDMBFCOS(FCOS):
                 gt_labels_list=gt_labels_list,
                 image_shapes=image_shapes,
                 candidate_summary_list=candidate_summary_list,
-                epoch=epoch,
-            )
-
-        if should_far and isinstance(transformed_targets, list):
-            far.update_anchors(
-                image_ids=image_ids,
-                gt_boxes_list=[target["boxes"] for target in transformed_targets],
-                gt_labels_list=[target["labels"] for target in transformed_targets],
-                features=post_step["features"],
-                image_shapes=transformed_image_sizes,
-                mdmb=mdmb,
                 epoch=epoch,
             )
 
@@ -1624,53 +1558,6 @@ class MDMBFCOS(FCOS):
             epoch=epoch,
         )
 
-    @torch.no_grad()
-    def flush_far_update(
-        self,
-        images: list[torch.Tensor],
-        targets: list[dict[str, torch.Tensor]] | None,
-        *,
-        epoch: int | None = None,
-    ) -> None:
-        far = self._get_far()
-        mdmb = self._get_mdmb()
-        if far is None or mdmb is None or not targets:
-            return
-        if not far.should_apply(epoch=epoch):
-            return
-
-        image_ids = [
-            target.get("image_id", torch.tensor(index, device=images[index].device))
-            for index, target in enumerate(targets)
-        ]
-
-        was_training = self.training
-        try:
-            self.eval()
-            cloned_targets = [
-                {key: value for key, value in target.items()} for target in targets
-            ]
-            transformed_images, transformed_targets = self.transform(images, cloned_targets)
-            features = self.backbone(transformed_images.tensors)
-            if isinstance(features, torch.Tensor):
-                features = OrderedDict([("0", features)])
-
-            gt_boxes_list = [target["boxes"] for target in transformed_targets]
-            gt_labels_list = [target["labels"] for target in transformed_targets]
-
-            far.update_anchors(
-                image_ids=image_ids,
-                gt_boxes_list=gt_boxes_list,
-                gt_labels_list=gt_labels_list,
-                features=features,
-                image_shapes=transformed_images.image_sizes,
-                mdmb=mdmb,
-                epoch=epoch,
-            )
-        finally:
-            if was_training:
-                self.train()
-
     def _get_mdmb(self) -> MissedDetectionMemoryBank | None:
         if self._mdmb_ref is None:
             return None
@@ -1681,30 +1568,20 @@ class MDMBFCOS(FCOS):
             return None
         return self._mdmbpp_ref()
 
-    def _get_recall(self) -> MDMBSelectiveLoss | None:
-        if self._recall_ref is None:
-            return None
-        return self._recall_ref()
-
-    def _get_far(self) -> ForgettingAwareReplay | None:
-        if self._far_ref is None:
-            return None
-        return self._far_ref()
-
     def _get_faar(self) -> FailureAwareAssignmentRepair | None:
         if self._faar_ref is None:
             return None
         return self._faar_ref()
 
+    def _get_fang(self) -> FailureAwareNegativeGradientShielding | None:
+        if self._fang_ref is None:
+            return None
+        return self._fang_ref()
+
     def _get_marc(self) -> MissAwareRankingCalibration | None:
         if self._marc_ref is None:
             return None
         return self._marc_ref()
-
-    def _get_mce(self) -> MissConditionedEmbedding | None:
-        if self._mce_ref is None:
-            return None
-        return self._mce_ref()
 
     def _get_candidate_densifier(self) -> CandidateDensifier | None:
         if self._candidate_densifier_ref is None:
@@ -1726,22 +1603,18 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        recall: MDMBSelectiveLoss | None = None,
-        far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        fang: FailureAwareNegativeGradientShielding | None = None,
         marc: MissAwareRankingCalibration | None = None,
-        mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.mdmb = mdmb
         self.mdmbpp = mdmbpp
-        self.recall = recall
-        self.far = far
         self.faar = faar
+        self.fang = fang
         self.marc = marc
-        self.mce = mce
         self.candidate_densifier = candidate_densifier
 
         backbone = build_backbone_with_fpn(
@@ -1766,11 +1639,9 @@ class FCOSWrapper(BaseDetectionWrapper):
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
             mdmbpp=mdmbpp,
-            recall=recall,
-            far=far,
             faar=faar,
+            fang=fang,
             marc=marc,
-            mce=mce,
             candidate_densifier=candidate_densifier,
             **kwargs,
         )
@@ -1783,7 +1654,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         *,
         epoch_index: int | None = None,
     ) -> None:
-        if self.mdmb is None and self.mdmbpp is None and self.far is None:
+        if self.mdmb is None and self.mdmbpp is None:
             return
         epoch = None if epoch_index is None else int(epoch_index) + 1
         self.model.flush_post_step_updates(images, targets, epoch=epoch)
@@ -1796,11 +1667,9 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        recall: MDMBSelectiveLoss | None = None,
-        far: ForgettingAwareReplay | None = None,
         faar: FailureAwareAssignmentRepair | None = None,
+        fang: FailureAwareNegativeGradientShielding | None = None,
         marc: MissAwareRankingCalibration | None = None,
-        mce: MissConditionedEmbedding | None = None,
         candidate_densifier: CandidateDensifier | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
@@ -1811,11 +1680,9 @@ class FCOSWrapper(BaseDetectionWrapper):
             post_neck=post_neck,
             mdmb=mdmb,
             mdmbpp=mdmbpp,
-            recall=recall,
-            far=far,
             faar=faar,
+            fang=fang,
             marc=marc,
-            mce=mce,
             candidate_densifier=candidate_densifier,
             **kwargs,
         )

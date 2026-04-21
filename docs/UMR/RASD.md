@@ -27,18 +27,18 @@ RASD의 목적은 다음과 같다.
 - class confusion을 일으키는 confuser representation과 분리한다.
 - support memory를 이용해 object-level temporal consistency를 만든다.
 
-## 3. Difference from FAR and Knowledge Distillation
+## 3. Difference from Feature-Anchor Distillation and Knowledge Distillation
 
-RASD는 FAR 및 일반 object detection KD와 겹치는 부분이 있지만 목적과 정보원이 다르다.
+RASD는 feature-anchor consistency 및 일반 object detection KD와 겹치는 부분이 있지만 목적과 정보원이 다르다.
 
 | Method | Teacher / anchor | Target GT | Loss shape | RASD difference |
 |---|---|---|---|---|
-| FAR | MDMB 기반 frozen feature anchor | relapse GT | cosine consistency | MDMB++ support + confuser-aware contrastive loss |
+| Feature-anchor consistency | frozen feature anchor | relapse GT | cosine consistency | MDMB++ support + confuser-aware contrastive loss |
 | Teacher-student KD | external teacher model | many predictions or features | mimic teacher outputs/features | 외부 teacher 없음, same-object past success 사용 |
 | Self-distillation | same model or EMA model | high-confidence predictions | consistency / relation loss | relapse/miss GT에 selective 적용 |
 | Hard sample memory bank | hard sample prototype | hard positives | contrastive / prototype loss | GT temporal support와 failure type을 함께 사용 |
 
-FAR가 "과거 feature anchor로 당긴다"에 가깝다면, RASD는 "과거 성공 support로 당기고 현재 confuser와는 분리한다"에 가깝다.
+Feature-anchor consistency가 "과거 feature anchor로 당긴다"에 가깝다면, RASD는 "과거 성공 support로 당기고 현재 confuser와는 분리한다"에 가깝다.
 
 ## 4. Relapse Definition
 
@@ -398,7 +398,7 @@ RASD는 training-only 모듈이다.
 
 1. baseline
 2. MDMB++ only
-3. FAR
+3. feature-anchor consistency baseline
 4. RASD attraction-only
 5. RASD confuser-aware
 6. FCDR only

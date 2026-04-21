@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `marc`, `recall`, `far`, and `mce` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `fang`, and `marc` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
 because it operates at the data-loading layer.
 
@@ -100,7 +100,7 @@ Important behavior:
 - Replay candidates are filtered by `replay_recency_window`
 - Per-image replay repeats are capped by `max_replays_per_gt_per_epoch`
 - Object replay creates virtual indices after the base dataset range
-- Replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++/FAR memory updates
+- Replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++ memory updates
 - Pair replay keeps `pair_miss` and `pair_support` in the same mini-batch when replay slots allow it
 - FCDR is retained as a failure-conditioned policy preset over the object replay path
 - FCOS applies `replay_box_weights` only to positive points matched to replay-weighted GTs
@@ -167,45 +167,37 @@ Current scope is the minimal first version:
 - `candidate_missing` is excluded by default because there may be no meaningful candidate to rank
 - Positive candidates use GT-class score and IoU; negatives use wrong-class confusers, same-class suppressors, and high-score local distractors
 
-### RECALL - Selective Loss Reweighting (`modules/nn/recall.py`)
+### FANG - Failure-Aware Negative Gradient Shielding (`modules/nn/fang.py`)
 
-Uses MDMB observations to upweight losses on hard GTs.
+Training-time negative-gradient shielding for hard GTs stored in `MDMB++`.
 
-- Depends on MDMB
-- Config: `modules/cfg/recall.yaml`
-- Arch support: FCOS
-
-### FAR - Forgetting-Aware Replay (`modules/nn/far.py`)
-
-Applies a feature-level consistency loss toward a frozen anchor captured when a GT was last
-detected successfully.
-
-- Depends on MDMB
+- Depends on MDMB++
 - Hooks: `start_epoch()`, `end_epoch()`
-- Training loss: `far.compute_loss(...)`
-- Summary: `far.summary()`
-- Config: `modules/cfg/far.yaml`
+- Planning API: `fang.plan(mdmbpp, targets, image_shapes)`
+- Weighting API: `fang.compute_class_weights(...)`
+- Training path: FCOS lowers selected class-wise negative focal-loss terms after FAAR and before loss aggregation
+- Summary: `fang.summary()`
+- Config: `modules/cfg/fang.yaml`
 - Arch support: FCOS
 
-### MCE - Miss-Conditioned class Embedding (`modules/nn/mce.py`)
+Current scope is the minimal first version:
 
-Uses a learnable class prototype embedding to amplify loss on GTs that remain hard under MDMB
-streak statistics.
-
-- Depends on MDMB
-- Training path: integrated into FCOS loss computation
-- Config: `modules/cfg/mce.yaml`
-- Arch support: FCOS
+- FCOS only
+- No auxiliary loss is added
+- Only `matched_idxs < 0` negative points are eligible
+- Only the hard GT true-class column is shielded; other class losses, bbox regression, and centerness are unchanged
+- Shield targets are selected by MDMB++ `failure_type` and `severity`
+- Overlapping shield targets use the lowest class weight for the same point/class pair
 
 ## Runtime Integration
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `marc`, `recall`, `far`, and `mce` from `modules/cfg/*.yaml`.
-2. FCOS forward reads `model.mdmbpp` through FAAR, MARC, and Candidate Densification when enabled.
-3. FAAR repairs `matched_idxs`; MARC can add `marc` ranking loss; Candidate Densification can add `candidate_dense` auxiliary loss.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `fang`, and `marc` from `modules/cfg/*.yaml`.
+2. FCOS forward reads `model.mdmbpp` through FAAR, FANG, MARC, and Candidate Densification when enabled.
+3. FAAR repairs `matched_idxs`; FANG can shield class-wise negative focal terms; MARC can add `marc` ranking loss; Candidate Densification can add `candidate_dense` auxiliary loss.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
-5. That pass refreshes `mdmb`, `mdmbpp`, and FAR state.
+5. That pass refreshes `mdmb` and `mdmbpp` state.
 6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
 
 ## Compatibility
@@ -217,7 +209,5 @@ FCOS currently wires the following path:
 | Hard Replay | yes | no | no |
 | Candidate Densification | yes | no | no |
 | FAAR | yes | no | no |
+| FANG | yes | no | no |
 | MARC | yes | no | no |
-| RECALL | yes | no | no |
-| FAR | yes | no | no |
-| MCE | yes | no | no |

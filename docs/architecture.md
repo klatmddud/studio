@@ -30,7 +30,7 @@ models/detection/
 
 modules/
   cfg/                      # Module configs (all disabled by default, including hard_replay)
-  nn/                       # Module implementations (mdmb/mdmbpp/recall/far/mce)
+  nn/                       # Module implementations (mdmb/mdmbpp/faar/fang/marc/candidate_densification)
 
 ops/                        # Reserved for custom ops (currently empty)
 ```

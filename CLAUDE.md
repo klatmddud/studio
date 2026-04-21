@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Includes research modules (MDMB, RECALL, FAR) for improving detection performance.
+PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Includes research modules (MDMB, MDMB++, Hard Replay, FAAR, FANG, MARC, Candidate Densification) for improving detection performance.
 
 ## Quick Reference
 
@@ -9,7 +9,7 @@ PyTorch object detection training framework supporting FCOS, Faster R-CNN, and D
 | Project layout, entry points, tech stack | [docs/architecture.md](docs/architecture.md) |
 | Training config, engine, checkpointing | [docs/training.md](docs/training.md) |
 | Model architectures and wrappers | [docs/models.md](docs/models.md) |
-| Research modules (MDMB, RECALL, FAR) | [docs/modules.md](docs/modules.md) |
+| Research modules (MDMB, UMR modules) | [docs/modules.md](docs/modules.md) |
 | Dataset format, DataLoader, env vars | [docs/data.md](docs/data.md) |
 
 ## Common Commands

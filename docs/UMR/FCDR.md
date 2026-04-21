@@ -340,7 +340,7 @@ class HardReplayDatasetWrapper(Dataset):
 4. 너무 작거나 crop 밖으로 완전히 나간 boxes는 제거한다.
 5. target의 `image_id`는 negative synthetic id로 설정한다.
 6. 원본 id와 replay metadata는 `source_image_id`, `replay_kind`, `replay_gt_uid`, `replay_pair_id`, `replay_role`, `replay_failure_type`, `replay_mode`로 보존한다.
-7. `is_replay: true`를 설정해 post-step MDMB/MDMB++/FAR memory update에서 제외한다.
+7. `is_replay: true`를 설정해 post-step MDMB/MDMB++ memory update에서 제외한다.
 8. `replay_box_weights`를 설정해 FCOS에서 replay-aware positive loss weighting을 적용할 수 있게 한다.
 
 Replay index는 epoch마다 바뀐다. worker process가 stale replay index를 들고 있지 않도록 `HardReplayDatasetWrapper` 사용 시 persistent workers는 비활성화한다.
