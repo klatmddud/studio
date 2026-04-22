@@ -130,7 +130,8 @@ Current scope:
 - Relapse entries with stored support features are selected from MDMB++
 - Current GT features are pooled from FPN features with MultiScaleRoIAlign
 - The v1 loss is support attraction: current GT feature is pulled toward its previous successful support feature
-- Confuser-aware contrastive settings are present in the config but disabled by default for a later extension
+- When `confuser.enabled` is true, `cls_confusion` relapse targets also use wrong-class
+  `MDMBPlusEntry.topk_candidates` as detached contrastive negatives
 
 ## Runtime Integration
 

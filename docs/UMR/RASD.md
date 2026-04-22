@@ -5,11 +5,21 @@
 RASD is a training-only auxiliary module for FCOS. It uses MDMB++ support snapshots as temporal
 teachers for GTs that were detected before but later relapsed into missed detections.
 
-The first implemented version is attraction-only:
+The base loss is support attraction, with an optional confuser-aware contrastive term for
+class-confusion relapse targets:
 
 ```text
 loss_rasd = lambda_rasd * warmup * mean(weight_g * (1 - cosine(current_gt_feature, support_feature_g)))
+
+if confusers exist:
+loss_rasd = lambda_rasd * warmup * mean(
+  weight_g * (support_loss_g + alpha_contrastive * contrastive_loss_g)
+)
 ```
+
+When `confuser.enabled: true`, RASD also pools current features for wrong-class MDMB++ candidates
+near the GT and adds a softmax contrastive loss that treats the support feature as the positive and
+the confuser candidate features as negatives.
 
 RASD does not change inference, NMS, score thresholds, target assignment, or detector outputs.
 
@@ -26,6 +36,8 @@ This makes the module selective:
 - It requires `entry.relapse == true`.
 - It requires `SupportSnapshot.feature` to exist.
 - It pulls the current GT feature toward the last successful support feature.
+- Optionally, for `cls_confusion` entries, it pushes the current GT feature away from wrong-class
+  confuser candidates stored in MDMB++.
 
 If a GT has never been detected, MDMB++ cannot create a support teacher for it, so RASD skips that
 GT. Hard Replay can still sample the image/object, but RASD needs at least one previous successful
@@ -57,6 +69,11 @@ weight_g = min(
 )
 ```
 
+When confuser mode is enabled, RASD selects confuser candidates only for `cls_confusion` entries.
+Candidates come from `MDMBPlusEntry.topk_candidates` and must have a wrong label, clear
+`confuser.iou_threshold`, clear `confuser.min_score`, and fit within
+`confuser.max_candidates_per_gt` after sorting by score, IoU, and selection survival.
+
 ## Feature Path
 
 MDMB++ support features are produced after `optimizer.step()`:
@@ -71,7 +88,9 @@ MDMB++ support features are produced after `optimizer.step()`:
    teacher. Replacement is quality-gated rather than always-latest.
 
 During training, RASD pools current GT features from the same FPN feature maps, normalizes them, and
-computes the cosine attraction loss against the stored support feature.
+computes the cosine attraction loss against the stored support feature. If confuser mode is enabled,
+it also pools current FPN features from the selected confuser candidate boxes, detaches those
+negative features, and computes the contrastive term against the current GT feature.
 
 ## Relapse-Robust Support Memory
 
@@ -118,6 +137,9 @@ failure_types:
 
 confuser:
   enabled: false
+  iou_threshold: 0.3
+  min_score: 0.05
+  max_candidates_per_gt: 1
 ```
 
 RASD has two fail-fast requirements when enabled:
@@ -146,7 +168,8 @@ transform images/targets
 backbone + FCOS head
 base FCOS target matching
 base FCOS loss, optionally replay-weighted
-optional RASD loss
+optional RASD support-attraction loss
+optional confuser-aware contrastive loss for cls_confusion entries
 ```
 
 The loss key is `losses["rasd"]`. Engine history stores RASD summary under `record["rasd"]`.
@@ -162,14 +185,16 @@ The loss key is `losses["rasd"]`. Engine history stores RASD summary under `reco
 - `mean_support_age`
 - `mean_target_weight`
 - `mean_support_loss`
+- `confuser_targets`
+- `mean_contrastive_loss`
 - `skipped_no_support`
 - `skipped_support_too_old`
 - `skipped_low_support_score`
 - `skipped_no_entry_match`
 - `skipped_no_feature`
 
-The config also reserves confuser-related fields, but contrastive loss is disabled by default in the
-current version.
+`confuser_targets` counts RASD targets with at least one selected wrong-class negative.
+`mean_contrastive_loss` is averaged over those confuser targets rather than over all RASD targets.
 
 ## Recommended Ablation
 

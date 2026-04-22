@@ -208,6 +208,22 @@ class RASDConfig:
 
 
 @dataclass(slots=True)
+class RASDConfuser:
+    bbox: torch.Tensor
+    label: int
+    score: float
+    iou_to_gt: float
+    stage: str
+
+    def __post_init__(self) -> None:
+        self.bbox = torch.as_tensor(self.bbox, dtype=torch.float32).detach().reshape(4).cpu()
+        self.label = int(self.label)
+        self.score = float(self.score)
+        self.iou_to_gt = float(self.iou_to_gt)
+        self.stage = str(self.stage)
+
+
+@dataclass(slots=True)
 class RASDTarget:
     gt_uid: str
     image_id: str
@@ -222,6 +238,7 @@ class RASDTarget:
     support_score: float
     support_feature: torch.Tensor
     weight: float
+    confusers: list[RASDConfuser] | None = None
 
     def __post_init__(self) -> None:
         self.gt_uid = str(self.gt_uid)
@@ -240,6 +257,7 @@ class RASDTarget:
             dtype=torch.float32,
         ).detach().flatten().cpu()
         self.weight = float(self.weight)
+        self.confusers = [] if self.confusers is None else list(self.confusers)
 
 
 @dataclass(slots=True)
@@ -396,6 +414,10 @@ class RelapseAwareSupportDistillation(nn.Module):
                 relapse_count = 0 if record is None else int(record.relapse_count)
                 gt_index = int(match)
                 used_gt_indices.add(gt_index)
+                confusers = self._select_confusers(
+                    entry=entry,
+                    image_shape=image_shapes[image_index],
+                )
                 image_targets.append(
                     RASDTarget(
                         gt_uid=entry.gt_uid,
@@ -414,6 +436,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                             severity=entry.severity,
                             relapse_count=relapse_count,
                         ),
+                        confusers=confusers,
                     )
                 )
                 if len(image_targets) >= self.config.max_targets_per_image:
@@ -439,6 +462,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                 "losses": 0,
                 "support_loss_sum": 0.0,
                 "contrastive_loss_sum": 0.0,
+                "confuser_targets": 0,
                 "target_weight_sum": 0.0,
                 "skipped_no_feature": 0,
             }
@@ -468,6 +492,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                 "losses": 0,
                 "support_loss_sum": 0.0,
                 "contrastive_loss_sum": 0.0,
+                "confuser_targets": 0,
                 "target_weight_sum": 0.0,
                 "skipped_no_feature": len(plan.targets),
             }
@@ -485,12 +510,14 @@ class RelapseAwareSupportDistillation(nn.Module):
                 "losses": 0,
                 "support_loss_sum": 0.0,
                 "contrastive_loss_sum": 0.0,
+                "confuser_targets": 0,
                 "target_weight_sum": 0.0,
                 "skipped_no_feature": len(ordered_targets),
             }
 
         valid_current: list[torch.Tensor] = []
         valid_support: list[torch.Tensor] = []
+        valid_targets: list[RASDTarget] = []
         weights: list[float] = []
         skipped_no_feature = 0
         for index, rasd_target in enumerate(ordered_targets):
@@ -503,6 +530,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                 continue
             valid_current.append(current_features[index])
             valid_support.append(support_feature)
+            valid_targets.append(rasd_target)
             weights.append(float(rasd_target.weight))
 
         if not valid_current:
@@ -510,6 +538,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                 "losses": 0,
                 "support_loss_sum": 0.0,
                 "contrastive_loss_sum": 0.0,
+                "confuser_targets": 0,
                 "target_weight_sum": 0.0,
                 "skipped_no_feature": skipped_no_feature,
             }
@@ -520,18 +549,27 @@ class RelapseAwareSupportDistillation(nn.Module):
             current = F.normalize(current, p=2, dim=1)
             support = F.normalize(support, p=2, dim=1)
         support_losses = 1.0 - (current * support).sum(dim=1).clamp(min=-1.0, max=1.0)
+        contrastive_losses, confuser_targets = self._compute_confuser_losses(
+            current=current,
+            support=support,
+            targets=valid_targets,
+            features=features,
+            image_shapes=image_shapes,
+        )
         weight_tensor = torch.tensor(
             weights,
             dtype=support_losses.dtype,
             device=support_losses.device,
         )
-        loss = (support_losses * weight_tensor).sum() / float(max(len(valid_current), 1))
+        combined_losses = support_losses + float(self.config.alpha_contrastive) * contrastive_losses
+        loss = (combined_losses * weight_tensor).sum() / float(max(len(valid_current), 1))
         loss = loss * self.loss_weight()
 
         return loss, {
             "losses": len(valid_current),
             "support_loss_sum": float(support_losses.detach().sum().cpu().item()),
-            "contrastive_loss_sum": 0.0,
+            "contrastive_loss_sum": float(contrastive_losses.detach().sum().cpu().item()),
+            "confuser_targets": confuser_targets,
             "target_weight_sum": float(weight_tensor.detach().sum().cpu().item()),
             "skipped_no_feature": skipped_no_feature,
         }
@@ -551,6 +589,7 @@ class RelapseAwareSupportDistillation(nn.Module):
         )
         self._epoch_weight_sum += sum(float(target.weight) for target in plan.targets)
         self._epoch_losses += int(stats.get("losses", 0))
+        self._epoch_confuser_targets += int(stats.get("confuser_targets", 0))
         self._epoch_support_loss_sum += float(stats.get("support_loss_sum", 0.0))
         self._epoch_contrastive_loss_sum += float(stats.get("contrastive_loss_sum", 0.0))
         self._epoch_skipped_no_feature += int(stats.get("skipped_no_feature", 0))
@@ -561,7 +600,7 @@ class RelapseAwareSupportDistillation(nn.Module):
         mean_target_weight = self._epoch_weight_sum / float(max(self._epoch_targets, 1))
         mean_support_loss = self._epoch_support_loss_sum / float(max(self._epoch_losses, 1))
         mean_contrastive_loss = self._epoch_contrastive_loss_sum / float(
-            max(self._epoch_losses, 1)
+            max(self._epoch_confuser_targets, 1)
         )
         return {
             "enabled": self.config.enabled,
@@ -605,6 +644,121 @@ class RelapseAwareSupportDistillation(nn.Module):
             + self.config.relapse_weight_scale * float(relapse_count)
         )
         return min(float(self.config.max_target_weight), max(1.0, weight))
+
+    def _select_confusers(
+        self,
+        *,
+        entry,
+        image_shape: Sequence[int],
+    ) -> list[RASDConfuser]:
+        if not self.config.confuser_enabled or str(entry.failure_type) != "cls_confusion":
+            return []
+
+        candidates = [
+            candidate
+            for candidate in entry.topk_candidates
+            if int(candidate.label) != int(entry.class_id)
+            and float(candidate.iou_to_gt) >= self.config.confuser_iou_threshold
+            and float(candidate.score) >= self.config.confuser_min_score
+        ]
+        if not candidates:
+            return []
+
+        candidates.sort(
+            key=lambda candidate: (
+                -float(candidate.score),
+                -float(candidate.iou_to_gt),
+                -int(bool(candidate.survived_selection)),
+            )
+        )
+
+        confusers: list[RASDConfuser] = []
+        for candidate in candidates[: self.config.confuser_max_candidates_per_gt]:
+            bbox = _normalized_box_to_absolute_xyxy(candidate.box, image_shape)
+            if bbox is None:
+                continue
+            confusers.append(
+                RASDConfuser(
+                    bbox=bbox,
+                    label=int(candidate.label),
+                    score=float(candidate.score),
+                    iou_to_gt=float(candidate.iou_to_gt),
+                    stage=str(candidate.stage),
+                )
+            )
+        return confusers
+
+    def _compute_confuser_losses(
+        self,
+        *,
+        current: torch.Tensor,
+        support: torch.Tensor,
+        targets: Sequence[RASDTarget],
+        features: Mapping[str, torch.Tensor],
+        image_shapes: Sequence[Sequence[int]],
+    ) -> tuple[torch.Tensor, int]:
+        losses = current.new_zeros((current.shape[0],))
+        confuser_boxes_per_image: list[list[torch.Tensor]] = [
+            [] for _ in range(len(image_shapes))
+        ]
+        confuser_owners: list[int] = []
+
+        for target_index, target in enumerate(targets):
+            for confuser in target.confusers or ():
+                image_index = int(target.image_index)
+                if image_index < 0 or image_index >= len(confuser_boxes_per_image):
+                    continue
+                confuser_boxes_per_image[image_index].append(
+                    confuser.bbox.to(device=current.device, dtype=torch.float32)
+                )
+                confuser_owners.append(target_index)
+
+        if not confuser_owners:
+            return losses, 0
+
+        boxes_per_image = [
+            torch.stack(boxes, dim=0)
+            if boxes
+            else torch.empty((0, 4), dtype=torch.float32, device=current.device)
+            for boxes in confuser_boxes_per_image
+        ]
+        confuser_features = pool_multiscale_box_features(
+            features=features,
+            boxes_per_image=boxes_per_image,
+            image_shapes=image_shapes,
+            output_size=self.config.roi_output_size,
+            sampling_ratio=self.config.roi_sampling_ratio,
+            normalize=self.config.normalize_features,
+        )
+        if confuser_features.shape[0] != len(confuser_owners):
+            return losses, 0
+
+        confuser_features = confuser_features.detach()
+        if self.config.normalize_features:
+            confuser_features = F.normalize(confuser_features, p=2, dim=1)
+
+        by_target: list[list[torch.Tensor]] = [[] for _ in targets]
+        for feature_index, target_index in enumerate(confuser_owners):
+            if 0 <= target_index < len(by_target):
+                by_target[target_index].append(confuser_features[feature_index])
+
+        confuser_targets = 0
+        labels = torch.zeros((1,), dtype=torch.long, device=current.device)
+        for target_index, negative_features in enumerate(by_target):
+            if not negative_features:
+                continue
+            negatives = torch.stack(negative_features, dim=0).to(
+                device=current.device,
+                dtype=current.dtype,
+            )
+            positive_logit = (current[target_index] * support[target_index].detach()).sum().view(1)
+            negative_logits = negatives.matmul(current[target_index].unsqueeze(1)).flatten()
+            logits = torch.cat((positive_logit, negative_logits), dim=0).unsqueeze(0)
+            logits = logits / float(self.config.temperature)
+            losses[target_index] = F.cross_entropy(logits, labels, reduction="mean")
+            confuser_targets += 1
+
+        return losses, confuser_targets
 
     def _match_entry_to_target(
         self,
@@ -670,6 +824,29 @@ def pool_multiscale_box_features(
     if normalize:
         vectors = F.normalize(vectors, p=2, dim=1)
     return vectors
+
+
+def _normalized_box_to_absolute_xyxy(
+    box: torch.Tensor | Sequence[float],
+    image_shape: Sequence[int],
+) -> torch.Tensor | None:
+    values = torch.as_tensor(box, dtype=torch.float32).detach().flatten()
+    if values.numel() != 4:
+        return None
+    if len(image_shape) != 2:
+        raise ValueError("RASD image_shape must contain exactly two values: (height, width).")
+
+    height = max(1, int(image_shape[0]))
+    width = max(1, int(image_shape[1]))
+    scale = values.new_tensor([width, height, width, height], dtype=torch.float32)
+    absolute = values.clamp(min=0.0, max=1.0) * scale
+    left = torch.minimum(absolute[0], absolute[2]).clamp(min=0.0, max=float(width))
+    top = torch.minimum(absolute[1], absolute[3]).clamp(min=0.0, max=float(height))
+    right = torch.maximum(absolute[0], absolute[2]).clamp(min=0.0, max=float(width))
+    bottom = torch.maximum(absolute[1], absolute[3]).clamp(min=0.0, max=float(height))
+    if bool((right <= left).item()) or bool((bottom <= top).item()):
+        return None
+    return torch.stack((left, top, right, bottom), dim=0).cpu()
 
 
 def load_rasd_config(path: str | Path, *, arch: str | None = None) -> RASDConfig:

@@ -28,6 +28,7 @@ from .mdmbpp import (
 )
 from .rasd import (
     RASDConfig,
+    RASDConfuser,
     RASDPlan,
     RASDTarget,
     RelapseAwareSupportDistillation,
@@ -51,6 +52,7 @@ __all__ = [
     "GTFailureRecord",
     "PerImageCandidateSummary",
     "RASDConfig",
+    "RASDConfuser",
     "RASDPlan",
     "RASDTarget",
     "RelapseAwareSupportDistillation",
