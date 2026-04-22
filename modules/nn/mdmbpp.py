@@ -538,6 +538,7 @@ class MDMBPlus(nn.Module):
         | None = None,
         final_scores_list: Sequence[torch.Tensor | Sequence[float] | float] | None = None,
         gt_ids_list: Sequence[torch.Tensor | Sequence[Any] | Any] | None = None,
+        support_feature_list: Sequence[Mapping[int, torch.Tensor] | None] | None = None,
         epoch: int | None = None,
     ) -> None:
         if not self.should_update(epoch=epoch):
@@ -578,6 +579,13 @@ class MDMBPlus(nn.Module):
         elif len(gt_ids_list) != batch_size:
             raise ValueError("MDMB++ gt_ids_list must share the same batch dimension as image_ids.")
 
+        if support_feature_list is None:
+            support_feature_list = [None] * batch_size
+        elif len(support_feature_list) != batch_size:
+            raise ValueError(
+                "MDMB++ support_feature_list must share the same batch dimension as image_ids."
+            )
+
         new_entry_index = dict(self._entry_index)
 
         for (
@@ -590,6 +598,7 @@ class MDMBPlus(nn.Module):
             raw_summary,
             final_scores,
             gt_ids,
+            support_features,
         ) in zip(
             image_ids,
             final_boxes_list,
@@ -600,6 +609,7 @@ class MDMBPlus(nn.Module):
             candidate_summary_list,
             final_scores_list,
             gt_ids_list,
+            support_feature_list,
             strict=True,
         ):
             image_key = _normalize_image_id(image_id)
@@ -639,6 +649,11 @@ class MDMBPlus(nn.Module):
                 image_id=image_key,
                 raw_summary=raw_summary,
                 num_gt=gt_boxes_tensor.shape[0],
+            )
+            support_feature_map = (
+                {}
+                if support_features is None
+                else {int(index): feature for index, feature in support_features.items()}
             )
 
             stale_entries = self._bank.get(image_key, [])
@@ -707,6 +722,9 @@ class MDMBPlus(nn.Module):
 
                 previous_support = None if previous_record is None else previous_record.support
                 if failure_type == "detected":
+                    support_feature = None
+                    if self.config.store_support_feature:
+                        support_feature = support_feature_map.get(gt_index)
                     record = GTFailureRecord(
                         gt_uid=gt_uid,
                         image_id=image_key,
@@ -740,6 +758,7 @@ class MDMBPlus(nn.Module):
                             final_match=final_match,
                             fallback_candidate=best_candidate,
                             previous_support=previous_support,
+                            feature=support_feature,
                             keep_feature=self.config.store_support_feature,
                         ),
                     )
@@ -1242,20 +1261,23 @@ def _build_support_snapshot(
     final_match: CanonicalCandidate | None,
     fallback_candidate: CanonicalCandidate | None,
     previous_support: SupportSnapshot | None,
+    feature: torch.Tensor | None,
     keep_feature: bool,
 ) -> SupportSnapshot | None:
     source = final_match or fallback_candidate
     if source is None:
         return previous_support
 
-    feature = None
-    if keep_feature and previous_support is not None:
-        feature = previous_support.feature
+    stored_feature = None
+    if keep_feature:
+        stored_feature = feature
+        if stored_feature is None and previous_support is not None:
+            stored_feature = previous_support.feature
     return SupportSnapshot(
         epoch=epoch,
         box=source.box,
         score=source.score,
-        feature=feature,
+        feature=stored_feature,
         feature_level=source.level_or_stage_id,
     )
 

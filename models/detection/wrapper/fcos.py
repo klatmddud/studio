@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """FCOS wrapper: YAML config -> torchvision FCOS."""
 
-import math
 import weakref
 from collections import OrderedDict
 
@@ -15,15 +14,11 @@ from torchvision.ops import sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from modules.nn import (
-    CandidateDensifier,
     CanonicalCandidate,
-    DensePlan,
-    FailureAwareAssignmentRepair,
-    FailureAwareNegativeGradientShielding,
     MDMBPlus,
-    MissAwareRankingCalibration,
     PerImageCandidateSummary,
-    RepairPlan,
+    RelapseAwareSupportDistillation,
+    pool_multiscale_box_features,
 )
 from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
 
@@ -55,10 +50,10 @@ class MDMBFCOS(FCOS):
     """
     FCOS variant with MDMB/MDMB++ memory updates and optional UMR training modules.
 
-    During training the wrapper can repair assignments, add ranking/dense
-    auxiliary losses, and apply replay-aware per-GT loss weights. After
-    optimizer.step(), it runs an extra no-grad inference pass to refresh MDMB
-    and MDMB++ state from final detections.
+    During training the wrapper can add RASD support-distillation loss and
+    apply replay-aware per-GT loss weights. After optimizer.step(), it runs an
+    extra no-grad inference pass to refresh MDMB and MDMB++ state from final
+    detections.
     """
 
     def __init__(
@@ -66,21 +61,13 @@ class MDMBFCOS(FCOS):
         *args,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        faar: FailureAwareAssignmentRepair | None = None,
-        fang: FailureAwareNegativeGradientShielding | None = None,
-        marc: MissAwareRankingCalibration | None = None,
-        candidate_densifier: CandidateDensifier | None = None,
+        rasd: RelapseAwareSupportDistillation | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._mdmbpp_ref = weakref.ref(mdmbpp) if mdmbpp is not None else None
-        self._faar_ref = weakref.ref(faar) if faar is not None else None
-        self._fang_ref = weakref.ref(fang) if fang is not None else None
-        self._marc_ref = weakref.ref(marc) if marc is not None else None
-        self._candidate_densifier_ref = (
-            weakref.ref(candidate_densifier) if candidate_densifier is not None else None
-        )
+        self._rasd_ref = weakref.ref(rasd) if rasd is not None else None
 
     def forward(
         self,
@@ -141,62 +128,8 @@ class MDMBFCOS(FCOS):
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             mdmbpp = self._get_mdmbpp()
-            faar = self._get_faar()
-            if faar is not None and faar.should_apply(mdmbpp=mdmbpp):
-                repair_plan = faar.plan(
-                    mdmbpp=mdmbpp,
-                    targets=targets,
-                    image_shapes=images.image_sizes,
-                )
-                (
-                    matched_idxs,
-                    repaired_points,
-                    skipped_no_candidate_points,
-                    skipped_existing_positive,
-                ) = self._repair_fcos_assignments(
-                    repair_plan=repair_plan,
-                    targets=targets,
-                    anchors=anchors,
-                    matched_idxs=matched_idxs,
-                    num_anchors_per_level=num_anchors_per_level,
-                    faar=faar,
-                )
-                faar.record_repair_step(
-                    repair_plan=repair_plan,
-                    repaired_points=repaired_points,
-                    skipped_no_candidate_points=skipped_no_candidate_points,
-                    skipped_existing_positive=skipped_existing_positive,
-                )
-            fang = self._get_fang()
-            fang_class_weights: list[torch.Tensor] | None = None
-            use_fang = False
-            if fang is not None and fang.should_apply(mdmbpp=mdmbpp):
-                shield_plan = fang.plan(
-                    mdmbpp=mdmbpp,
-                    targets=targets,
-                    image_shapes=images.image_sizes,
-                )
-                (
-                    fang_class_weights,
-                    shield_points,
-                    skipped_no_candidate_points,
-                    shield_weight_sum,
-                ) = fang.compute_class_weights(
-                    shield_plan=shield_plan,
-                    targets=targets,
-                    anchors=anchors,
-                    matched_idxs=matched_idxs,
-                    num_classes=int(head_outputs["cls_logits"].shape[-1]),
-                )
-                fang.record_shield_step(
-                    shield_plan=shield_plan,
-                    shield_points=shield_points,
-                    skipped_no_candidate_points=skipped_no_candidate_points,
-                    shield_weight_sum=shield_weight_sum,
-                )
-                use_fang = True
             use_weighted = _has_replay_box_weights(targets)
-            if not use_weighted and not use_fang:
+            if not use_weighted:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
             else:
                 losses = self._compute_replay_weighted_loss_dict(
@@ -204,66 +137,24 @@ class MDMBFCOS(FCOS):
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
-                    class_loss_weights=fang_class_weights,
                 )
 
-            marc = self._get_marc()
-            if marc is not None and marc.should_apply(mdmbpp=mdmbpp):
-                ranking_plan = marc.plan(
+            rasd = self._get_rasd()
+            if rasd is not None and rasd.should_apply(mdmbpp=mdmbpp):
+                rasd_plan = rasd.plan(
                     mdmbpp=mdmbpp,
                     targets=targets,
                     image_shapes=images.image_sizes,
                 )
-                (
-                    marc_loss,
-                    rank_losses,
-                    rank_negatives,
-                    skipped_no_positive,
-                    skipped_no_negative,
-                ) = marc.compute_loss(
-                    ranking_plan=ranking_plan,
-                    targets=targets,
-                    head_outputs=head_outputs,
-                    anchors=anchors,
+                rasd_loss, rasd_stats = rasd.compute_loss(
+                    plan=rasd_plan,
+                    features=features,
                     image_shapes=images.image_sizes,
-                    decode_boxes_fn=self._decode_boxes,
                 )
-                marc.record_rank_step(
-                    ranking_plan=ranking_plan,
-                    rank_losses=rank_losses,
-                    rank_negatives=rank_negatives,
-                    loss=marc_loss if rank_losses > 0 else None,
-                    skipped_no_positive=skipped_no_positive,
-                    skipped_no_negative=skipped_no_negative,
-                )
-                if rank_losses > 0:
+                rasd.record_step(plan=rasd_plan, stats=rasd_stats)
+                if int(rasd_stats.get("losses", 0)) > 0:
                     losses = dict(losses)
-                    losses["marc"] = marc_loss
-
-            candidate_densifier = self._get_candidate_densifier()
-            if candidate_densifier is not None and candidate_densifier.should_apply(mdmbpp=mdmbpp):
-                dense_plan = candidate_densifier.plan(
-                    mdmbpp=mdmbpp,
-                    targets=targets,
-                    image_shapes=images.image_sizes,
-                )
-                dense_loss, dense_points = self._compute_candidate_dense_loss(
-                    dense_plan=dense_plan,
-                    targets=targets,
-                    head_outputs=head_outputs,
-                    anchors=anchors,
-                    matched_idxs=matched_idxs,
-                    image_shapes=images.image_sizes,
-                    candidate_densifier=candidate_densifier,
-                )
-                candidate_densifier.record_dense_step(
-                    num_targets=len(dense_plan),
-                    num_points=dense_points,
-                    loss=dense_loss if dense_points > 0 else None,
-                )
-                if dense_points > 0:
-                    losses = dict(losses)
-                    losses["candidate_dense"] = dense_loss
+                    losses["rasd"] = rasd_loss
 
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
@@ -289,7 +180,6 @@ class MDMBFCOS(FCOS):
         head_outputs: dict[str, torch.Tensor],
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
-        class_loss_weights: list[torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
@@ -338,21 +228,7 @@ class MDMBFCOS(FCOS):
             reg_weights = reg_weights.to(dtype=cls_losses_by_class.dtype)
             ctr_weights = ctr_weights.to(dtype=cls_losses_by_class.dtype)
 
-            cls_weight_matrix = cls_weights.unsqueeze(1)
-            if class_loss_weights is not None:
-                image_class_weights = class_loss_weights[image_index].to(
-                    device=cls_losses_by_class.device,
-                    dtype=cls_losses_by_class.dtype,
-                )
-                if image_class_weights.shape != cls_losses_by_class.shape:
-                    raise ValueError(
-                        "FANG class weights must match FCOS class loss shape. "
-                        f"Got {tuple(image_class_weights.shape)} and "
-                        f"{tuple(cls_losses_by_class.shape)}."
-                    )
-                cls_weight_matrix = cls_weight_matrix * image_class_weights
-
-            cls_sum = cls_sum + (cls_losses_by_class * cls_weight_matrix).sum()
+            cls_sum = cls_sum + (cls_losses_by_class * cls_weights.unsqueeze(1)).sum()
             if bool(pos_mask.any().item()):
                 reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * reg_weights[pos_mask]).sum()
                 ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * ctr_weights[pos_mask]).sum()
@@ -476,484 +352,6 @@ class MDMBFCOS(FCOS):
             "gt_boxes": gt_boxes,
             "gt_labels": gt_labels,
         }
-
-    def _compute_candidate_dense_loss(
-        self,
-        *,
-        dense_plan: DensePlan,
-        targets: list[dict[str, torch.Tensor]],
-        head_outputs: dict[str, torch.Tensor],
-        anchors: list[torch.Tensor],
-        matched_idxs: list[torch.Tensor],
-        image_shapes: list[tuple[int, int]],
-        candidate_densifier: CandidateDensifier,
-    ) -> tuple[torch.Tensor, int]:
-        cls_template = head_outputs["cls_logits"]
-        dense_sum = cls_template.new_zeros(())
-        dense_points = 0
-
-        for image_index, target in enumerate(targets):
-            image_id = target.get(
-                "image_id",
-                torch.tensor(image_index, device=anchors[image_index].device),
-            )
-            dense_targets = dense_plan.for_image(image_id)
-            if not dense_targets:
-                continue
-
-            cls_logits = head_outputs["cls_logits"][image_index]
-            bbox_regression = head_outputs["bbox_regression"][image_index]
-            bbox_ctrness = head_outputs["bbox_ctrness"][image_index].flatten()
-            anchors_per_image = anchors[image_index]
-            assignments = matched_idxs[image_index]
-            gt_boxes = target["boxes"]
-            gt_labels = target["labels"].to(device=cls_logits.device, dtype=torch.int64)
-
-            used_points = torch.zeros(
-                anchors_per_image.shape[0],
-                dtype=torch.bool,
-                device=anchors_per_image.device,
-            )
-            selected_points: list[torch.Tensor] = []
-            selected_gt_indices: list[torch.Tensor] = []
-
-            for dense_target in dense_targets:
-                if dense_target.gt_index < 0 or dense_target.gt_index >= gt_boxes.shape[0]:
-                    continue
-                point_indices = self._select_candidate_dense_points(
-                    dense_target=dense_target,
-                    anchors_per_image=anchors_per_image,
-                    assignments=assignments,
-                    used_points=used_points,
-                    candidate_densifier=candidate_densifier,
-                )
-                if point_indices.numel() == 0:
-                    continue
-                used_points[point_indices] = True
-                selected_points.append(point_indices)
-                selected_gt_indices.append(
-                    torch.full(
-                        (point_indices.numel(),),
-                        int(dense_target.gt_index),
-                        dtype=torch.long,
-                        device=point_indices.device,
-                    )
-                )
-
-            if not selected_points:
-                continue
-
-            point_indices = torch.cat(selected_points, dim=0)
-            gt_indices = torch.cat(selected_gt_indices, dim=0)
-            matched_gt_labels = gt_labels[gt_indices]
-            valid_label_mask = (
-                (matched_gt_labels >= 0)
-                & (matched_gt_labels < cls_logits.shape[1])
-            )
-            if not bool(valid_label_mask.any().item()):
-                continue
-
-            point_indices = point_indices[valid_label_mask]
-            gt_indices = gt_indices[valid_label_mask]
-            matched_gt_labels = matched_gt_labels[valid_label_mask]
-            matched_gt_boxes = gt_boxes[gt_indices].to(
-                device=cls_logits.device,
-                dtype=anchors_per_image.dtype,
-            )
-
-            cls_targets = torch.zeros(
-                (point_indices.numel(), cls_logits.shape[1]),
-                dtype=cls_logits.dtype,
-                device=cls_logits.device,
-            )
-            cls_targets[
-                torch.arange(point_indices.numel(), device=cls_logits.device),
-                matched_gt_labels,
-            ] = 1.0
-            cls_losses = sigmoid_focal_loss(
-                cls_logits[point_indices],
-                cls_targets,
-                reduction="none",
-            ).sum(dim=-1)
-
-            pred_boxes = self._decode_boxes(
-                box_regression=bbox_regression[point_indices],
-                anchors=anchors_per_image[point_indices],
-            )
-            pred_boxes = box_ops.clip_boxes_to_image(pred_boxes, image_shapes[image_index])
-            giou = box_ops.generalized_box_iou(pred_boxes, matched_gt_boxes)
-            reg_losses = 1.0 - torch.diagonal(giou)
-
-            ctr_targets = self._compute_centerness_targets(
-                anchors=anchors_per_image[point_indices],
-                gt_boxes=matched_gt_boxes,
-            )
-            ctr_losses = F.binary_cross_entropy_with_logits(
-                bbox_ctrness[point_indices],
-                ctr_targets,
-                reduction="none",
-            )
-
-            dense_sum = dense_sum + cls_losses.sum() + reg_losses.sum() + ctr_losses.sum()
-            dense_points += int(point_indices.numel())
-
-        if dense_points <= 0:
-            return dense_sum, 0
-
-        normalizer = dense_sum.new_tensor(float(dense_points))
-        loss = dense_sum / normalizer
-        return loss * float(candidate_densifier.loss_weight()), dense_points
-
-    def _select_candidate_dense_points(
-        self,
-        *,
-        dense_target,
-        anchors_per_image: torch.Tensor,
-        assignments: torch.Tensor,
-        used_points: torch.Tensor,
-        candidate_densifier: CandidateDensifier,
-    ) -> torch.Tensor:
-        budget = int(dense_target.budget)
-        if budget <= 0 or anchors_per_image.numel() == 0:
-            return anchors_per_image.new_zeros((0,), dtype=torch.long)
-
-        gt_box = dense_target.bbox.to(
-            device=anchors_per_image.device,
-            dtype=anchors_per_image.dtype,
-        )
-        gt_center = (gt_box[:2] + gt_box[2:]) * 0.5
-        gt_size = (gt_box[2:] - gt_box[:2]).clamp(min=1.0)
-        scale = float(candidate_densifier.region_scale_for(dense_target.severity))
-        half_size = (gt_size * scale * 0.5).clamp(min=1.0)
-        region_min = gt_center - half_size
-        region_max = gt_center + half_size
-
-        centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
-        candidate_mask = (
-            (centers[:, 0] >= region_min[0])
-            & (centers[:, 0] <= region_max[0])
-            & (centers[:, 1] >= region_min[1])
-            & (centers[:, 1] <= region_max[1])
-            & (~used_points)
-        )
-        if candidate_densifier.config.require_unassigned_points:
-            candidate_mask &= assignments < 0
-
-        candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).flatten()
-        if candidate_indices.numel() == 0:
-            return candidate_indices
-
-        normalized_offsets = (centers[candidate_indices] - gt_center).abs() / half_size
-        distances = normalized_offsets.max(dim=1).values
-        count = min(budget, int(candidate_indices.numel()))
-        nearest = torch.argsort(distances)[:count]
-        return candidate_indices[nearest]
-
-    def _repair_fcos_assignments(
-        self,
-        *,
-        repair_plan: RepairPlan,
-        targets: list[dict[str, torch.Tensor]],
-        anchors: list[torch.Tensor],
-        matched_idxs: list[torch.Tensor],
-        num_anchors_per_level: list[int],
-        faar: FailureAwareAssignmentRepair,
-    ) -> tuple[list[torch.Tensor], int, int, int]:
-        if len(repair_plan) == 0:
-            return matched_idxs, 0, 0, 0
-
-        repaired = [assignments.clone() for assignments in matched_idxs]
-        repaired_points = 0
-        skipped_no_candidate_points = 0
-        skipped_existing_positive = 0
-
-        for image_index, target in enumerate(targets):
-            image_id = target.get(
-                "image_id",
-                torch.tensor(image_index, device=anchors[image_index].device),
-            )
-            repair_targets = repair_plan.for_image(image_id)
-            if not repair_targets:
-                continue
-
-            anchors_per_image = anchors[image_index]
-            assignments = repaired[image_index]
-            gt_boxes = target["boxes"].to(device=anchors_per_image.device)
-            used_points = torch.zeros(
-                anchors_per_image.shape[0],
-                dtype=torch.bool,
-                device=anchors_per_image.device,
-            )
-
-            for repair_target in repair_targets:
-                if repair_target.gt_index < 0 or repair_target.gt_index >= gt_boxes.shape[0]:
-                    skipped_no_candidate_points += 1
-                    continue
-
-                point_indices, positive_skip_count = self._select_faar_repair_points(
-                    repair_target=repair_target,
-                    anchors_per_image=anchors_per_image,
-                    assignments=assignments,
-                    used_points=used_points,
-                    gt_boxes=gt_boxes,
-                    num_anchors_per_level=num_anchors_per_level,
-                    faar=faar,
-                )
-                skipped_existing_positive += positive_skip_count
-                if point_indices.numel() == 0:
-                    skipped_no_candidate_points += 1
-                    continue
-
-                assignments[point_indices] = int(repair_target.gt_index)
-                used_points[point_indices] = True
-                repaired_points += int(point_indices.numel())
-
-        return repaired, repaired_points, skipped_no_candidate_points, skipped_existing_positive
-
-    def _select_faar_repair_points(
-        self,
-        *,
-        repair_target,
-        anchors_per_image: torch.Tensor,
-        assignments: torch.Tensor,
-        used_points: torch.Tensor,
-        gt_boxes: torch.Tensor,
-        num_anchors_per_level: list[int],
-        faar: FailureAwareAssignmentRepair,
-    ) -> tuple[torch.Tensor, int]:
-        budget = int(repair_target.budget)
-        if budget <= 0 or anchors_per_image.numel() == 0:
-            return anchors_per_image.new_zeros((0,), dtype=torch.long), 0
-
-        gt_box = repair_target.bbox.to(
-            device=anchors_per_image.device,
-            dtype=anchors_per_image.dtype,
-        )
-        gt_center = (gt_box[:2] + gt_box[2:]) * 0.5
-        gt_size = (gt_box[2:] - gt_box[:2]).clamp(min=1.0)
-        scale = float(faar.region_scale_for(repair_target.severity))
-        half_size = (gt_size * scale * 0.5).clamp(min=1.0)
-        region_min = gt_center - half_size
-        region_max = gt_center + half_size
-
-        centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
-        inside_gt_mask = (
-            (centers[:, 0] > gt_box[0])
-            & (centers[:, 0] < gt_box[2])
-            & (centers[:, 1] > gt_box[1])
-            & (centers[:, 1] < gt_box[3])
-        )
-        region_mask = (
-            (centers[:, 0] >= region_min[0])
-            & (centers[:, 0] <= region_max[0])
-            & (centers[:, 1] >= region_min[1])
-            & (centers[:, 1] <= region_max[1])
-        )
-        candidate_scope_mask = region_mask & inside_gt_mask
-        availability_mask, skipped_existing_positive = self._faar_availability_mask(
-            repair_target=repair_target,
-            assignments=assignments,
-            used_points=used_points,
-            gt_boxes=gt_boxes,
-            count_scope_mask=candidate_scope_mask,
-            faar=faar,
-        )
-
-        scale_mask = torch.ones_like(region_mask)
-        if faar.config.respect_fcos_scale_range:
-            scale_mask = self._faar_scale_mask(
-                gt_box=gt_box,
-                anchors_per_image=anchors_per_image,
-                num_anchors_per_level=num_anchors_per_level,
-            )
-
-        candidate_mask = candidate_scope_mask & availability_mask & scale_mask
-        point_indices = self._take_nearest_faar_points(
-            candidate_mask=candidate_mask,
-            centers=centers,
-            gt_center=gt_center,
-            half_size=half_size,
-            budget=budget,
-        )
-        if point_indices.numel() > 0:
-            return point_indices, skipped_existing_positive
-
-        if faar.config.allow_adjacent_levels and faar.config.respect_fcos_scale_range:
-            adjacent_mask = self._faar_adjacent_level_mask(
-                scale_mask=scale_mask,
-                gt_box=gt_box,
-                anchors_per_image=anchors_per_image,
-                num_anchors_per_level=num_anchors_per_level,
-            )
-            candidate_mask = candidate_scope_mask & availability_mask & adjacent_mask
-            point_indices = self._take_nearest_faar_points(
-                candidate_mask=candidate_mask,
-                centers=centers,
-                gt_center=gt_center,
-                half_size=half_size,
-                budget=budget,
-            )
-            if point_indices.numel() > 0:
-                return point_indices, skipped_existing_positive
-
-        if faar.config.allow_nearest_center_fallback:
-            candidate_mask = inside_gt_mask & availability_mask
-            point_indices = self._take_nearest_faar_points(
-                candidate_mask=candidate_mask,
-                centers=centers,
-                gt_center=gt_center,
-                half_size=half_size,
-                budget=budget,
-            )
-            if point_indices.numel() > 0:
-                return point_indices, skipped_existing_positive
-
-        return anchors_per_image.new_zeros((0,), dtype=torch.long), skipped_existing_positive
-
-    def _faar_availability_mask(
-        self,
-        *,
-        repair_target,
-        assignments: torch.Tensor,
-        used_points: torch.Tensor,
-        gt_boxes: torch.Tensor,
-        count_scope_mask: torch.Tensor,
-        faar: FailureAwareAssignmentRepair,
-    ) -> tuple[torch.Tensor, int]:
-        base_mask = ~used_points
-        positive_mask = assignments >= 0
-        skipped_existing_positive = int((base_mask & count_scope_mask & positive_mask).sum().item())
-
-        if faar.config.require_unassigned_points or not faar.config.allow_positive_reassignment:
-            return base_mask & (assignments < 0), skipped_existing_positive
-
-        valid_positive = positive_mask & (assignments < gt_boxes.shape[0])
-        same_gt = valid_positive & (assignments == int(repair_target.gt_index))
-        reassignable_positive = torch.zeros_like(base_mask)
-        if bool(valid_positive.any().item()):
-            positive_indices = torch.nonzero(valid_positive & (~same_gt), as_tuple=False).flatten()
-            if positive_indices.numel() > 0:
-                assigned_gt = assignments[positive_indices].to(dtype=torch.long)
-                target_box = repair_target.bbox.to(
-                    device=gt_boxes.device,
-                    dtype=gt_boxes.dtype,
-                ).reshape(1, 4)
-                ious = box_ops.box_iou(target_box, gt_boxes[assigned_gt])[0]
-                reassignable = ious < float(faar.config.protect_existing_positive_iou)
-                reassignable_positive[positive_indices[reassignable]] = True
-
-        protected_positive = positive_mask & (~reassignable_positive)
-        skipped_existing_positive = int(
-            (base_mask & count_scope_mask & protected_positive).sum().item()
-        )
-        return base_mask & ((assignments < 0) | reassignable_positive), skipped_existing_positive
-
-    def _faar_scale_mask(
-        self,
-        *,
-        gt_box: torch.Tensor,
-        anchors_per_image: torch.Tensor,
-        num_anchors_per_level: list[int],
-    ) -> torch.Tensor:
-        centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
-        x, y = centers.unbind(dim=1)
-        x0, y0, x1, y1 = gt_box
-        distances = torch.stack([x - x0, y - y0, x1 - x, y1 - y], dim=1)
-        max_dist = distances.max(dim=1).values
-
-        anchor_sizes = anchors_per_image[:, 2] - anchors_per_image[:, 0]
-        lower_bound = anchor_sizes * 4
-        if num_anchors_per_level:
-            lower_bound[: num_anchors_per_level[0]] = 0
-        upper_bound = anchor_sizes * 8
-        if num_anchors_per_level:
-            upper_bound[-num_anchors_per_level[-1] :] = float("inf")
-        return (max_dist > lower_bound) & (max_dist < upper_bound)
-
-    def _faar_adjacent_level_mask(
-        self,
-        *,
-        scale_mask: torch.Tensor,
-        gt_box: torch.Tensor,
-        anchors_per_image: torch.Tensor,
-        num_anchors_per_level: list[int],
-    ) -> torch.Tensor:
-        level_ids = self._faar_level_ids(
-            num_anchors_per_level=num_anchors_per_level,
-            device=anchors_per_image.device,
-        )
-        num_levels = len(num_anchors_per_level)
-        if num_levels == 0:
-            return torch.ones_like(scale_mask)
-
-        valid_levels = level_ids[scale_mask]
-        if valid_levels.numel() > 0:
-            allowed_levels = {
-                int(level.item()) + offset
-                for level in valid_levels.unique()
-                for offset in (-1, 0, 1)
-                if 0 <= int(level.item()) + offset < num_levels
-            }
-        else:
-            anchor_sizes = anchors_per_image[:, 2] - anchors_per_image[:, 0]
-            level_sizes = []
-            start = 0
-            for count in num_anchors_per_level:
-                end = start + int(count)
-                if end > start:
-                    level_sizes.append(float(anchor_sizes[start:end].median().detach().item()))
-                else:
-                    level_sizes.append(1.0)
-                start = end
-            gt_extent = float((gt_box[2:] - gt_box[:2]).clamp(min=1.0).max().detach().item())
-            target_level = min(
-                range(num_levels),
-                key=lambda idx: abs(math.log(max(level_sizes[idx] * 6.0, 1e-6) / gt_extent)),
-            )
-            allowed_levels = {
-                level
-                for level in (target_level - 1, target_level, target_level + 1)
-                if 0 <= level < num_levels
-            }
-
-        allowed = torch.zeros_like(scale_mask)
-        for level in allowed_levels:
-            allowed |= level_ids == int(level)
-        return allowed
-
-    def _faar_level_ids(
-        self,
-        *,
-        num_anchors_per_level: list[int],
-        device: torch.device,
-    ) -> torch.Tensor:
-        if not num_anchors_per_level:
-            return torch.zeros((0,), dtype=torch.long, device=device)
-        return torch.cat(
-            [
-                torch.full((int(count),), level, dtype=torch.long, device=device)
-                for level, count in enumerate(num_anchors_per_level)
-            ],
-            dim=0,
-        )
-
-    def _take_nearest_faar_points(
-        self,
-        *,
-        candidate_mask: torch.Tensor,
-        centers: torch.Tensor,
-        gt_center: torch.Tensor,
-        half_size: torch.Tensor,
-        budget: int,
-    ) -> torch.Tensor:
-        candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).flatten()
-        if candidate_indices.numel() == 0:
-            return candidate_indices
-        normalized_offsets = (centers[candidate_indices] - gt_center).abs() / half_size
-        distances = normalized_offsets.max(dim=1).values
-        count = min(int(budget), int(candidate_indices.numel()))
-        nearest = torch.argsort(distances)[:count]
-        return candidate_indices[nearest]
 
     def _compute_centerness_targets(
         self,
@@ -1106,6 +504,7 @@ class MDMBFCOS(FCOS):
 
         return {
             "detections": detections,
+            "features": features,
             "split_head_outputs": split_head_outputs,
             "split_anchors": split_anchors,
             "transformed_targets": transformed_targets,
@@ -1184,6 +583,13 @@ class MDMBFCOS(FCOS):
         transformed_targets = post_step["transformed_targets"]
         transformed_image_sizes = post_step["transformed_image_sizes"]
         if should_mdmbpp and isinstance(transformed_targets, list):
+            support_feature_list = None
+            if bool(mdmbpp.config.store_support_feature):
+                support_feature_list = self._collect_mdmbpp_support_features(
+                    features=post_step["features"],
+                    targets=transformed_targets,
+                    image_shapes=transformed_image_sizes,
+                )
             candidate_summary_list = self._collect_mdmbpp_candidate_summaries(
                 split_head_outputs=post_step["split_head_outputs"],
                 split_anchors=post_step["split_anchors"],
@@ -1199,8 +605,43 @@ class MDMBFCOS(FCOS):
                 gt_labels_list=gt_labels_list,
                 image_shapes=image_shapes,
                 candidate_summary_list=candidate_summary_list,
+                support_feature_list=support_feature_list,
                 epoch=epoch,
             )
+
+    def _collect_mdmbpp_support_features(
+        self,
+        *,
+        features: OrderedDict[str, torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+    ) -> list[dict[int, torch.Tensor]]:
+        boxes_per_image = [
+            target["boxes"].to(dtype=torch.float32).reshape(-1, 4)
+            for target in targets
+        ]
+        total_boxes = sum(int(boxes.shape[0]) for boxes in boxes_per_image)
+        if total_boxes == 0:
+            return [{} for _ in targets]
+
+        pooled_features = pool_multiscale_box_features(
+            features=features,
+            boxes_per_image=boxes_per_image,
+            image_shapes=image_shapes,
+            output_size=7,
+            sampling_ratio=2,
+            normalize=True,
+        )
+        support_feature_list: list[dict[int, torch.Tensor]] = []
+        offset = 0
+        for boxes in boxes_per_image:
+            count = int(boxes.shape[0])
+            image_features: dict[int, torch.Tensor] = {}
+            for gt_index in range(count):
+                image_features[gt_index] = pooled_features[offset + gt_index].detach().cpu()
+            support_feature_list.append(image_features)
+            offset += count
+        return support_feature_list
 
     def _collect_mdmbpp_candidate_summaries(
         self,
@@ -1568,25 +1009,10 @@ class MDMBFCOS(FCOS):
             return None
         return self._mdmbpp_ref()
 
-    def _get_faar(self) -> FailureAwareAssignmentRepair | None:
-        if self._faar_ref is None:
+    def _get_rasd(self) -> RelapseAwareSupportDistillation | None:
+        if self._rasd_ref is None:
             return None
-        return self._faar_ref()
-
-    def _get_fang(self) -> FailureAwareNegativeGradientShielding | None:
-        if self._fang_ref is None:
-            return None
-        return self._fang_ref()
-
-    def _get_marc(self) -> MissAwareRankingCalibration | None:
-        if self._marc_ref is None:
-            return None
-        return self._marc_ref()
-
-    def _get_candidate_densifier(self) -> CandidateDensifier | None:
-        if self._candidate_densifier_ref is None:
-            return None
-        return self._candidate_densifier_ref()
+        return self._rasd_ref()
 
 
 class FCOSWrapper(BaseDetectionWrapper):
@@ -1603,19 +1029,13 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        faar: FailureAwareAssignmentRepair | None = None,
-        fang: FailureAwareNegativeGradientShielding | None = None,
-        marc: MissAwareRankingCalibration | None = None,
-        candidate_densifier: CandidateDensifier | None = None,
+        rasd: RelapseAwareSupportDistillation | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.mdmb = mdmb
         self.mdmbpp = mdmbpp
-        self.faar = faar
-        self.fang = fang
-        self.marc = marc
-        self.candidate_densifier = candidate_densifier
+        self.rasd = rasd
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -1639,10 +1059,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             topk_candidates=head.get("topk_candidates", 1000),
             mdmb=mdmb,
             mdmbpp=mdmbpp,
-            faar=faar,
-            fang=fang,
-            marc=marc,
-            candidate_densifier=candidate_densifier,
+            rasd=rasd,
             **kwargs,
         )
 
@@ -1667,10 +1084,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         post_neck: nn.Module | None = None,
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
-        faar: FailureAwareAssignmentRepair | None = None,
-        fang: FailureAwareNegativeGradientShielding | None = None,
-        marc: MissAwareRankingCalibration | None = None,
-        candidate_densifier: CandidateDensifier | None = None,
+        rasd: RelapseAwareSupportDistillation | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -1680,9 +1094,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             post_neck=post_neck,
             mdmb=mdmb,
             mdmbpp=mdmbpp,
-            faar=faar,
-            fang=fang,
-            marc=marc,
-            candidate_densifier=candidate_densifier,
+            rasd=rasd,
             **kwargs,
         )

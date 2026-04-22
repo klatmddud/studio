@@ -1,9 +1,9 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `candidate_densification`, `faar`, `fang`, and `marc` live in `modules/nn/`.
-`hard_replay` is configured in the same folder but implemented in `scripts/runtime/hard_replay.py`
-because it operates at the data-loading layer.
+`mdmb`, `mdmbpp`, and `rasd` live in `modules/nn/`.
+`hard_replay` is configured in the same folder but implemented in
+`scripts/runtime/hard_replay.py` because it operates at the data-loading layer.
 
 **All research modules are disabled by default.**
 
@@ -70,6 +70,8 @@ Useful read APIs for downstream modules:
 
 Implementation note: MDMB++ stores persistent memory tensors on CPU, but transient IoU checks align
 GT, label, and score tensors to the final-detection device before calling TorchVision box ops.
+When `store_support_feature: true`, FCOS post-step updates also store object-level support feature
+vectors in `SupportSnapshot.feature` for downstream temporal distillation modules such as RASD.
 
 ### Hard Replay (`scripts/runtime/hard_replay.py`)
 
@@ -82,14 +84,13 @@ Data-layer replay that redistributes training exposure toward images whose GTs r
 - Config: `modules/cfg/hard_replay.yaml`
 - Arch support: data-layer replay is model-agnostic; replay-aware loss weighting is FCOS-only
 
-Current scope is the minimal first version:
+Current scope:
 
 - Epoch-level `ReplayIndex`
 - Image-level replay
 - Object-level crop replay through `object_replay.crop`
 - Rectangular copy-paste replay through `object_replay.copy_paste`
 - Support/miss pair replay through `object_replay.pair`
-- FCDR crop replay when `fcdr.enabled: true`
 - Mixed batch composition
 - FCOS replay-aware per-GT loss weighting through replay target metadata
 
@@ -102,102 +103,38 @@ Important behavior:
 - Object replay creates virtual indices after the base dataset range
 - Replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++ memory updates
 - Pair replay keeps `pair_miss` and `pair_support` in the same mini-batch when replay slots allow it
-- FCDR is retained as a failure-conditioned policy preset over the object replay path
 - FCOS applies `replay_box_weights` only to positive points matched to replay-weighted GTs
 
-### Candidate Densification (`modules/nn/candidate_densification.py`)
+### RASD - Relapse-Aware Support Distillation (`modules/nn/rasd.py`)
 
-Training-time auxiliary positive point densification for hard GTs stored in `MDMB++`.
+Training-time support distillation for relapse GTs stored in `MDMB++`.
 
-- Depends on MDMB++
+- Depends on MDMB++ with `store_support_feature: true`
 - Hooks: `start_epoch()`, `end_epoch()`
-- Planning API: `candidate_densifier.plan(mdmbpp, targets, image_shapes)`
-- Training path: FCOS adds a `candidate_dense` auxiliary loss when dense points are selected
-- Summary: `candidate_densifier.summary()`
-- Config: `modules/cfg/candidate_densification.yaml`
+- Planning API: `rasd.plan(mdmbpp, targets, image_shapes)`
+- Training path: FCOS adds a `rasd` auxiliary loss after the base FCOS loss
+- Summary: `rasd.summary()`
+- Config: `modules/cfg/rasd.yaml`
 - Arch support: FCOS
 
-Current scope is the minimal first version:
+Current scope:
 
 - FCOS only
-- Base FCOS assignment is unchanged
-- Dense positives are selected from points near hard GT centers
-- Default behavior uses only points that were background under the base FCOS assignment
-- Loss weight uses linear warmup through `lambda_dense`
-
-### FAAR - Failure-Aware Assignment Repair (`modules/nn/faar.py`)
-
-Training-time assignment repair for hard GTs stored in `MDMB++`.
-
-- Depends on MDMB++
-- Hooks: `start_epoch()`, `end_epoch()`
-- Planning API: `faar.plan(mdmbpp, targets, image_shapes)`
-- Training path: FCOS repairs `matched_idxs` after the base assignment and before loss computation
-- Summary: `faar.summary()`
-- Config: `modules/cfg/faar.yaml`
-- Arch support: FCOS
-
-Current scope is the minimal first version:
-
-- FCOS only
-- No auxiliary loss is added
-- Repair targets are selected by MDMB++ `failure_type`, `severity`, and relapse state
-- Default behavior only converts unassigned FCOS points into positives for the hard GT
-- Repaired FCOS points must keep their centers inside the target GT box so bbox regression and centerness targets stay finite
-- Existing positive assignments are not stolen unless `allow_positive_reassignment: true`
-- If Candidate Densification is also enabled, FAAR runs first so dense supervision sees the repaired assignment
-
-### MARC - Miss-Aware Ranking Calibration (`modules/nn/marc.py`)
-
-Training-time ranking calibration for hard GTs stored in `MDMB++`.
-
-- Depends on MDMB++
-- Hooks: `start_epoch()`, `end_epoch()`
-- Planning API: `marc.plan(mdmbpp, targets, image_shapes)`
-- Training path: FCOS adds a `marc` auxiliary ranking loss after FAAR and before Candidate Densification
-- Summary: `marc.summary()`
-- Config: `modules/cfg/marc.yaml`
-- Arch support: FCOS
-
-Current scope is the minimal first version:
-
-- FCOS only
-- No assignment, data sampling, or inference behavior is changed
-- Ranking targets are selected from MDMB++ `score_suppression`, `nms_suppression`, `cls_confusion`, and `loc_near_miss`
-- `candidate_missing` is excluded by default because there may be no meaningful candidate to rank
-- Positive candidates use GT-class score and IoU; negatives use wrong-class confusers, same-class suppressors, and high-score local distractors
-
-### FANG - Failure-Aware Negative Gradient Shielding (`modules/nn/fang.py`)
-
-Training-time negative-gradient shielding for hard GTs stored in `MDMB++`.
-
-- Depends on MDMB++
-- Hooks: `start_epoch()`, `end_epoch()`
-- Planning API: `fang.plan(mdmbpp, targets, image_shapes)`
-- Weighting API: `fang.compute_class_weights(...)`
-- Training path: FCOS lowers selected class-wise negative focal-loss terms after FAAR and before loss aggregation
-- Summary: `fang.summary()`
-- Config: `modules/cfg/fang.yaml`
-- Arch support: FCOS
-
-Current scope is the minimal first version:
-
-- FCOS only
-- No auxiliary loss is added
-- Only `matched_idxs < 0` negative points are eligible
-- Only the hard GT true-class column is shielded; other class losses, bbox regression, and centerness are unchanged
-- Shield targets are selected by MDMB++ `failure_type` and `severity`
-- Overlapping shield targets use the lowest class weight for the same point/class pair
+- Training-only; inference, NMS, and score thresholds are unchanged
+- Relapse entries with stored support features are selected from MDMB++
+- Current GT features are pooled from FPN features with MultiScaleRoIAlign
+- The v1 loss is support attraction: current GT feature is pulled toward its previous successful support feature
+- Confuser-aware contrastive settings are present in the config but disabled by default for a later extension
 
 ## Runtime Integration
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `candidate_densifier`, `faar`, `fang`, and `marc` from `modules/cfg/*.yaml`.
-2. FCOS forward reads `model.mdmbpp` through FAAR, FANG, MARC, and Candidate Densification when enabled.
-3. FAAR repairs `matched_idxs`; FANG can shield class-wise negative focal terms; MARC can add `marc` ranking loss; Candidate Densification can add `candidate_dense` auxiliary loss.
+1. `registry.py` builds `mdmb`, `mdmbpp`, and `rasd` from `modules/cfg/*.yaml`.
+2. FCOS forward computes the base detection loss and optionally adds `rasd`.
+3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
-5. That pass refreshes `mdmb` and `mdmbpp` state.
+5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.
 6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
 
 ## Compatibility
@@ -207,7 +144,4 @@ FCOS currently wires the following path:
 | MDMB | yes | no | no |
 | MDMB++ | yes | no | no |
 | Hard Replay | yes | no | no |
-| Candidate Densification | yes | no | no |
-| FAAR | yes | no | no |
-| FANG | yes | no | no |
-| MARC | yes | no | no |
+| RASD | yes | no | no |

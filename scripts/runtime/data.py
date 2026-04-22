@@ -189,10 +189,6 @@ class HardReplayDatasetWrapper(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
         target["target_image_id"] = _source_image_id_tensor(target_image_id)
         return image_tensor, target
 
-
-CounterfactualReplayDataset = HardReplayDatasetWrapper
-
-
 def build_train_dataloaders(
     config: dict[str, Any],
     *,
@@ -208,9 +204,7 @@ def build_train_dataloaders(
         arch=arch,
     )
     loader_dataset: Dataset[Any] = train_dataset
-    if hard_replay is not None and (
-        hard_replay.config.fcdr.enabled or hard_replay.config.object_replay.enabled
-    ):
+    if hard_replay is not None and hard_replay.config.object_replay.enabled:
         replay_dataset = HardReplayDatasetWrapper(train_dataset)
         hard_replay.attach_replay_dataset(replay_dataset)
         loader_dataset = replay_dataset

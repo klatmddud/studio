@@ -52,8 +52,8 @@ When `modules/cfg/hard_replay.yaml` is enabled for the active architecture:
 - Each epoch still walks the full base dataset once, then injects replay samples into each batch
   according to `replay_ratio`
 
-When top-level Hard Replay `enabled: true` and either `object_replay.enabled: true` or
-`fcdr.enabled: true`, the train dataset is wrapped by `HardReplayDatasetWrapper`.
+When top-level Hard Replay `enabled: true` and `object_replay.enabled: true`, the train dataset is
+wrapped by `HardReplayDatasetWrapper`.
 The wrapper keeps original dataset indices unchanged and maps virtual indices after the base
 dataset range to replay samples.
 

@@ -4,14 +4,12 @@
 
 All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVision.
 
-### FCOS (`fcos.py` → `MDMBFCOS`)
+### FCOS (`fcos.py` -> `MDMBFCOS`)
 
 - Single-stage anchor-free detector
-- Integrates MDMB, MDMB++, FAAR, FANG, MARC, and Candidate Densification modules (if enabled in `modules/cfg/`)
-- FAAR repairs training assignment for MDMB++ hard GTs without changing inference
-- FANG shields selected true-class negative focal-loss terms for MDMB++ hard GTs
-- MARC adds a training-only ranking calibration loss for MDMB++ hard GT candidates
-- Candidate Densification adds a training-only `candidate_dense` auxiliary loss for MDMB++ hard GTs without changing the base FCOS assignment
+- Integrates MDMB, MDMB++, and RASD modules when enabled in `modules/cfg/`
+- Applies Hard Replay per-GT loss weights when replay metadata is present in the batch
+- RASD adds a training-only `rasd` auxiliary loss for relapse GTs with stored MDMB++ support features
 - `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass, then refreshes MDMB / MDMB++ state
 - Forward in train mode: returns `loss_dict`; in eval mode: returns predictions
 
@@ -21,7 +19,7 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 - Plain TorchVision FasterRCNN; no research modules are currently wired up
 - Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3
 
-### DINO (`dino.py` → `DINOWrapper`)
+### DINO (`dino.py` -> `DINOWrapper`)
 
 - Transformer-based detector (DEtection with INtroduced queries + Optimized)
 - External backend builder (see `backend.builder` YAML field); no research modules wired
@@ -33,7 +31,7 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 |---|---|
 | `backbone.name` | `resnet18/34/50/101/152`, `mobilenet_v2`, `mobilenet_v3_large` |
 | `backbone.pretrained` | `DEFAULT` or `null` |
-| `backbone.trainable_layers` | Number of trainable backbone layers (0–5) |
+| `backbone.trainable_layers` | Number of trainable backbone layers |
 | `neck.out_channels` | FPN output channels (default: 256) |
 | `head.score_thresh` | Score threshold for predictions |
 | `head.nms_thresh` | NMS IoU threshold |
@@ -45,10 +43,12 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 ## Model Building (`scripts/runtime/registry.py`)
 
 `build_model_from_path(model_yaml, runtime_config)`:
+
 1. Loads model YAML
 2. Infers `arch` from filename stem
 3. Dispatches to the appropriate wrapper class
 4. Loads module configs from `modules/cfg/` and attaches enabled modules
 5. Returns `(model, model_config, arch, model_config_path)`
 
-`num_classes` is resolved at build time: model YAML value takes precedence; otherwise inferred from `train_annotations` via `dataset_meta.py`.
+`num_classes` is resolved at build time: model YAML value takes precedence; otherwise inferred from
+`train_annotations` via `dataset_meta.py`.

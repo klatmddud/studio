@@ -1,6 +1,6 @@
 # AGENTS.md
 
-PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Includes research modules (MDMB, MDMB++, Hard Replay, FAAR, FANG, MARC, Candidate Densification) for improving detection performance.
+PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Includes research modules (MDMB, MDMB++, Hard Replay, RASD) for improving detection performance.
 
 ## Quick Reference
 

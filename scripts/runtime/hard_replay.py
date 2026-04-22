@@ -19,67 +19,6 @@ HARD_REPLAY_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "hard_replay.yaml"
 
 
 @dataclass(frozen=True, slots=True)
-class FCDRConfig:
-    enabled: bool = False
-    counterfactual_ratio: float = 0.5
-    min_severity: float = 0.0
-    max_crops_per_gt_per_epoch: int = 1
-    crop_context_scale: float = 1.0
-    min_crop_context_px: int = 16
-    overlap_threshold: float = 0.1
-    copy_paste_prob: float = 0.0
-    pair_replay_prob: float = 0.0
-
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "FCDRConfig":
-        data = dict(raw or {})
-        config = cls(
-            enabled=bool(data.get("enabled", False)),
-            counterfactual_ratio=float(data.get("counterfactual_ratio", 0.5)),
-            min_severity=float(data.get("min_severity", 0.0)),
-            max_crops_per_gt_per_epoch=int(data.get("max_crops_per_gt_per_epoch", 1)),
-            crop_context_scale=float(data.get("crop_context_scale", 1.0)),
-            min_crop_context_px=int(data.get("min_crop_context_px", 16)),
-            overlap_threshold=float(data.get("overlap_threshold", 0.1)),
-            copy_paste_prob=float(data.get("copy_paste_prob", 0.0)),
-            pair_replay_prob=float(data.get("pair_replay_prob", 0.0)),
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        if not 0.0 <= self.counterfactual_ratio <= 1.0:
-            raise ValueError("FCDR counterfactual_ratio must satisfy 0 <= value <= 1.")
-        if self.min_severity < 0.0:
-            raise ValueError("FCDR min_severity must be >= 0.")
-        if self.max_crops_per_gt_per_epoch < 1:
-            raise ValueError("FCDR max_crops_per_gt_per_epoch must be >= 1.")
-        if self.crop_context_scale < 0.0:
-            raise ValueError("FCDR crop_context_scale must be >= 0.")
-        if self.min_crop_context_px < 0:
-            raise ValueError("FCDR min_crop_context_px must be >= 0.")
-        if not 0.0 <= self.overlap_threshold <= 1.0:
-            raise ValueError("FCDR overlap_threshold must satisfy 0 <= value <= 1.")
-        if not 0.0 <= self.copy_paste_prob <= 1.0:
-            raise ValueError("FCDR copy_paste_prob must satisfy 0 <= value <= 1.")
-        if not 0.0 <= self.pair_replay_prob <= 1.0:
-            raise ValueError("FCDR pair_replay_prob must satisfy 0 <= value <= 1.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "counterfactual_ratio": self.counterfactual_ratio,
-            "min_severity": self.min_severity,
-            "max_crops_per_gt_per_epoch": self.max_crops_per_gt_per_epoch,
-            "crop_context_scale": self.crop_context_scale,
-            "min_crop_context_px": self.min_crop_context_px,
-            "overlap_threshold": self.overlap_threshold,
-            "copy_paste_prob": self.copy_paste_prob,
-            "pair_replay_prob": self.pair_replay_prob,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class ObjectReplayCropConfig:
     enabled: bool = False
     context_scale: float = 1.0
@@ -301,7 +240,6 @@ class HardReplayConfig:
     max_replays_per_gt_per_epoch: int = 4
     replay_recency_window: int = 3
     arch: str | None = None
-    fcdr: FCDRConfig = field(default_factory=FCDRConfig)
     object_replay: ObjectReplayConfig = field(default_factory=ObjectReplayConfig)
     loss: ReplayLossConfig = field(default_factory=ReplayLossConfig)
 
@@ -322,14 +260,6 @@ class HardReplayConfig:
                 selected = per_model.get(normalized_arch, {})
                 if isinstance(selected, Mapping):
                     overrides = dict(selected)
-
-        fcdr_data: dict[str, Any] = {}
-        top_fcdr = data.get("fcdr", {})
-        if isinstance(top_fcdr, Mapping):
-            fcdr_data.update(top_fcdr)
-        override_fcdr = overrides.get("fcdr", {})
-        if isinstance(override_fcdr, Mapping):
-            fcdr_data.update(override_fcdr)
 
         object_replay_data: dict[str, Any] = {}
         top_object_replay = data.get("object_replay", {})
@@ -369,7 +299,6 @@ class HardReplayConfig:
                 overrides.get("replay_recency_window", data.get("replay_recency_window", 3))
             ),
             arch=normalized_arch,
-            fcdr=FCDRConfig.from_mapping(fcdr_data),
             object_replay=ObjectReplayConfig.from_mapping(object_replay_data),
             loss=ReplayLossConfig.from_mapping(loss_data),
         )
@@ -404,7 +333,6 @@ class HardReplayConfig:
             "max_replays_per_gt_per_epoch": self.max_replays_per_gt_per_epoch,
             "replay_recency_window": self.replay_recency_window,
             "arch": self.arch,
-            "fcdr": self.fcdr.to_dict(),
             "object_replay": self.object_replay.to_dict(),
             "loss": self.loss.to_dict(),
         }
@@ -477,12 +405,6 @@ class ReplayIndex:
                 "replay_ratio_requested": 0.0,
                 "replay_ratio_effective": 0.0,
                 "replay_exposure_per_gt": 0.0,
-                "fcdr_enabled": False,
-                "fcdr_num_crops": 0,
-                "fcdr_counterfactual_ratio_requested": 0.0,
-                "fcdr_ratio_effective": 0.0,
-                "fcdr_samples": 0,
-                "fcdr_unique_crops": 0,
                 "object_replay_enabled": False,
                 "replay_num_crop_specs": 0,
                 "replay_num_copy_paste_specs": 0,
@@ -528,8 +450,8 @@ class HardReplayPlanner:
         replay_caps: dict[int, int] = {}
         severity_sum = 0.0
         replay_samples: list[ReplaySampleSpec] = []
-        fcdr_failure_counts: Counter[str] = Counter()
-        fcdr_mode_counts: Counter[str] = Counter()
+        replay_failure_counts: Counter[str] = Counter()
+        replay_mode_counts: Counter[str] = Counter()
         replay_skipped_counts: Counter[str] = Counter()
 
         for dataset_index, image_id in enumerate(image_ids):
@@ -565,8 +487,8 @@ class HardReplayPlanner:
             replay_samples.extend(image_replay_samples)
             replay_skipped_counts.update(image_skipped)
             for sample in image_replay_samples:
-                fcdr_failure_counts[sample.failure_type] += 1
-                fcdr_mode_counts[sample.mode] += 1
+                replay_failure_counts[sample.failure_type] += 1
+                replay_mode_counts[sample.mode] += 1
 
         active_images = len(replay_dataset_indices)
         mean_image_weight = 0.0
@@ -577,10 +499,10 @@ class HardReplayPlanner:
         if replay_gt_ids:
             mean_gt_severity = severity_sum / float(len(replay_gt_ids))
 
-        fcdr_summary = self._build_fcdr_summary(
+        object_replay_summary = self._build_object_replay_summary(
             replay_samples=replay_samples,
-            failure_counts=fcdr_failure_counts,
-            mode_counts=fcdr_mode_counts,
+            failure_counts=replay_failure_counts,
+            mode_counts=replay_mode_counts,
             skipped_counts=replay_skipped_counts,
         )
 
@@ -607,7 +529,7 @@ class HardReplayPlanner:
                 "replay_ratio_requested": self.config.replay_ratio,
                 "replay_ratio_effective": 0.0,
                 "replay_exposure_per_gt": 0.0,
-                **fcdr_summary,
+                **object_replay_summary,
             },
         )
 
@@ -625,22 +547,6 @@ class HardReplayPlanner:
         )
         replay_index.summary.update(
             {
-                "fcdr_enabled": bool(enabled and self.config.fcdr.enabled),
-                "fcdr_counterfactual_ratio_requested": (
-                    self.config.fcdr.counterfactual_ratio
-                    if enabled and self.config.fcdr.enabled
-                    else 0.0
-                ),
-                "fcdr_copy_paste_prob": (
-                    self.config.fcdr.copy_paste_prob
-                    if enabled and self.config.fcdr.enabled
-                    else 0.0
-                ),
-                "fcdr_pair_replay_prob": (
-                    self.config.fcdr.pair_replay_prob
-                    if enabled and self.config.fcdr.enabled
-                    else 0.0
-                ),
                 "object_replay_enabled": bool(enabled and self.config.object_replay.enabled),
                 "replay_loss_enabled": bool(enabled and self.config.loss.enabled),
             }
@@ -938,12 +844,10 @@ class HardReplayPlanner:
         return float(clipped_weight**self.config.temperature)
 
     def _object_replay_enabled(self) -> bool:
-        return bool(self.config.object_replay.enabled or self.config.fcdr.enabled)
+        return bool(self.config.object_replay.enabled)
 
     def _crop_replay_enabled(self) -> bool:
-        if self.config.object_replay.enabled:
-            return bool(self.config.object_replay.crop.enabled)
-        return bool(self.config.fcdr.enabled)
+        return bool(self.config.object_replay.enabled and self.config.object_replay.crop.enabled)
 
     def _copy_paste_replay_enabled(self) -> bool:
         return bool(
@@ -955,29 +859,21 @@ class HardReplayPlanner:
         return bool(self.config.object_replay.enabled and self.config.object_replay.pair.enabled)
 
     def _object_replay_cap(self) -> int:
-        if self.config.object_replay.enabled:
-            return self.config.max_replays_per_gt_per_epoch
-        return self.config.fcdr.max_crops_per_gt_per_epoch
+        return self.config.max_replays_per_gt_per_epoch
 
     def _object_replay_min_severity(self) -> float:
-        return self.config.fcdr.min_severity if self.config.fcdr.enabled else 0.0
+        return 0.0
 
     def _object_replay_overlap_threshold(self) -> float:
-        return self.config.fcdr.overlap_threshold if self.config.fcdr.enabled else 0.1
+        return 0.1
 
     def _object_replay_crop_context_scale(self) -> float:
-        if self.config.object_replay.enabled:
-            return self.config.object_replay.crop.context_scale
-        return self.config.fcdr.crop_context_scale
+        return self.config.object_replay.crop.context_scale
 
     def _object_replay_min_context_px(self) -> int:
-        if self.config.object_replay.enabled:
-            return self.config.object_replay.crop.min_context_px
-        return self.config.fcdr.min_crop_context_px
+        return self.config.object_replay.crop.min_context_px
 
     def _select_replay_mode(self, *, entry: MDMBPlusEntry, record: Any) -> str:
-        if self.config.fcdr.enabled:
-            return _select_fcdr_mode(entry=entry, record=record)
         return "severity_context_crop"
 
     def _loss_weight_for_kind(self, kind: str) -> float:
@@ -994,7 +890,7 @@ class HardReplayPlanner:
             return 1.0
         return min(self.config.loss.max_weight, float(base_weight) * float(component_weight))
 
-    def _build_fcdr_summary(
+    def _build_object_replay_summary(
         self,
         *,
         replay_samples: Sequence[ReplaySampleSpec],
@@ -1009,16 +905,6 @@ class HardReplayPlanner:
                 len(replay_samples)
             )
         summary: dict[str, float | int | bool] = {
-            "fcdr_enabled": bool(self.config.fcdr.enabled),
-            "fcdr_num_crops": int(kind_counts.get("crop", 0)),
-            "fcdr_counterfactual_ratio_requested": (
-                self.config.fcdr.counterfactual_ratio if self.config.fcdr.enabled else 0.0
-            ),
-            "fcdr_ratio_effective": 0.0,
-            "fcdr_samples": 0,
-            "fcdr_unique_crops": 0,
-            "fcdr_copy_paste_prob": self.config.fcdr.copy_paste_prob,
-            "fcdr_pair_replay_prob": self.config.fcdr.pair_replay_prob,
             "object_replay_enabled": bool(self.config.object_replay.enabled),
             "replay_num_object_samples": int(len(replay_samples)),
             "replay_num_crop_specs": int(kind_counts.get("crop", 0)),
@@ -1030,30 +916,12 @@ class HardReplayPlanner:
             "replay_loss_weight_mean": mean_loss_weight,
         }
         for failure_type, count in failure_counts.items():
-            summary[f"fcdr_failure_{failure_type}"] = int(count)
+            summary[f"replay_failure_{failure_type}"] = int(count)
         for mode, count in mode_counts.items():
-            summary[f"fcdr_policy_{mode}"] = int(count)
+            summary[f"replay_policy_{mode}"] = int(count)
         for kind, count in skipped_counts.items():
             summary[f"replay_skipped_{kind}"] = int(count)
         return summary
-
-
-def _select_fcdr_mode(*, entry: MDMBPlusEntry, record: Any) -> str:
-    relapse_count = int(getattr(record, "relapse_count", 0)) if record is not None else 0
-    last_detected_epoch = getattr(record, "last_detected_epoch", None) if record is not None else None
-    if entry.relapse or relapse_count > 0 or last_detected_epoch is not None:
-        return "support_guided_crop" if entry.support is not None else "relapse_crop"
-    if entry.failure_type == "candidate_missing":
-        return "zoom_context_crop"
-    if entry.failure_type == "loc_near_miss":
-        return "boundary_context_crop"
-    if entry.failure_type == "cls_confusion":
-        return "class_context_crop"
-    if entry.failure_type == "score_suppression":
-        return "weak_context_crop"
-    if entry.failure_type == "nms_suppression":
-        return "overlap_preserving_crop"
-    return "context_crop"
 
 
 def _normalized_box_to_abs(
@@ -1249,7 +1117,6 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         batch_size: int,
         shuffle: bool,
         replay_ratio: float,
-        counterfactual_ratio: float,
         object_replay_ratios: Mapping[str, float] | None = None,
         pair_requires_same_batch: bool = True,
         pair_min_replay_slots: int = 2,
@@ -1260,7 +1127,6 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.replay_ratio = float(replay_ratio)
-        self.counterfactual_ratio = float(counterfactual_ratio)
         self.object_replay_ratios = {
             str(key): max(0.0, float(value))
             for key, value in dict(object_replay_ratios or {}).items()
@@ -1419,8 +1285,6 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             return {"image": 0, "crop": 0, "copy_paste": 0, "pair": 0}
 
         ratios = dict(self.object_replay_ratios)
-        if not ratios and self.counterfactual_ratio > 0.0:
-            ratios = {"crop": self.counterfactual_ratio}
 
         pair_ratio = ratios.get("pair", 0.0)
         pair_slots = 0
@@ -1645,20 +1509,6 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         if total_samples > 0:
             effective_ratio = total_replay_samples / float(total_samples)
 
-        fcdr_enabled = bool(self._replay_index.summary.get("fcdr_enabled", False))
-        fcdr_samples = int(object_kind_counts.get("crop", 0)) if fcdr_enabled else 0
-        fcdr_ratio_effective = 0.0
-        if total_replay_samples > 0:
-            fcdr_ratio_effective = fcdr_samples / float(total_replay_samples)
-        fcdr_unique_crops = 0
-        if fcdr_enabled:
-            fcdr_unique_crops = sum(
-                1
-                for sample_index in crop_replay_counts
-                if 0 <= sample_index < len(replay_samples)
-                and replay_samples[sample_index].kind == "crop"
-            )
-
         self._last_summary = {
             **dict(self._replay_index.summary),
             "replay_ratio_requested": self.replay_ratio if self._active_replay_count > 0 else 0.0,
@@ -1666,9 +1516,6 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             "replay_exposure_per_gt": replay_exposure_per_gt,
             "replay_samples": int(total_replay_samples),
             "replay_unique_images": int(len(image_replay_counts)),
-            "fcdr_samples": fcdr_samples,
-            "fcdr_ratio_effective": fcdr_ratio_effective,
-            "fcdr_unique_crops": int(fcdr_unique_crops),
             "replay_crop_samples": int(object_kind_counts.get("crop", 0)),
             "replay_copy_paste_samples": int(object_kind_counts.get("copy_paste", 0)),
             "replay_pair_samples": int(
@@ -1742,9 +1589,6 @@ def build_hard_replay_controller_from_yaml(
         batch_size=batch_size,
         shuffle=shuffle,
         replay_ratio=config.replay_ratio,
-        counterfactual_ratio=(
-            config.fcdr.counterfactual_ratio if config.fcdr.enabled else 0.0
-        ),
         object_replay_ratios=_object_replay_ratios(config),
         pair_requires_same_batch=config.object_replay.pair.require_same_batch,
         pair_min_replay_slots=config.object_replay.pair.min_replay_slots,
@@ -1768,6 +1612,4 @@ def _object_replay_ratios(config: HardReplayConfig) -> dict[str, float]:
         if config.object_replay.pair.enabled:
             ratios["pair"] = config.object_replay.pair_ratio
         return ratios
-    if config.fcdr.enabled:
-        return {"crop": config.fcdr.counterfactual_ratio}
     return {}

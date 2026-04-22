@@ -85,10 +85,10 @@ Main training loop:
 1. Build optimizer, scheduler, and grad scaler.
 2. Optionally resume from `checkpoint.resume`.
 3. For each epoch:
-   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, `faar`, `fang`, `marc`, and `candidate_densifier` modules.
+   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, and `rasd` modules.
    - Refresh the Hard Replay `ReplayIndex` from `model.mdmbpp` if the train loader has a replay controller.
    - Run `train_one_epoch()`.
-   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, `faar`, `fang`, `marc`, and `candidate_densifier`.
+   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, and `rasd`.
    - Optionally evaluate on the validation loader.
    - Save `best.pt` and `last.pt` according to checkpoint settings.
    - Append the epoch record to `history.json`.
@@ -97,14 +97,9 @@ Inside `train_one_epoch()`, FCOS may run `after_optimizer_step()` after every op
 That post-step hook performs one no-grad inference pass and refreshes `mdmb` and `mdmbpp`
 state from the updated model.
 
-When Candidate Densification is enabled, FCOS reads unresolved hard GT entries from `mdmbpp` during
-the forward pass and appends a `candidate_dense` auxiliary loss for selected dense positive points.
-The base FCOS assignment remains unchanged.
-
-When FAAR is enabled, FCOS repairs `matched_idxs` for selected MDMB++ hard GTs before loss
-computation. When FANG is enabled, FCOS lowers selected true-class negative focal-loss terms for
-MDMB++ hard GTs without adding a new loss key. When MARC is enabled, FCOS adds a `marc` auxiliary
-ranking loss for hard GT candidates.
+When RASD is enabled, FCOS reads relapse entries from `mdmbpp`, pools current GT features from the
+FPN, and appends a `rasd` auxiliary loss when matching support features exist. RASD is training-only
+and does not change inference, NMS, or score thresholds.
 
 ### Hard Replay Interaction
 
@@ -122,12 +117,14 @@ Current replay statistics include:
 
 - `replay_num_images`
 - `replay_num_crops`
+- `replay_num_object_samples`
 - `replay_num_active_gt`
 - `replay_mean_image_weight`
 - `replay_mean_gt_severity`
 - `replay_ratio_requested`
 - `replay_ratio_effective`
 - `replay_exposure_per_gt`
+- `replay_loss_weight_mean`
 
 ### `evaluate()`
 
@@ -167,8 +164,8 @@ COCO bbox metrics available for `checkpoint.monitor` and `metrics.primary`:
 ## Output Artifacts
 
 `{output_dir}/history.json` stores per-epoch training and validation records. When enabled, the
-record may include `mdmb`, `mdmbpp`, `faar`, `marc`, `candidate_densification`, and
-`hard_replay` summaries alongside `train` and `val`.
+record may include `mdmb`, `mdmbpp`, `rasd`, and `hard_replay` summaries alongside `train` and
+`val`.
 
 Additional outputs:
 

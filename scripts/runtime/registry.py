@@ -6,12 +6,9 @@ from typing import Any
 import torch.nn as nn
 
 from modules.nn import (
-    build_candidate_densifier_from_yaml,
-    build_faar_from_yaml,
-    build_fang_from_yaml,
-    build_marc_from_yaml,
     build_mdmb_from_yaml,
     build_mdmbpp_from_yaml,
+    build_rasd_from_yaml,
 )
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
@@ -33,14 +30,9 @@ MODEL_BUILDERS = {
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CANDIDATE_DENSIFICATION_CONFIG_PATH = (
-    PROJECT_ROOT / "modules" / "cfg" / "candidate_densification.yaml"
-)
-FAAR_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "faar.yaml"
-FANG_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "fang.yaml"
-MARC_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "marc.yaml"
 MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
 MDMBPP_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmbpp.yaml"
+RASD_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "rasd.yaml"
 
 
 def normalize_arch(raw_arch: str) -> str:
@@ -64,19 +56,17 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
         )
     mdmb = _build_mdmb(normalized_arch)
     mdmbpp = _build_mdmbpp(normalized_arch)
-    faar = _build_faar(normalized_arch)
-    fang = _build_fang(normalized_arch)
-    marc = _build_marc(normalized_arch)
-    candidate_densifier = _build_candidate_densifier(normalized_arch)
+    rasd = _build_rasd(normalized_arch)
     if normalized_arch == "fcos":
+        if rasd is not None and mdmbpp is None:
+            raise ValueError("RASD requires MDMB++ to be enabled for FCOS.")
+        if rasd is not None and not bool(mdmbpp.config.store_support_feature):
+            raise ValueError("RASD requires modules/cfg/mdmbpp.yaml store_support_feature: true.")
         return builder(
             model_config,
             mdmb=mdmb,
             mdmbpp=mdmbpp,
-            faar=faar,
-            fang=fang,
-            marc=marc,
-            candidate_densifier=candidate_densifier,
+            rasd=rasd,
         )
     return builder(model_config, mdmb=mdmb)
 
@@ -113,36 +103,9 @@ def _build_mdmbpp(arch: str) -> nn.Module | None:
     return build_mdmbpp_from_yaml(MDMBPP_CONFIG_PATH, arch=arch)
 
 
-def _build_faar(arch: str) -> nn.Module | None:
+def _build_rasd(arch: str) -> nn.Module | None:
     if arch != "fcos":
         return None
-    if not FAAR_CONFIG_PATH.is_file():
+    if not RASD_CONFIG_PATH.is_file():
         return None
-    return build_faar_from_yaml(FAAR_CONFIG_PATH, arch=arch)
-
-
-def _build_fang(arch: str) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    if not FANG_CONFIG_PATH.is_file():
-        return None
-    return build_fang_from_yaml(FANG_CONFIG_PATH, arch=arch)
-
-
-def _build_marc(arch: str) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    if not MARC_CONFIG_PATH.is_file():
-        return None
-    return build_marc_from_yaml(MARC_CONFIG_PATH, arch=arch)
-
-
-def _build_candidate_densifier(arch: str) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    if not CANDIDATE_DENSIFICATION_CONFIG_PATH.is_file():
-        return None
-    return build_candidate_densifier_from_yaml(
-        CANDIDATE_DENSIFICATION_CONFIG_PATH,
-        arch=arch,
-    )
+    return build_rasd_from_yaml(RASD_CONFIG_PATH, arch=arch)
