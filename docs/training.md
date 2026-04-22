@@ -202,7 +202,13 @@ Additional outputs:
 - `{output_dir}/figures/`
 - `{output_dir}/metadata/model.yaml`
 - `{output_dir}/metadata/train.yaml`
+- `{output_dir}/metadata/modules.yaml` for train runs, containing enabled research module YAML snapshots
 - `{output_dir}/metadata/run.json`
+
+`metadata/modules.yaml` is written during training only. It stores the parsed YAML mapping for each
+research module that is effectively enabled for the selected architecture, using keys such as
+`mdmbpp`, `rasd`, and `hard_replay`. If no research module is enabled, the file contains an empty
+mapping.
 
 Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
 filtered with `score > 0.25`, GT/prediction pairs use global one-to-one matching at `IoU > 0.45`,

@@ -26,6 +26,7 @@ from .distributed import (
     unwrap_model,
 )
 from .metrics import evaluate_coco_detection, save_predictions
+from .module_metadata import collect_enabled_module_configs
 from .visualize import (
     build_confusion_matrix,
     plot_confusion_matrices,
@@ -107,6 +108,7 @@ def fit(
             model_config_path=model_config_path,
             runtime_config=runtime_config,
             runtime_config_path=runtime_config_path,
+            module_configs=collect_enabled_module_configs(arch),
         )
     barrier(distributed)
 
@@ -534,6 +536,7 @@ def persist_run_metadata(
     model_config_path: str | Path,
     runtime_config: dict[str, Any],
     runtime_config_path: str | Path,
+    module_configs: dict[str, Any] | None = None,
 ) -> None:
     metadata_dir = output_dir / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -543,6 +546,8 @@ def persist_run_metadata(
         metadata_dir / f"{runtime_config['_mode']}.yaml",
         _strip_internal_keys(runtime_config),
     )
+    if module_configs is not None:
+        dump_yaml_file(metadata_dir / "modules.yaml", module_configs)
 
     metadata = {
         "arch": arch,

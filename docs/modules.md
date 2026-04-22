@@ -148,6 +148,10 @@ epoch boundary, MDMB and MDMB++ `extra_state` payloads are gathered, merged by i
 rank 0, and broadcast back to every rank. This keeps the next epoch's Hard Replay planner and RASD
 teacher lookup based on the same global memory while avoiding per-step memory synchronization.
 
+Train metadata also snapshots active research-module YAML into
+`{output_dir}/metadata/modules.yaml`. The file includes only modules that are effectively enabled
+after architecture-specific overrides are applied.
+
 ## Compatibility
 
 | Module | FCOS | Faster R-CNN | DINO |
