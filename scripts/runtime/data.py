@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 from pycocotools.coco import COCO
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
 from .hard_replay import (
@@ -193,6 +194,9 @@ def build_train_dataloaders(
     config: dict[str, Any],
     *,
     arch: str | None = None,
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> tuple[DataLoader[Any], DataLoader[Any] | None]:
     train_dataset = CocoDetectionDataset(
         config["data"]["train_images"],
@@ -202,6 +206,8 @@ def build_train_dataloaders(
         config,
         dataset=train_dataset,
         arch=arch,
+        rank=rank,
+        world_size=world_size,
     )
     loader_dataset: Dataset[Any] = train_dataset
     if hard_replay is not None and hard_replay.config.object_replay.enabled:
@@ -209,12 +215,24 @@ def build_train_dataloaders(
         hard_replay.attach_replay_dataset(replay_dataset)
         loader_dataset = replay_dataset
 
+    sampler = None
+    if distributed and hard_replay is None:
+        sampler = DistributedSampler(
+            loader_dataset,
+            num_replicas=int(world_size),
+            rank=int(rank),
+            shuffle=bool(config["loader"]["shuffle"]),
+            seed=int(config["seed"]),
+            drop_last=False,
+        )
+
     train_loader = _build_loader(
         loader_dataset,
         batch_size=config["loader"]["batch_size"],
         num_workers=config["loader"]["num_workers"],
         pin_memory=config["loader"]["pin_memory"],
-        shuffle=config["loader"]["shuffle"],
+        shuffle=config["loader"]["shuffle"] if sampler is None else False,
+        sampler=sampler,
         batch_sampler=None if hard_replay is None else hard_replay.batch_sampler,
     )
     if hard_replay is not None:
@@ -265,6 +283,7 @@ def _build_loader(
     num_workers: int,
     pin_memory: bool,
     shuffle: bool,
+    sampler=None,
     batch_sampler=None,
 ) -> DataLoader[Any]:
     loader_kwargs = {
@@ -280,6 +299,8 @@ def _build_loader(
     else:
         loader_kwargs["batch_size"] = batch_size
         loader_kwargs["shuffle"] = shuffle
+        if sampler is not None:
+            loader_kwargs["sampler"] = sampler
     return DataLoader(
         **loader_kwargs,
     )
@@ -290,6 +311,8 @@ def _build_hard_replay_controller(
     *,
     dataset: Dataset[Any],
     arch: str | None,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> HardReplayController | None:
     if not HARD_REPLAY_CONFIG_PATH.is_file():
         return None
@@ -300,6 +323,8 @@ def _build_hard_replay_controller(
         shuffle=config["loader"]["shuffle"],
         seed=int(config["seed"]),
         arch=arch,
+        rank=rank,
+        world_size=world_size,
     )
 
 

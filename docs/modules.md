@@ -107,6 +107,9 @@ Important behavior:
 - Replay targets set `is_replay: true` and are skipped by FCOS MDMB/MDMB++ memory updates
 - Pair replay keeps `pair_miss` and `pair_support` in the same mini-batch when replay slots allow it
 - FCOS applies `replay_box_weights` only to positive points matched to replay-weighted GTs
+- Under DDP, each rank builds the same replay schedule from the synchronized MDMB++ state, then
+  consumes a disjoint padded slice of global batch numbers so every rank runs the same number of
+  optimizer steps.
 
 ### RASD - Relapse-Aware Support Distillation (`modules/nn/rasd.py`)
 
@@ -139,6 +142,11 @@ FCOS currently wires the following path:
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.
 6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
+
+In multi-GPU DDP training, FCOS/MDMB++/RASD run independently on each rank during the epoch. At the
+epoch boundary, MDMB and MDMB++ `extra_state` payloads are gathered, merged by image/GT identity on
+rank 0, and broadcast back to every rank. This keeps the next epoch's Hard Replay planner and RASD
+teacher lookup based on the same global memory while avoiding per-step memory synchronization.
 
 ## Compatibility
 

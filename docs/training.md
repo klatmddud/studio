@@ -8,7 +8,7 @@ Two YAML files are always required.
 
 ```yaml
 seed: 42
-device: auto          # auto | cpu | cuda | mps
+device: auto          # auto | cpu | cuda | cuda:0 | mps
 amp: false
 output_dir: runs/train
 
@@ -113,6 +113,33 @@ layer rather than as an `nn.Module`.
   `floor(batch_size * replay_ratio)` replay samples.
 - Epoch logging: replay statistics are stored under the `hard_replay` key in `history.json`.
 
+### Multi-GPU DDP
+
+Training supports single-process single-device execution and internal DDP spawn for multiple CUDA
+devices:
+
+```bash
+uv run scripts/train.py \
+  --config scripts/cfg/train.yaml \
+  --model models/detection/cfg/fcos.yaml \
+  --data kitti \
+  --device cuda:0 cuda:1
+```
+
+When more than one `--device` value is provided, `train.py` starts one worker process per CUDA
+device and wraps the model with `DistributedDataParallel`. Checkpoints, metadata, history, figures,
+and progress logs are written only by rank 0. Checkpoints are saved from the unwrapped model, so the
+`model_state_dict` keeps the same keys as single-device training.
+
+DDP currently uses the NCCL backend and requires explicit CUDA ids such as `cuda:0 cuda:1`. CPU/MPS
+multi-device training and multi-device evaluation are not supported. Validation during training runs
+on rank 0 only while the other workers wait at a barrier.
+
+Research module state is synchronized once per epoch. MDMB/MDMB++ local memory states are gathered
+after the epoch, merged on rank 0, and broadcast back before the next epoch. RASD summary counters
+are reduced for logging, while RASD itself remains training-only and stateless apart from epoch
+bookkeeping.
+
 Current replay statistics include:
 
 - `replay_num_images`
@@ -190,6 +217,13 @@ uv run scripts/train.py \
   --data kitti \
   --output-dir runs/exp1 \
   --device cuda
+
+uv run scripts/train.py \
+  --config scripts/cfg/train.yaml \
+  --model models/detection/cfg/fcos.yaml \
+  --data kitti \
+  --output-dir runs/exp1_ddp \
+  --device cuda:0 cuda:1
 
 uv run scripts/eval.py \
   --config scripts/cfg/eval.yaml \

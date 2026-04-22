@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -149,11 +150,42 @@ def resolve_device(raw: str) -> torch.device:
     device = torch.device(raw)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False.")
+    if device.type == "cuda" and device.index is not None:
+        _validate_cuda_index(device.index)
     if device.type == "mps":
         mps_backend = getattr(torch.backends, "mps", None)
         if mps_backend is None or not mps_backend.is_available():
             raise RuntimeError("MPS was requested but is not available in this environment.")
     return device
+
+
+def resolve_devices(raw: str | Sequence[str]) -> list[torch.device]:
+    values = _coerce_device_values(raw)
+    if len(values) == 1:
+        return [resolve_device(values[0])]
+
+    devices = [torch.device(value) for value in values]
+    if any(device.type != "cuda" for device in devices):
+        raise ValueError("Multiple --device values are only supported for CUDA devices.")
+    if not torch.cuda.is_available():
+        raise RuntimeError("Multiple CUDA devices were requested but CUDA is not available.")
+
+    indices: list[int] = []
+    for device in devices:
+        if device.index is None:
+            raise ValueError("Multi-GPU training requires explicit device ids like cuda:0 cuda:1.")
+        _validate_cuda_index(device.index)
+        indices.append(int(device.index))
+
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"Duplicate CUDA devices are not allowed: {values}")
+    return devices
+
+
+def format_device_name(device: torch.device) -> str:
+    if device.type == "cuda" and device.index is not None:
+        return f"cuda:{device.index}"
+    return str(device)
 
 
 def load_runtime_config(
@@ -295,6 +327,33 @@ def _validate_common_config(config: dict[str, Any]) -> None:
     iou_types = tuple(metrics.get("iou_types", []))
     if iou_types != ("bbox",):
         raise ValueError("Only metrics.iou_types=['bbox'] is supported right now.")
+
+
+def _coerce_device_values(raw: str | Sequence[str]) -> list[str]:
+    if isinstance(raw, str):
+        values = [part.strip() for part in re.split(r"[\s,]+", raw) if part.strip()]
+        if len(values) == 1:
+            return values
+        if values:
+            return values
+        raise ValueError("device must not be empty.")
+    values = [str(value).strip() for value in raw if str(value).strip()]
+    if not values:
+        raise ValueError("device list must not be empty.")
+    if len(values) == 1 and "," in values[0]:
+        return _coerce_device_values(values[0])
+    return values
+
+
+def _validate_cuda_index(index: int) -> None:
+    if index < 0:
+        raise ValueError(f"CUDA device index must be >= 0; got cuda:{index}.")
+    device_count = torch.cuda.device_count()
+    if device_count > 0 and index >= device_count:
+        raise RuntimeError(
+            f"CUDA device cuda:{index} was requested, but only {device_count} CUDA "
+            "device(s) are visible."
+        )
 
 
 def _resolve_path(raw_path: str | Path, base_dir: str | Path) -> Path:

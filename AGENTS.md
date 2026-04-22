@@ -20,6 +20,7 @@ uv sync
 
 # Train
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --device cuda:0 cuda:1
 
 # Evaluate
 uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --checkpoint runs/train/checkpoints/best.pt

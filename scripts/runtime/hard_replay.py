@@ -1122,6 +1122,8 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         pair_min_replay_slots: int = 2,
         replacement: bool,
         seed: int,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         self.dataset_size = int(dataset_size)
         self.batch_size = int(batch_size)
@@ -1135,6 +1137,8 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self.pair_min_replay_slots = int(pair_min_replay_slots)
         self.replacement = bool(replacement)
         self.seed = int(seed)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
         self.epoch = 0
         self._replay_index = ReplayIndex.empty(enabled=False)
         self._last_summary: dict[str, float | int | bool] = dict(self._replay_index.summary)
@@ -1145,6 +1149,13 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self._active_base_count = self.batch_size
         if self.batch_size < 1:
             raise ValueError("Hard Replay batch_size must be >= 1.")
+        if self.world_size < 1:
+            raise ValueError("Hard Replay world_size must be >= 1.")
+        if self.rank < 0 or self.rank >= self.world_size:
+            raise ValueError(
+                f"Hard Replay rank must satisfy 0 <= rank < world_size; "
+                f"got rank={self.rank}, world_size={self.world_size}."
+            )
         if self.base_count < 1:
             raise ValueError(
                 "Hard Replay replay_ratio is too large for the configured batch size. "
@@ -1173,7 +1184,11 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
     def __len__(self) -> int:
         if self.dataset_size <= 0:
             return 0
-        return int(math.ceil(self.dataset_size / float(self._active_base_count)))
+        global_batches = int(math.ceil(self.dataset_size / float(self._active_base_count)))
+        if self.world_size <= 1:
+            return global_batches
+        padded_batches = int(math.ceil(global_batches / float(self.world_size))) * self.world_size
+        return padded_batches // self.world_size
 
     def __iter__(self):
         if self.dataset_size <= 0:
@@ -1188,20 +1203,28 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         else:
             base_indices = list(range(self.dataset_size))
 
-        num_batches = len(self)
+        base_batches = self._build_base_batches(base_indices)
+        num_batches = len(base_batches)
         replay_batches = self._build_replay_schedule(
             num_batches=num_batches,
             total_replay_samples=num_batches * self._active_replay_count,
             generator=generator,
         )
         replay_counts: Counter[int] = Counter()
+        local_replay_samples = 0
+        local_base_samples = 0
 
-        for batch_number, batch_start in enumerate(range(0, self.dataset_size, self._active_base_count)):
-            batch = list(base_indices[batch_start : batch_start + self._active_base_count])
+        for batch_number, base_batch in enumerate(base_batches):
+            if batch_number % self.world_size != self.rank:
+                continue
+
+            batch = list(base_batch)
+            local_base_samples += len(batch)
             if self._active_replay_count > 0 and batch_number < len(replay_batches):
                 replay_slice = replay_batches[batch_number]
                 batch.extend(replay_slice)
                 replay_counts.update(replay_slice)
+                local_replay_samples += len(replay_slice)
 
             if self.shuffle and len(batch) > 1:
                 order = torch.randperm(len(batch), generator=generator).tolist()
@@ -1211,8 +1234,28 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
 
         self._finalize_summary(
             replay_counts,
-            total_replay_samples=sum(len(batch) for batch in replay_batches),
+            total_base_samples=local_base_samples,
+            total_replay_samples=local_replay_samples,
         )
+
+    def _build_base_batches(self, base_indices: list[int]) -> list[list[int]]:
+        if not base_indices:
+            return []
+        base_batches = [
+            list(base_indices[start : start + self._active_base_count])
+            for start in range(0, self.dataset_size, self._active_base_count)
+        ]
+        if self.world_size <= 1:
+            return base_batches
+
+        while len(base_batches) % self.world_size != 0:
+            start = (len(base_batches) * self._active_base_count) % len(base_indices)
+            padded = [
+                base_indices[(start + offset) % len(base_indices)]
+                for offset in range(self._active_base_count)
+            ]
+            base_batches.append(padded)
+        return base_batches
 
     def _build_replay_schedule(
         self,
@@ -1466,9 +1509,11 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self,
         replay_counts: Counter[int],
         *,
+        total_base_samples: int | None = None,
         total_replay_samples: int,
     ) -> None:
-        total_base_samples = self.dataset_size
+        if total_base_samples is None:
+            total_base_samples = self.dataset_size
         total_samples = total_base_samples + total_replay_samples
         image_replay_counts = Counter(
             {
@@ -1528,6 +1573,9 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
                 else float(self._replay_index.summary.get("replay_loss_weight_mean", 0.0))
             ),
         }
+        if self.world_size > 1:
+            self._last_summary["ddp_rank"] = self.rank
+            self._last_summary["ddp_world_size"] = self.world_size
 
 
 class HardReplayController:
@@ -1580,6 +1628,8 @@ def build_hard_replay_controller_from_yaml(
     shuffle: bool,
     seed: int,
     arch: str | None = None,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> HardReplayController | None:
     config = load_hard_replay_config(path, arch=arch)
     if not config.enabled:
@@ -1594,6 +1644,8 @@ def build_hard_replay_controller_from_yaml(
         pair_min_replay_slots=config.object_replay.pair.min_replay_slots,
         replacement=config.replacement,
         seed=seed,
+        rank=rank,
+        world_size=world_size,
     )
     return HardReplayController(
         config=config,
