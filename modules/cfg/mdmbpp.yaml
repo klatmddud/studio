@@ -9,6 +9,14 @@ candidate_topk: 5
 store_topk_candidates: true
 store_support_feature: false
 
+support_memory:
+  enabled: true
+  score_weight: 1.0
+  iou_weight: 1.0
+  replace_margin: 0.05
+  refresh_age: 15
+  require_feature: true
+
 severity:
   lambda_streak: 1.0
   lambda_relapse: 1.0

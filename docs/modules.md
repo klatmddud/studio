@@ -72,6 +72,9 @@ Implementation note: MDMB++ stores persistent memory tensors on CPU, but transie
 GT, label, and score tensors to the final-detection device before calling TorchVision box ops.
 When `store_support_feature: true`, FCOS post-step updates also store object-level support feature
 vectors in `SupportSnapshot.feature` for downstream temporal distillation modules such as RASD.
+MDMB++ uses quality-gated support memory by default: a newer detected support replaces the old
+teacher only when its score/IoU quality clears the configured margin, the old teacher is stale, or
+the old teacher lacks a feature.
 
 ### Hard Replay (`scripts/runtime/hard_replay.py`)
 

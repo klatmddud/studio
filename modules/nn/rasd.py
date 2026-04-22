@@ -370,7 +370,10 @@ class RelapseAwareSupportDistillation(nn.Module):
                 if float(support.score) < self.config.min_support_score:
                     self._epoch_skipped_low_support_score += 1
                     continue
-                support_age = max(0, int(self.current_epoch) - int(support.epoch))
+                support_feature_epoch = getattr(support, "feature_epoch", None)
+                if support_feature_epoch is None:
+                    support_feature_epoch = support.epoch
+                support_age = max(0, int(self.current_epoch) - int(support_feature_epoch))
                 if support_age > self.config.max_support_age:
                     self._epoch_skipped_support_too_old += 1
                     continue
@@ -404,7 +407,7 @@ class RelapseAwareSupportDistillation(nn.Module):
                         failure_type=entry.failure_type,
                         severity=entry.severity,
                         relapse_count=relapse_count,
-                        support_epoch=support.epoch,
+                        support_epoch=support_feature_epoch,
                         support_score=support.score,
                         support_feature=support.feature,
                         weight=self.target_weight_for(

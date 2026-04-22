@@ -36,9 +36,46 @@ class SupportSnapshot:
     score: float
     feature: Tensor | None
     feature_level: str | int | None
+    iou_to_gt: float
+    quality: float
+    feature_epoch: int | None
 ```
 
 `feature` is optional and is stored only when `store_support_feature: true`.
+`feature_epoch` records when that feature was created, which can differ from `epoch` if metadata is
+updated while the previous feature teacher is retained.
+
+## Relapse-Robust Support Memory
+
+MDMB++ no longer treats the newest detection as automatically better. When support memory is
+enabled, a new detected support replaces the previous teacher only if:
+
+- no previous support exists
+- the previous support lacks a feature and the new support has one
+- the previous feature is older than `support_memory.refresh_age`
+- the new support quality clears `support_memory.replace_margin`
+
+Support quality is:
+
+```text
+quality = score_weight * score + iou_weight * iou_to_gt
+```
+
+Config:
+
+```yaml
+support_memory:
+  enabled: true
+  score_weight: 1.0
+  iou_weight: 1.0
+  replace_margin: 0.05
+  refresh_age: 15
+  require_feature: true
+```
+
+With `require_feature: true`, MDMB++ will not replace an existing feature teacher with a detected
+support that failed to produce a new feature. This prevents a low-information support update from
+silently resetting RASD's teacher age.
 
 ### `GTFailureRecord`
 

@@ -67,14 +67,36 @@ MDMB++ support features are produced after `optimizer.step()`:
    features using MultiScaleRoIAlign.
 4. Pooled features are GAP-reduced, L2-normalized, moved to CPU, and passed to
    `MDMBPlus.update(..., support_feature_list=...)`.
-5. When a GT is detected, MDMB++ stores the feature in `SupportSnapshot.feature`.
+5. When a GT is detected, MDMB++ evaluates whether the new support should replace the existing
+   teacher. Replacement is quality-gated rather than always-latest.
 
 During training, RASD pools current GT features from the same FPN feature maps, normalizes them, and
 computes the cosine attraction loss against the stored support feature.
 
+## Relapse-Robust Support Memory
+
+MDMB++ stores support teachers with score, IoU, quality, and feature epoch metadata. The default
+quality is:
+
+```text
+quality = score_weight * support_score + iou_weight * support_iou
+```
+
+A new detected support replaces the previous teacher only when one of these conditions holds:
+
+- no previous teacher exists
+- previous teacher has no feature and the new support has one
+- previous teacher feature age reaches `support_memory.refresh_age`
+- new support quality is at least `support_memory.replace_margin` better than the previous quality
+
+When `support_memory.require_feature: true`, MDMB++ does not replace an existing feature teacher
+with a detection that failed to produce a new feature. If the old feature is carried forward for any
+reason, `SupportSnapshot.feature_epoch` remains the original feature epoch, so RASD's
+`max_support_age` filter measures the actual teacher feature age.
+
 ## Config
 
-Default config: `modules/cfg/rasd.yaml`
+RASD config: `modules/cfg/rasd.yaml`
 
 Key fields:
 
@@ -102,6 +124,18 @@ RASD has two fail-fast requirements when enabled:
 
 - MDMB++ must also be enabled.
 - `modules/cfg/mdmbpp.yaml` must set `store_support_feature: true`.
+
+Teacher replacement is configured in `modules/cfg/mdmbpp.yaml`:
+
+```yaml
+support_memory:
+  enabled: true
+  score_weight: 1.0
+  iou_weight: 1.0
+  replace_margin: 0.05
+  refresh_age: 15
+  require_feature: true
+```
 
 ## Runtime Integration
 

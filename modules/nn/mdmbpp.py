@@ -54,6 +54,12 @@ class MDMBPlusConfig:
     candidate_topk: int = 5
     store_topk_candidates: bool = True
     store_support_feature: bool = False
+    support_memory_enabled: bool = True
+    support_memory_score_weight: float = 1.0
+    support_memory_iou_weight: float = 1.0
+    support_memory_replace_margin: float = 0.05
+    support_memory_refresh_age: int = 15
+    support_memory_require_feature: bool = True
     severity_lambda_streak: float = 1.0
     severity_lambda_relapse: float = 1.0
     severity_lambda_failure_type: float = 1.0
@@ -88,6 +94,14 @@ class MDMBPlusConfig:
         override_severity = model_overrides.get("severity", {})
         if isinstance(override_severity, Mapping):
             severity.update(override_severity)
+
+        support_memory = {}
+        top_support_memory = data.get("support_memory", {})
+        if isinstance(top_support_memory, Mapping):
+            support_memory.update(top_support_memory)
+        override_support_memory = model_overrides.get("support_memory", {})
+        if isinstance(override_support_memory, Mapping):
+            support_memory.update(override_support_memory)
 
         priors = dict(_DEFAULT_FAILURE_TYPE_PRIORS)
         top_priors = data.get("failure_type_priors", {})
@@ -135,6 +149,12 @@ class MDMBPlusConfig:
                     data.get("store_support_feature", False),
                 )
             ),
+            support_memory_enabled=bool(support_memory.get("enabled", True)),
+            support_memory_score_weight=float(support_memory.get("score_weight", 1.0)),
+            support_memory_iou_weight=float(support_memory.get("iou_weight", 1.0)),
+            support_memory_replace_margin=float(support_memory.get("replace_margin", 0.05)),
+            support_memory_refresh_age=int(support_memory.get("refresh_age", 15)),
+            support_memory_require_feature=bool(support_memory.get("require_feature", True)),
             severity_lambda_streak=float(
                 severity.get("lambda_streak", data.get("severity_lambda_streak", 1.0))
             ),
@@ -172,6 +192,15 @@ class MDMBPlusConfig:
             raise ValueError("MDMB++ candidate_topk must be >= 1.")
         if self.warmup_epochs < 0:
             raise ValueError("MDMB++ warmup_epochs must be >= 0.")
+        for field_name in (
+            "support_memory_score_weight",
+            "support_memory_iou_weight",
+            "support_memory_replace_margin",
+        ):
+            if float(getattr(self, field_name)) < 0.0:
+                raise ValueError(f"MDMB++ {field_name} must be >= 0.")
+        if self.support_memory_refresh_age < 0:
+            raise ValueError("MDMB++ support_memory.refresh_age must be >= 0.")
         missing = [name for name in _FAILURE_TYPES if name not in self.failure_type_priors]
         if missing:
             raise ValueError(
@@ -191,6 +220,14 @@ class MDMBPlusConfig:
             "candidate_topk": self.candidate_topk,
             "store_topk_candidates": self.store_topk_candidates,
             "store_support_feature": self.store_support_feature,
+            "support_memory": {
+                "enabled": self.support_memory_enabled,
+                "score_weight": self.support_memory_score_weight,
+                "iou_weight": self.support_memory_iou_weight,
+                "replace_margin": self.support_memory_replace_margin,
+                "refresh_age": self.support_memory_refresh_age,
+                "require_feature": self.support_memory_require_feature,
+            },
             "severity": {
                 "lambda_streak": self.severity_lambda_streak,
                 "lambda_relapse": self.severity_lambda_relapse,
@@ -265,13 +302,22 @@ class SupportSnapshot:
     score: float
     feature: torch.Tensor | None
     feature_level: str | int | None
+    iou_to_gt: float = 0.0
+    quality: float = 0.0
+    feature_epoch: int | None = None
 
     def __post_init__(self) -> None:
         self.epoch = int(self.epoch)
         self.box = _as_region_tensor(self.box)
         self.score = float(self.score)
+        self.iou_to_gt = float(self.iou_to_gt)
+        self.quality = float(self.quality)
         if self.feature is not None:
             self.feature = torch.as_tensor(self.feature, dtype=torch.float32).detach().cpu()
+            if self.feature_epoch is None:
+                self.feature_epoch = self.epoch
+        if self.feature_epoch is not None:
+            self.feature_epoch = int(self.feature_epoch)
         if self.feature_level is not None and not isinstance(self.feature_level, (str, int)):
             self.feature_level = str(self.feature_level)
 
@@ -282,17 +328,26 @@ class SupportSnapshot:
             "score": self.score,
             "feature": None if self.feature is None else self.feature.tolist(),
             "feature_level": self.feature_level,
+            "iou_to_gt": self.iou_to_gt,
+            "quality": self.quality,
+            "feature_epoch": self.feature_epoch,
         }
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any]) -> "SupportSnapshot":
         feature = state.get("feature")
+        feature_epoch = state.get("feature_epoch")
+        if feature is not None and feature_epoch is None:
+            feature_epoch = int(state.get("epoch", 0))
         return cls(
             epoch=int(state.get("epoch", 0)),
             box=_as_region_tensor(state["box"]),
             score=float(state.get("score", 0.0)),
             feature=None if feature is None else torch.tensor(feature, dtype=torch.float32),
             feature_level=state.get("feature_level"),
+            iou_to_gt=float(state.get("iou_to_gt", 0.0)),
+            quality=float(state.get("quality", 0.0)),
+            feature_epoch=None if feature_epoch is None else int(feature_epoch),
         )
 
 
@@ -486,6 +541,8 @@ class MDMBPlus(nn.Module):
         self._epoch_recovery_candidates: int = 0
         self._epoch_recovery_success: int = 0
         self._epoch_relapses: int = 0
+        self._epoch_support_updates: int = 0
+        self._epoch_support_kept: int = 0
         self.current_epoch = 0
 
     def forward(self, features):
@@ -496,6 +553,8 @@ class MDMBPlus(nn.Module):
         self._epoch_recovery_candidates = 0
         self._epoch_recovery_success = 0
         self._epoch_relapses = 0
+        self._epoch_support_updates = 0
+        self._epoch_support_kept = 0
 
     def end_epoch(self, epoch: int | None = None) -> None:
         if epoch is not None:
@@ -517,6 +576,8 @@ class MDMBPlus(nn.Module):
         self._epoch_recovery_candidates = 0
         self._epoch_recovery_success = 0
         self._epoch_relapses = 0
+        self._epoch_support_updates = 0
+        self._epoch_support_kept = 0
         self.current_epoch = 0
 
     @torch.no_grad()
@@ -725,6 +786,19 @@ class MDMBPlus(nn.Module):
                     support_feature = None
                     if self.config.store_support_feature:
                         support_feature = support_feature_map.get(gt_index)
+                    support_snapshot = _build_support_snapshot(
+                        epoch=epoch,
+                        final_match=final_match,
+                        fallback_candidate=best_candidate,
+                        previous_support=previous_support,
+                        feature=support_feature,
+                        keep_feature=self.config.store_support_feature,
+                        config=self.config,
+                    )
+                    if previous_support is not None and support_snapshot is previous_support:
+                        self._epoch_support_kept += 1
+                    else:
+                        self._epoch_support_updates += 1
                     record = GTFailureRecord(
                         gt_uid=gt_uid,
                         image_id=image_key,
@@ -753,14 +827,7 @@ class MDMBPlus(nn.Module):
                             else previous_record.last_failure_type
                         ),
                         severity=0.0,
-                        support=_build_support_snapshot(
-                            epoch=epoch,
-                            final_match=final_match,
-                            fallback_candidate=best_candidate,
-                            previous_support=previous_support,
-                            feature=support_feature,
-                            keep_feature=self.config.store_support_feature,
-                        ),
+                        support=support_snapshot,
                     )
                     self._persistent_records[gt_uid] = record
                     continue
@@ -918,6 +985,8 @@ class MDMBPlus(nn.Module):
             "mean_severity": severity_sum / float(max(num_entries, 1)),
             "recovery_rate_last_1_epoch": recovery_rate,
             "relapses_this_epoch": self._epoch_relapses,
+            "support_updates_this_epoch": self._epoch_support_updates,
+            "support_kept_this_epoch": self._epoch_support_kept,
         }
 
     def __len__(self) -> int:
@@ -1004,6 +1073,8 @@ class MDMBPlus(nn.Module):
         self._epoch_recovery_candidates = 0
         self._epoch_recovery_success = 0
         self._epoch_relapses = 0
+        self._epoch_support_updates = 0
+        self._epoch_support_kept = 0
 
     def _compute_severity(
         self,
@@ -1263,23 +1334,92 @@ def _build_support_snapshot(
     previous_support: SupportSnapshot | None,
     feature: torch.Tensor | None,
     keep_feature: bool,
+    config: MDMBPlusConfig,
 ) -> SupportSnapshot | None:
     source = final_match or fallback_candidate
     if source is None:
         return previous_support
 
     stored_feature = None
+    feature_epoch = None
     if keep_feature:
         stored_feature = feature
-        if stored_feature is None and previous_support is not None:
+        if stored_feature is not None:
+            feature_epoch = int(epoch)
+        elif previous_support is not None:
             stored_feature = previous_support.feature
+            feature_epoch = previous_support.feature_epoch
+
+    quality = _support_quality(source, config=config)
+    if previous_support is not None and not _should_replace_support(
+        previous_support=previous_support,
+        new_quality=quality,
+        new_feature=feature,
+        epoch=epoch,
+        keep_feature=keep_feature,
+        config=config,
+    ):
+        return previous_support
+
     return SupportSnapshot(
         epoch=epoch,
         box=source.box,
         score=source.score,
         feature=stored_feature,
         feature_level=source.level_or_stage_id,
+        iou_to_gt=source.iou_to_gt,
+        quality=quality,
+        feature_epoch=feature_epoch,
     )
+
+
+def _support_quality(
+    source: CanonicalCandidate | SupportSnapshot,
+    *,
+    config: MDMBPlusConfig,
+) -> float:
+    return float(
+        config.support_memory_score_weight * float(source.score)
+        + config.support_memory_iou_weight * float(source.iou_to_gt)
+    )
+
+
+def _should_replace_support(
+    *,
+    previous_support: SupportSnapshot,
+    new_quality: float,
+    new_feature: torch.Tensor | None,
+    epoch: int,
+    keep_feature: bool,
+    config: MDMBPlusConfig,
+) -> bool:
+    if not config.support_memory_enabled:
+        return True
+
+    if (
+        keep_feature
+        and config.support_memory_require_feature
+        and previous_support.feature is not None
+        and new_feature is None
+    ):
+        return False
+
+    if previous_support.feature is None and new_feature is not None:
+        return True
+
+    previous_epoch = previous_support.feature_epoch
+    if previous_epoch is None:
+        previous_epoch = previous_support.epoch
+    if (
+        config.support_memory_refresh_age > 0
+        and int(epoch) - int(previous_epoch) >= int(config.support_memory_refresh_age)
+    ):
+        return True
+
+    previous_quality = float(previous_support.quality)
+    if previous_quality <= 0.0:
+        previous_quality = _support_quality(previous_support, config=config)
+    return new_quality >= previous_quality + float(config.support_memory_replace_margin)
 
 
 def _coerce_candidate_summary(

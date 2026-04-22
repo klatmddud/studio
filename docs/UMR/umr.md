@@ -43,5 +43,7 @@ This separates memory tracking, temporal support distillation, data replay, and 
 
 - RASD requires `mdmbpp.store_support_feature: true`.
 - A GT that has never been successfully detected has no support teacher, so RASD skips it.
+- MDMB++ support memory is quality-gated, so a weaker new detection does not automatically replace
+  a stronger previous teacher.
 - Hard Replay can still operate on unresolved GTs without support teachers.
 - Inference behavior is unchanged by the current UMR modules.
