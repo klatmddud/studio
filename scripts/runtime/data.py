@@ -11,12 +11,14 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
 from .hard_replay import (
-    HARD_REPLAY_CONFIG_PATH,
     HardReplayController,
     ReplayIndex,
     ReplaySampleSpec,
     build_hard_replay_controller_from_yaml,
 )
+from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
+
+HARD_REPLAY_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["hard_replay"]
 
 
 class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
@@ -190,6 +192,7 @@ class HardReplayDatasetWrapper(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
         target["target_image_id"] = _source_image_id_tensor(target_image_id)
         return image_tensor, target
 
+
 def build_train_dataloaders(
     config: dict[str, Any],
     *,
@@ -197,6 +200,7 @@ def build_train_dataloaders(
     distributed: bool = False,
     rank: int = 0,
     world_size: int = 1,
+    module_config_paths: dict[str, str | Path] | None = None,
 ) -> tuple[DataLoader[Any], DataLoader[Any] | None]:
     train_dataset = CocoDetectionDataset(
         config["data"]["train_images"],
@@ -208,6 +212,7 @@ def build_train_dataloaders(
         arch=arch,
         rank=rank,
         world_size=world_size,
+        module_config_paths=module_config_paths,
     )
     loader_dataset: Dataset[Any] = train_dataset
     if hard_replay is not None and hard_replay.config.object_replay.enabled:
@@ -313,11 +318,14 @@ def _build_hard_replay_controller(
     arch: str | None,
     rank: int = 0,
     world_size: int = 1,
+    module_config_paths: dict[str, str | Path] | None = None,
 ) -> HardReplayController | None:
-    if not HARD_REPLAY_CONFIG_PATH.is_file():
+    config_paths = resolve_module_config_paths(module_config_paths, require_exists=False)
+    hard_replay_config_path = config_paths["hard_replay"]
+    if not hard_replay_config_path.is_file():
         return None
     return build_hard_replay_controller_from_yaml(
-        HARD_REPLAY_CONFIG_PATH,
+        hard_replay_config_path,
         dataset=dataset,
         batch_size=config["loader"]["batch_size"],
         shuffle=config["loader"]["shuffle"],

@@ -14,15 +14,10 @@ from modules.nn import (
 
 from .config import load_yaml_file
 from .hard_replay import load_hard_replay_config
+from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-MODULE_CONFIG_PATHS = {
-    "mdmb": PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml",
-    "mdmbpp": PROJECT_ROOT / "modules" / "cfg" / "mdmbpp.yaml",
-    "rasd": PROJECT_ROOT / "modules" / "cfg" / "rasd.yaml",
-    "hard_replay": PROJECT_ROOT / "modules" / "cfg" / "hard_replay.yaml",
-}
+MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "mdmb": load_mdmb_config,
@@ -45,12 +40,7 @@ def collect_enabled_module_configs(
     config_paths: Mapping[str, str | Path] | None = None,
 ) -> dict[str, Any]:
     normalized_arch = normalize_arch(arch)
-    paths = dict(MODULE_CONFIG_PATHS)
-    if config_paths is not None:
-        for name, path in config_paths.items():
-            if name not in _CONFIG_LOADERS:
-                raise KeyError(f"Unsupported module config key: {name!r}")
-            paths[name] = Path(path)
+    paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
     for name in ("mdmb", "mdmbpp", "rasd", "hard_replay"):

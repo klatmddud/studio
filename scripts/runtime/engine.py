@@ -48,6 +48,7 @@ def fit(
     device: torch.device,
     arch: str,
     distributed: DistributedContext | None = None,
+    module_config_paths: Mapping[str, str | Path] | None = None,
 ) -> list[dict[str, Any]]:
     distributed = distributed or DistributedContext(enabled=False, device=device)
     main_process = is_main_process(distributed)
@@ -108,7 +109,10 @@ def fit(
             model_config_path=model_config_path,
             runtime_config=runtime_config,
             runtime_config_path=runtime_config_path,
-            module_configs=collect_enabled_module_configs(arch),
+            module_configs=collect_enabled_module_configs(
+                arch,
+                config_paths=module_config_paths or runtime_config.get("_module_config_paths"),
+            ),
         )
     barrier(distributed)
 
@@ -554,6 +558,12 @@ def persist_run_metadata(
         "model_config_path": str(Path(model_config_path).resolve()),
         "runtime_config_path": str(Path(runtime_config_path).resolve()),
     }
+    module_config_paths = runtime_config.get("_module_config_paths")
+    if isinstance(module_config_paths, Mapping):
+        metadata["module_config_paths"] = {
+            str(name): str(Path(path).expanduser().resolve())
+            for name, path in module_config_paths.items()
+        }
     _write_json(metadata_dir / "run.json", metadata)
 
 

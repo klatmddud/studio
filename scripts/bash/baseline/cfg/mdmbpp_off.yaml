@@ -1,0 +1,39 @@
+enabled: false
+warmup_epochs: 0
+detected_iou_threshold: 0.5
+near_iou_threshold: 0.1
+class_iou_threshold: 0.5
+record_match_threshold: 0.95
+max_per_image: null
+candidate_topk: 5
+store_topk_candidates: true
+store_support_feature: false
+
+support_memory:
+  enabled: false
+  score_weight: 1.0
+  iou_weight: 1.0
+  replace_margin: 0.05
+  refresh_age: 15
+  require_feature: true
+
+severity:
+  lambda_streak: 1.0
+  lambda_relapse: 1.0
+  lambda_failure_type: 1.0
+  lambda_coverage: 1.0
+
+failure_type_priors:
+  candidate_missing: 1.0
+  score_suppression: 0.8
+  nms_suppression: 0.7
+  cls_confusion: 0.6
+  loc_near_miss: 0.5
+  detected: 0.0
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

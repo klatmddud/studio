@@ -21,6 +21,10 @@ from scripts.runtime.distributed import (
     setup_process_group,
 )
 from scripts.runtime.engine import fit, seed_everything
+from scripts.runtime.module_configs import (
+    resolve_module_config_paths,
+    serialize_module_config_paths,
+)
 from scripts.runtime.registry import build_model_from_path
 
 
@@ -42,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for runtime.output_dir.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional override for runtime.seed.",
+    )
+    parser.add_argument(
         "--device",
         nargs="+",
         default=None,
@@ -49,6 +59,26 @@ def parse_args() -> argparse.Namespace:
             "Optional override for runtime.device. Use one value for single-device "
             "training or multiple CUDA values for DDP, for example: cuda:0 cuda:1."
         ),
+    )
+    parser.add_argument(
+        "--mdmb-config",
+        default=None,
+        help="Optional override for the MDMB YAML config path.",
+    )
+    parser.add_argument(
+        "--mdmbpp-config",
+        default=None,
+        help="Optional override for the MDMB++ YAML config path.",
+    )
+    parser.add_argument(
+        "--rasd-config",
+        default=None,
+        help="Optional override for the RASD YAML config path.",
+    )
+    parser.add_argument(
+        "--hard-replay-config",
+        default=None,
+        help="Optional override for the Hard Replay YAML config path.",
     )
     return parser.parse_args()
 
@@ -60,6 +90,10 @@ def main() -> None:
         mode="train",
         dataset=args.data,
     )
+    if args.seed is not None:
+        if args.seed < 0:
+            raise ValueError("--seed must be >= 0.")
+        runtime_config["seed"] = int(args.seed)
     if args.output_dir:
         runtime_config["output_dir"] = str(Path(args.output_dir).expanduser().resolve())
         runtime_config["checkpoint"]["dir"] = str(
@@ -67,6 +101,10 @@ def main() -> None:
         )
     if args.device:
         runtime_config["device"] = args.device[0] if len(args.device) == 1 else list(args.device)
+
+    module_config_paths = _resolve_module_config_paths_from_args(args)
+    runtime_config["_module_config_paths"] = serialize_module_config_paths(module_config_paths)
+    runtime_config["_module_config_overrides"] = _module_config_override_names(args)
 
     devices = resolve_devices(runtime_config["device"])
     device_names = [format_device_name(device) for device in devices]
@@ -86,15 +124,25 @@ def main() -> None:
     model, model_config, arch, model_config_path = build_model_from_path(
         args.model,
         runtime_config=runtime_config,
+        module_config_paths=module_config_paths,
     )
     device = devices[0]
-    train_loader, val_loader = build_train_dataloaders(runtime_config, arch=arch)
+    train_loader, val_loader = build_train_dataloaders(
+        runtime_config,
+        arch=arch,
+        module_config_paths=module_config_paths,
+    )
 
     print(f"Starting training: arch={arch} device={format_device_name(device)}")
     print(f"train_config={runtime_config_path}")
     print(f"model_config={model_config_path}")
+    print(f"seed={runtime_config['seed']}")
     if runtime_config.get("_dataset"):
         print(f"dataset={runtime_config['_dataset']}")
+    _print_module_config_overrides(
+        module_config_paths,
+        runtime_config.get("_module_config_overrides", ()),
+    )
 
     fit(
         model=model,
@@ -106,6 +154,7 @@ def main() -> None:
         val_loader=val_loader,
         device=device,
         arch=arch,
+        module_config_paths=module_config_paths,
     )
 
 
@@ -174,6 +223,7 @@ def _distributed_train_worker(
         model, model_config, arch, model_config_path = build_model_from_path(
             model_path,
             runtime_config=local_config,
+            module_config_paths=local_config.get("_module_config_paths"),
         )
         train_loader, val_loader = build_train_dataloaders(
             local_config,
@@ -181,14 +231,20 @@ def _distributed_train_worker(
             distributed=True,
             rank=rank,
             world_size=len(devices),
+            module_config_paths=local_config.get("_module_config_paths"),
         )
 
         if rank == 0:
             print(f"Starting DDP training: arch={arch} devices={', '.join(device_names)}")
             print(f"train_config={runtime_config_path}")
             print(f"model_config={model_config_path}")
+            print(f"seed={local_config['seed']}")
             if local_config.get("_dataset"):
                 print(f"dataset={local_config['_dataset']}")
+            _print_module_config_overrides(
+                local_config.get("_module_config_paths"),
+                local_config.get("_module_config_overrides", ()),
+            )
 
         fit(
             model=model,
@@ -201,6 +257,7 @@ def _distributed_train_worker(
             device=device,
             arch=arch,
             distributed=context,
+            module_config_paths=local_config.get("_module_config_paths"),
         )
     finally:
         cleanup_process_group()
@@ -210,6 +267,53 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str, Path]:
+    overrides = {
+        "mdmb": args.mdmb_config,
+        "mdmbpp": args.mdmbpp_config,
+        "rasd": args.rasd_config,
+        "hard_replay": args.hard_replay_config,
+    }
+    paths = resolve_module_config_paths(overrides, require_exists=False)
+    missing = [
+        f"{name}={paths[name]}"
+        for name, raw_path in overrides.items()
+        if raw_path is not None and not paths[name].is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Module config override file was not found: " + ", ".join(missing)
+        )
+    return paths
+
+
+def _module_config_override_names(args: argparse.Namespace) -> list[str]:
+    overrides = {
+        "mdmb": args.mdmb_config,
+        "mdmbpp": args.mdmbpp_config,
+        "rasd": args.rasd_config,
+        "hard_replay": args.hard_replay_config,
+    }
+    return [name for name, value in overrides.items() if value is not None]
+
+
+def _print_module_config_overrides(
+    module_config_paths: dict[str, str | Path] | None,
+    override_names: list[str] | tuple[str, ...],
+) -> None:
+    if not module_config_paths:
+        return
+    if not override_names:
+        return
+    print("module_configs:")
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay"):
+        if name not in override_names:
+            continue
+        path = module_config_paths.get(name)
+        if path is not None:
+            print(f"  {name}: {Path(path)}")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
+from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
 
 ARCH_ALIASES = {
     "faster_rcnn": "fasterrcnn",
@@ -30,9 +31,9 @@ MODEL_BUILDERS = {
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MDMB_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml"
-MDMBPP_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "mdmbpp.yaml"
-RASD_CONFIG_PATH = PROJECT_ROOT / "modules" / "cfg" / "rasd.yaml"
+MDMB_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmb"]
+MDMBPP_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmbpp"]
+RASD_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["rasd"]
 
 
 def normalize_arch(raw_arch: str) -> str:
@@ -45,8 +46,14 @@ def infer_arch(model_config: dict[str, Any], model_config_path: str | Path) -> s
     return normalize_arch(candidate)
 
 
-def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Module:
+def build_model_from_config(
+    model_config: dict[str, Any],
+    arch: str,
+    *,
+    module_config_paths: dict[str, str | Path] | None = None,
+) -> nn.Module:
     normalized_arch = normalize_arch(arch)
+    module_paths = resolve_module_config_paths(module_config_paths, require_exists=False)
     builder = MODEL_BUILDERS.get(normalized_arch)
     if builder is None:
         supported = ", ".join(sorted(MODEL_BUILDERS))
@@ -54,14 +61,16 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
-    mdmb = _build_mdmb(normalized_arch)
-    mdmbpp = _build_mdmbpp(normalized_arch)
-    rasd = _build_rasd(normalized_arch)
+    mdmb = _build_mdmb(normalized_arch, module_paths["mdmb"])
+    mdmbpp = _build_mdmbpp(normalized_arch, module_paths["mdmbpp"])
+    rasd = _build_rasd(normalized_arch, module_paths["rasd"])
     if normalized_arch == "fcos":
         if rasd is not None and mdmbpp is None:
             raise ValueError("RASD requires MDMB++ to be enabled for FCOS.")
         if rasd is not None and not bool(mdmbpp.config.store_support_feature):
-            raise ValueError("RASD requires modules/cfg/mdmbpp.yaml store_support_feature: true.")
+            raise ValueError(
+                "RASD requires the active MDMB++ config to set store_support_feature: true."
+            )
         return builder(
             model_config,
             mdmb=mdmb,
@@ -74,6 +83,8 @@ def build_model_from_config(model_config: dict[str, Any], arch: str) -> nn.Modul
 def build_model_from_path(
     model_config_path: str | Path,
     runtime_config: dict[str, Any] | None = None,
+    *,
+    module_config_paths: dict[str, str | Path] | None = None,
 ) -> tuple[nn.Module, dict[str, Any], str, Path]:
     resolved_path = Path(model_config_path).expanduser().resolve()
     model_config = load_yaml_file(resolved_path)
@@ -83,29 +94,36 @@ def build_model_from_path(
             model_config = dict(model_config)
             model_config["num_classes"] = inferred_num_classes
     arch = infer_arch(model_config, resolved_path)
-    model = build_model_from_config(model_config, arch)
+    model = build_model_from_config(
+        model_config,
+        arch,
+        module_config_paths=module_config_paths,
+    )
     return model, model_config, arch, resolved_path
 
 
-def _build_mdmb(arch: str) -> nn.Module | None:
+def _build_mdmb(arch: str, config_path: str | Path) -> nn.Module | None:
     if arch != "fcos":
         return None
-    if not MDMB_CONFIG_PATH.is_file():
+    path = Path(config_path)
+    if not path.is_file():
         return None
-    return build_mdmb_from_yaml(MDMB_CONFIG_PATH, arch=arch)
+    return build_mdmb_from_yaml(path, arch=arch)
 
 
-def _build_mdmbpp(arch: str) -> nn.Module | None:
+def _build_mdmbpp(arch: str, config_path: str | Path) -> nn.Module | None:
     if arch != "fcos":
         return None
-    if not MDMBPP_CONFIG_PATH.is_file():
+    path = Path(config_path)
+    if not path.is_file():
         return None
-    return build_mdmbpp_from_yaml(MDMBPP_CONFIG_PATH, arch=arch)
+    return build_mdmbpp_from_yaml(path, arch=arch)
 
 
-def _build_rasd(arch: str) -> nn.Module | None:
+def _build_rasd(arch: str, config_path: str | Path) -> nn.Module | None:
     if arch != "fcos":
         return None
-    if not RASD_CONFIG_PATH.is_file():
+    path = Path(config_path)
+    if not path.is_file():
         return None
-    return build_rasd_from_yaml(RASD_CONFIG_PATH, arch=arch)
+    return build_rasd_from_yaml(path, arch=arch)

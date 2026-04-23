@@ -27,6 +27,11 @@ models:
     enabled: false
 ```
 
+For parallel experiments, prefer per-run config files instead of editing the global YAML files.
+`scripts/train.py` accepts `--mdmb-config`, `--mdmbpp-config`, `--rasd-config`, and
+`--hard-replay-config`; those paths override the defaults for that run only and are also used when
+writing `metadata/modules.yaml`.
+
 ## Module Overview
 
 ### MDMB - Missed Detection Memory Bank (`modules/nn/mdmb.py`)
@@ -137,7 +142,8 @@ Current scope:
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, and `rasd` from `modules/cfg/*.yaml`.
+1. `registry.py` builds `mdmb`, `mdmbpp`, and `rasd` from `modules/cfg/*.yaml` or per-run CLI
+   config overrides.
 2. FCOS forward computes the base detection loss and optionally adds `rasd`.
 3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.

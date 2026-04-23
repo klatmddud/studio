@@ -113,6 +113,27 @@ layer rather than as an `nn.Module`.
   `floor(batch_size * replay_ratio)` replay samples.
 - Epoch logging: replay statistics are stored under the `hard_replay` key in `history.json`.
 
+### Per-Run Research Module Configs
+
+By default, training reads research module configs from `modules/cfg/*.yaml`. For concurrent
+experiments, pass per-run config files on the CLI so one run does not mutate or depend on global
+module YAML:
+
+```bash
+uv run scripts/train.py \
+  --config scripts/cfg/train.yaml \
+  --model models/detection/cfg/fcos.yaml \
+  --data kitti \
+  --device cuda:0 \
+  --mdmb-config scripts/bash/mdmbpp_only/cfg/mdmb_disabled.yaml \
+  --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
+  --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
+  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml
+```
+
+The same resolved paths are used for model construction, Hard Replay DataLoader setup, DDP worker
+spawn, and `metadata/modules.yaml` snapshots.
+
 ### Multi-GPU DDP
 
 Training supports single-process single-device execution and internal DDP spawn for multiple CUDA
@@ -208,7 +229,7 @@ Additional outputs:
 `metadata/modules.yaml` is written during training only. It stores the parsed YAML mapping for each
 research module that is effectively enabled for the selected architecture, using keys such as
 `mdmbpp`, `rasd`, and `hard_replay`. If no research module is enabled, the file contains an empty
-mapping.
+mapping. `metadata/run.json` also records the resolved module config paths used by that run.
 
 Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
 filtered with `score > 0.25`, GT/prediction pairs use global one-to-one matching at `IoU > 0.45`,
@@ -222,6 +243,7 @@ uv run scripts/train.py \
   --model models/detection/cfg/fcos.yaml \
   --data kitti \
   --output-dir runs/exp1 \
+  --seed 42 \
   --device cuda
 
 uv run scripts/train.py \
@@ -229,7 +251,20 @@ uv run scripts/train.py \
   --model models/detection/cfg/fcos.yaml \
   --data kitti \
   --output-dir runs/exp1_ddp \
+  --seed 42 \
   --device cuda:0 cuda:1
+
+uv run scripts/train.py \
+  --config scripts/cfg/train.yaml \
+  --model models/detection/cfg/fcos.yaml \
+  --data kitti \
+  --output-dir runs/mdmbpp_only \
+  --seed 42 \
+  --device cuda:0 \
+  --mdmb-config scripts/bash/mdmbpp_only/cfg/mdmb_disabled.yaml \
+  --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
+  --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
+  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml
 
 uv run scripts/eval.py \
   --config scripts/cfg/eval.yaml \
@@ -238,3 +273,6 @@ uv run scripts/eval.py \
   --data kitti \
   --output-dir runs/eval_exp1
 ```
+
+`--seed` is a train-only override for `runtime.seed`. It is applied before model/data construction,
+DDP worker spawn, and metadata persistence, so `metadata/train.yaml` records the effective seed.
