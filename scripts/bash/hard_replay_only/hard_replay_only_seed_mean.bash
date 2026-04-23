@@ -4,7 +4,7 @@ set -u
 set -o pipefail
 export PYTHONUNBUFFERED=1
 
-MOD="baseline"
+MOD="hard_replay_only"
 DATA="kitti"
 MODEL="fcos"
 BACKBONE="resnet18"

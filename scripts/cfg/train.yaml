@@ -10,7 +10,7 @@ data:
   val_annotations: ${KITTI_VAL_ANNOTATIONS} # ex) ${BDD100K_VAL_ANNOTATIONS}, ${BDD10K_VAL_ANNOTATIONS}
 
 loader:
-  batch_size: 16
+  batch_size: 32
   num_workers: 8
   pin_memory: true
   shuffle: true

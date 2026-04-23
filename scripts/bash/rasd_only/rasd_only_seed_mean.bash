@@ -4,7 +4,7 @@ set -u
 set -o pipefail
 export PYTHONUNBUFFERED=1
 
-MOD="baseline"
+MOD="rasd_only"
 DATA="kitti"
 MODEL="fcos"
 BACKBONE="resnet18"
@@ -13,7 +13,7 @@ MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 MODULE_BASE_PATH="scripts/bash/$MOD/cfg"
 MDMB_CFG="$MODULE_BASE_PATH/mdmb_off.yaml"
 MDMBPP_CFG="$MODULE_BASE_PATH/mdmbpp_on.yaml"
-HARD_REPLAY_CFG="$MODULE_BASE_PATH/hard_replay_on.yaml"
+HARD_REPLAY_CFG="$MODULE_BASE_PATH/hard_replay_off.yaml"
 RASD_CFG="$MODULE_BASE_PATH/rasd_on.yaml"
 
 DEVICE="${DEVICE:-cuda:0}"
