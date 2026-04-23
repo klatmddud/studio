@@ -27,7 +27,7 @@ uv run scripts/train.py \
   --data "$DATA" \
   --seed 42 \
   --device ${DEVICE} \
-  --mdmb-config ${MDMB_CFG}$ \
+  --mdmb-config ${MDMB_CFG} \
   --mdmbpp-config ${MDMBPP_CFG} \
   --hard-replay-config ${HARD_REPLAY_CFG} \
   --rasd-config ${RASD_CFG} \
@@ -40,7 +40,7 @@ uv run scripts/train.py \
   --data "$DATA" \
   --seed 43 \
   --device ${DEVICE} \
-  --mdmb-config ${MDMB_CFG}$ \
+  --mdmb-config ${MDMB_CFG} \
   --mdmbpp-config ${MDMBPP_CFG} \
   --hard-replay-config ${HARD_REPLAY_CFG} \
   --rasd-config ${RASD_CFG} \
@@ -53,7 +53,7 @@ uv run scripts/train.py \
   --data "$DATA" \
   --seed 44 \
   --device ${DEVICE} \
-  --mdmb-config ${MDMB_CFG}$ \
+  --mdmb-config ${MDMB_CFG} \
   --mdmbpp-config ${MDMBPP_CFG} \
   --hard-replay-config ${HARD_REPLAY_CFG} \
   --rasd-config ${RASD_CFG} \
