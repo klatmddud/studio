@@ -12,5 +12,6 @@ wheels/
 .idea
 .env
 runs
+logs
 
 .claude
