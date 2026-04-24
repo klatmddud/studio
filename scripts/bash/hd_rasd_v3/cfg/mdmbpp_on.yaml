@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 warmup_epochs: 0
 detected_iou_threshold: 0.5
 near_iou_threshold: 0.1
@@ -7,14 +7,14 @@ record_match_threshold: 0.95
 max_per_image: null
 candidate_topk: 5
 store_topk_candidates: true
-store_support_feature: false
+store_support_feature: true
 
 support_memory:
-  enabled: false
+  enabled: true
   score_weight: 1.0
   iou_weight: 1.0
-  replace_margin: 0.05
-  refresh_age: 15
+  replace_margin: 0.02
+  refresh_age: 5
   require_feature: true
 
 severity:

@@ -1,13 +1,13 @@
-enabled: false
-warmup_epochs: 15
-lambda_rasd: 0.01
+enabled: true
+warmup_epochs: 5
+lambda_rasd: 0.03
 temperature: 0.2
 alpha_contrastive: 1.0
 
 min_relapse_streak: 1
 min_severity: 1.0
 min_support_score: 0.2
-max_support_age: 5
+max_support_age: 15
 record_match_threshold: 0.95
 
 max_targets_per_image: 5
