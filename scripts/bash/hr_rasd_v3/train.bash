@@ -4,7 +4,7 @@ set -u
 set -o pipefail
 export PYTHONUNBUFFERED=1
 
-MOD="hd_rasd_v3"
+MOD="hr_rasd_v3"
 DATA="kitti"
 MODEL="fcos"
 BACKBONE="resnet18"
