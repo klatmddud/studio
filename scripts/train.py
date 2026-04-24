@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the TFM YAML config path.",
     )
+    parser.add_argument(
+        "--fntdm-config",
+        default=None,
+        help="Optional override for the FN-TDM YAML config path.",
+    )
     return parser.parse_args()
 
 
@@ -281,6 +286,7 @@ def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str
         "rasd": args.rasd_config,
         "hard_replay": args.hard_replay_config,
         "tfm": args.tfm_config,
+        "fntdm": args.fntdm_config,
     }
     paths = resolve_module_config_paths(overrides, require_exists=False)
     missing = [
@@ -302,6 +308,7 @@ def _module_config_override_names(args: argparse.Namespace) -> list[str]:
         "rasd": args.rasd_config,
         "hard_replay": args.hard_replay_config,
         "tfm": args.tfm_config,
+        "fntdm": args.fntdm_config,
     }
     return [name for name, value in overrides.items() if value is not None]
 
@@ -315,7 +322,7 @@ def _print_module_config_overrides(
     if not override_names:
         return
     print("module_configs:")
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm"):
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm"):
         if name not in override_names:
             continue
         path = module_config_paths.get(name)

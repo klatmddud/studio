@@ -32,15 +32,19 @@ The `--data kitti` CLI flag selects `KITTI_*` variables. `--data bdd100k` select
 Built by `scripts/runtime/data.py`:
 
 - `build_train_dataloaders(runtime_config, arch=...)` -> `(train_loader, val_loader)`
+- `build_train_mining_dataloader(runtime_config)` -> deterministic train loader for epoch-end mining
 - `build_eval_dataloader(runtime_config)` -> `eval_loader`
 
 `CocoDetectionDataset` per-item output:
 
 - Image: `Tensor[C, H, W]`, `float32`, RGB
-- Target: `{boxes, labels, image_id, area, iscrowd}`
+- Target: `{boxes, labels, image_id, area, iscrowd, annotation_ids, gt_ids}`
 
 `boxes` use absolute `xyxy` coordinates. Degenerate boxes are filtered. Missing images raise
 errors.
+`annotation_ids` and `gt_ids` mirror the COCO annotation `id` field for each kept box. Temporal
+modules use them for stable GT identity when available. Missing annotation IDs are stored as `-1`,
+which lets modules fall back to image/class/box identity.
 
 ## Hard Replay Loader Path
 
@@ -81,6 +85,12 @@ loader:
 
 Custom `collate_fn` preserves variable-length image lists, so no padding is required for the
 TorchVision detectors in this project.
+
+## Train Mining Loader
+
+`build_train_mining_dataloader(runtime_config)` builds a deterministic train-set loader with
+`shuffle: false`. FN-TDM uses this loader for epoch-end HTM mining so transition detection runs on
+the original COCO train set rather than replay samples or shuffled batch order.
 
 ## Format Conversion
 

@@ -15,6 +15,7 @@ from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from modules.nn import (
     CanonicalCandidate,
+    FalseNegativeTransitionDirectionMemory,
     MDMBPlus,
     PerImageCandidateSummary,
     RelapseAwareSupportDistillation,
@@ -64,6 +65,7 @@ class MDMBFCOS(FCOS):
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
+        fntdm: FalseNegativeTransitionDirectionMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -71,6 +73,7 @@ class MDMBFCOS(FCOS):
         self._mdmbpp_ref = weakref.ref(mdmbpp) if mdmbpp is not None else None
         self._rasd_ref = weakref.ref(rasd) if rasd is not None else None
         self._tfm_ref = weakref.ref(tfm) if tfm is not None else None
+        self._fntdm_ref = weakref.ref(fntdm) if fntdm is not None else None
 
     def forward(
         self,
@@ -171,6 +174,20 @@ class MDMBFCOS(FCOS):
                 if int(rasd_stats.get("losses", 0)) > 0:
                     losses = dict(losses)
                     losses["rasd"] = rasd_loss
+
+            fntdm = self._get_fntdm()
+            if fntdm is not None:
+                fntdm_loss = fntdm.compute_loss(
+                    targets=targets,
+                    image_shapes=images.image_sizes,
+                    features=features,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    matched_idxs=matched_idxs,
+                )
+                if bool(torch.isfinite(fntdm_loss).item()) and float(fntdm_loss.detach().item()) != 0.0:
+                    losses = dict(losses)
+                    losses["fntdm"] = fntdm_loss
 
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
@@ -967,6 +984,50 @@ class MDMBFCOS(FCOS):
                 epoch=epoch,
             )
 
+    @torch.no_grad()
+    def mine_fntdm_batch(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int,
+    ) -> dict[str, int] | None:
+        fntdm = self._get_fntdm()
+        if fntdm is None or not targets:
+            return None
+        if not fntdm.should_mine(epoch=epoch):
+            return None
+
+        non_replay = [
+            (image, target)
+            for image, target in zip(images, targets, strict=True)
+            if not _is_replay_target(target)
+        ]
+        if not non_replay:
+            return None
+        images = [image for image, _ in non_replay]
+        targets = [target for _, target in non_replay]
+
+        was_training = self.training
+        try:
+            self.eval()
+            mined = self._run_post_step_inference(images, targets)
+        finally:
+            if was_training:
+                self.train()
+
+        transformed_targets = mined.get("transformed_targets")
+        if not isinstance(transformed_targets, list):
+            return None
+        return fntdm.mine_batch(
+            detections=mined["detections"],
+            original_targets=targets,
+            transformed_targets=transformed_targets,
+            transformed_image_shapes=mined["transformed_image_sizes"],
+            features=mined["features"],
+            epoch=epoch,
+        )
+
     def _collect_mdmbpp_support_features(
         self,
         *,
@@ -1377,6 +1438,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._tfm_ref()
 
+    def _get_fntdm(self) -> FalseNegativeTransitionDirectionMemory | None:
+        if self._fntdm_ref is None:
+            return None
+        return self._fntdm_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -1394,6 +1460,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
+        fntdm: FalseNegativeTransitionDirectionMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -1401,6 +1468,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         self.mdmbpp = mdmbpp
         self.rasd = rasd
         self.tfm = tfm
+        self.fntdm = fntdm
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -1426,6 +1494,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmbpp=mdmbpp,
             rasd=rasd,
             tfm=tfm,
+            fntdm=fntdm,
             **kwargs,
         )
 
@@ -1442,6 +1511,18 @@ class FCOSWrapper(BaseDetectionWrapper):
         epoch = None if epoch_index is None else int(epoch_index) + 1
         self.model.flush_post_step_updates(images, targets, epoch=epoch)
 
+    @torch.no_grad()
+    def mine_fntdm_batch(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int,
+    ) -> dict[str, int] | None:
+        if self.fntdm is None:
+            return None
+        return self.model.mine_fntdm_batch(images, targets, epoch=epoch)
+
     @classmethod
     def from_yaml(
         cls,
@@ -1452,6 +1533,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
+        fntdm: FalseNegativeTransitionDirectionMemory | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -1463,5 +1545,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmbpp=mdmbpp,
             rasd=rasd,
             tfm=tfm,
+            fntdm=fntdm,
             **kwargs,
         )

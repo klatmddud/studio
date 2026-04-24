@@ -16,6 +16,7 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 
 from .config import dump_yaml_file
+from .data import build_train_mining_dataloader
 from .distributed import (
     DistributedContext,
     all_gather_object,
@@ -126,6 +127,7 @@ def fit(
         _call_model_hook(model, "mdmbpp", "start_epoch", epoch + 1)
         _call_model_hook(model, "rasd", "start_epoch", epoch + 1)
         _call_model_hook(model, "tfm", "start_epoch", epoch + 1)
+        _call_model_hook(model, "fntdm", "start_epoch", epoch + 1)
         _set_data_loader_epoch(train_loader, epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
         train_metrics = train_one_epoch(
@@ -141,16 +143,28 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
+        _run_fntdm_epoch_mining(
+            model=model,
+            runtime_config=runtime_config,
+            device=device,
+            amp=runtime_config["amp"],
+            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
+            epoch=epoch + 1,
+            total_epochs=total_epochs,
+            distributed=distributed,
+        )
         _call_model_hook(model, "mdmb", "end_epoch", epoch + 1)
         _call_model_hook(model, "mdmbpp", "end_epoch", epoch + 1)
         _call_model_hook(model, "rasd", "end_epoch", epoch + 1)
         _call_model_hook(model, "tfm", "end_epoch", epoch + 1)
+        _call_model_hook(model, "fntdm", "end_epoch", epoch + 1)
         local_summaries = {
             "mdmb": _get_mdmb_summary(model),
             "mdmbpp": _get_module_summary(model, "mdmbpp"),
             "rasd": _get_module_summary(model, "rasd"),
             "hard_replay": _get_hard_replay_summary(train_loader),
             "tfm": _get_module_summary(model, "tfm"),
+            "fntdm": _get_module_summary(model, "fntdm"),
         }
         merged_epoch_summaries = _merge_epoch_summaries(local_summaries, distributed)
         _synchronize_research_memory(model, distributed)
@@ -167,6 +181,7 @@ def fit(
         rasd_summary = merged_epoch_summaries.get("rasd")
         hard_replay_summary = merged_epoch_summaries.get("hard_replay")
         tfm_summary = _get_module_summary(model, "tfm")
+        fntdm_summary = merged_epoch_summaries.get("fntdm")
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -182,6 +197,8 @@ def fit(
             record["hard_replay"] = hard_replay_summary
         if tfm_summary is not None:
             record["tfm"] = tfm_summary
+        if fntdm_summary is not None:
+            record["fntdm"] = fntdm_summary
 
         should_eval = (
             val_loader is not None
@@ -614,6 +631,15 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         parts.append(f"tfm_records={int(tfm_summary.get('num_records', 0))}")
         parts.append(f"tfm_mean_risk={float(tfm_summary.get('mean_risk', 0.0)):.3f}")
 
+    fntdm_summary = record.get("fntdm")
+    if isinstance(fntdm_summary, dict):
+        tdb = fntdm_summary.get("tdb", {})
+        tal = fntdm_summary.get("tal", {})
+        if isinstance(tdb, Mapping):
+            parts.append(f"fntdm_tdb_entries={int(tdb.get('total_entries', 0))}")
+        if isinstance(tal, Mapping):
+            parts.append(f"fntdm_candidates={int(tal.get('valid_candidates', 0))}")
+
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -668,7 +694,7 @@ def _merge_epoch_summaries(
 ) -> dict[str, dict[str, Any] | None]:
     gathered = all_gather_object(dict(local_summaries), distributed)
     merged: dict[str, dict[str, Any] | None] = {}
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm"):
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm"):
         summaries = [
             item.get(name)
             for item in gathered
@@ -741,6 +767,55 @@ def _merge_summary_group(
             for state, count in raw_counts.items():
                 state_counts[str(state)] += int(count)
         result["state_counts"] = dict(state_counts)
+        return result
+    if name == "fntdm":
+        htm_counts: defaultdict[str, int] = defaultdict(int)
+        tcs_counts: defaultdict[str, int] = defaultdict(int)
+        tal_counts: defaultdict[str, int] = defaultdict(int)
+        tdb_total_entries = 0
+        tdb_classes = 0
+        tal_loss_weighted = 0.0
+        tal_cosine_weighted = 0.0
+        tal_hardness_weighted = 0.0
+        tal_loss_weight = 0
+        tal_candidate_weight = 0
+        for summary in summaries:
+            htm = summary.get("htm", {})
+            if isinstance(htm, Mapping):
+                for key, value in htm.items():
+                    if isinstance(value, (int, float)):
+                        htm_counts[str(key)] += int(value)
+            tcs = summary.get("tcs", {})
+            if isinstance(tcs, Mapping):
+                for key, value in tcs.items():
+                    if isinstance(value, (int, float)):
+                        tcs_counts[str(key)] += int(value)
+            tal = summary.get("tal", {})
+            if isinstance(tal, Mapping):
+                for key, value in tal.items():
+                    if isinstance(value, (int, float)) and not str(key).startswith("mean_"):
+                        tal_counts[str(key)] += int(value)
+                losses = int(tal.get("losses", 0))
+                candidates = int(tal.get("valid_candidates", 0))
+                tal_loss_weighted += float(tal.get("mean_loss", 0.0)) * float(losses)
+                tal_cosine_weighted += float(tal.get("mean_cosine", 0.0)) * float(candidates)
+                tal_hardness_weighted += float(tal.get("mean_hardness", 0.0)) * float(candidates)
+                tal_loss_weight += losses
+                tal_candidate_weight += candidates
+            tdb = summary.get("tdb", {})
+            if isinstance(tdb, Mapping):
+                tdb_total_entries = max(tdb_total_entries, int(tdb.get("total_entries", 0)))
+                tdb_classes = max(tdb_classes, int(tdb.get("num_classes_with_entries", 0)))
+        result["htm"] = dict(htm_counts)
+        result["tcs"] = dict(tcs_counts)
+        result["tal"] = dict(tal_counts)
+        result["tal"]["mean_loss"] = tal_loss_weighted / float(max(tal_loss_weight, 1))
+        result["tal"]["mean_cosine"] = tal_cosine_weighted / float(max(tal_candidate_weight, 1))
+        result["tal"]["mean_hardness"] = tal_hardness_weighted / float(max(tal_candidate_weight, 1))
+        result["tdb"] = {
+            "total_entries": tdb_total_entries,
+            "num_classes_with_entries": tdb_classes,
+        }
         return result
     if name == "hard_replay":
         _merge_count_keys(
@@ -829,6 +904,7 @@ def _synchronize_research_memory(
         ("mdmb", _merge_mdmb_states),
         ("mdmbpp", _merge_mdmbpp_states),
         ("tfm", _merge_tfm_states),
+        ("fntdm", _merge_fntdm_states),
     )
     for attribute_name, merge_fn in sync_specs:
         module = getattr(base_model, attribute_name, None)
@@ -1005,6 +1081,92 @@ def _merge_tfm_states(states: list[Any]) -> dict[str, Any] | None:
     return merged
 
 
+def _merge_fntdm_states(states: list[Any]) -> dict[str, Any] | None:
+    valid = [state for state in states if isinstance(state, Mapping)]
+    if not valid:
+        return None
+    merged = dict(valid[0])
+    merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
+
+    config = merged.get("config", {})
+    max_entries_per_class = 128
+    if isinstance(config, Mapping):
+        tdb_cfg = config.get("tdb", {})
+        if isinstance(tdb_cfg, Mapping):
+            storage = tdb_cfg.get("storage", {})
+            if isinstance(storage, Mapping):
+                max_entries_per_class = int(storage.get("max_entries_per_class", 128))
+
+    entries_by_class: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
+    tdb_stats: defaultdict[str, int] = defaultdict(int)
+    for state in valid:
+        raw_tdb = state.get("tdb", {})
+        if not isinstance(raw_tdb, Mapping):
+            continue
+        raw_stats = raw_tdb.get("stats", {})
+        if isinstance(raw_stats, Mapping):
+            for key, value in raw_stats.items():
+                tdb_stats[str(key)] += int(value)
+        raw_bank = raw_tdb.get("bank", {})
+        if not isinstance(raw_bank, Mapping):
+            continue
+        for class_id, raw_entries in raw_bank.items():
+            if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes)):
+                continue
+            class_entries = entries_by_class[str(class_id)]
+            for raw_entry in raw_entries:
+                if not isinstance(raw_entry, Mapping):
+                    continue
+                entry_id = str(raw_entry.get("entry_id", ""))
+                if not entry_id:
+                    continue
+                current = class_entries.get(entry_id)
+                if current is None or _fntdm_entry_priority(raw_entry) > _fntdm_entry_priority(current):
+                    class_entries[entry_id] = dict(raw_entry)
+
+    merged_bank = {}
+    for class_id, entries in entries_by_class.items():
+        sorted_entries = sorted(
+            entries.values(),
+            key=lambda item: _fntdm_entry_priority(item),
+            reverse=True,
+        )
+        merged_bank[class_id] = sorted_entries[:max_entries_per_class]
+
+    histories: dict[str, Mapping[str, Any]] = {}
+    htm_stats: defaultdict[str, int] = defaultdict(int)
+    for state in valid:
+        raw_htm = state.get("htm", {})
+        if not isinstance(raw_htm, Mapping):
+            continue
+        raw_stats = raw_htm.get("stats", {})
+        if isinstance(raw_stats, Mapping):
+            for key, value in raw_stats.items():
+                htm_stats[str(key)] += int(value)
+        raw_histories = raw_htm.get("histories", {})
+        if not isinstance(raw_histories, Mapping):
+            continue
+        for uid, raw_history in raw_histories.items():
+            if not isinstance(raw_history, Mapping):
+                continue
+            key = str(uid)
+            current = histories.get(key)
+            if current is None or _fntdm_history_priority(raw_history) > _fntdm_history_priority(current):
+                histories[key] = dict(raw_history)
+
+    merged["tdb"] = {
+        "version": 1,
+        "current_epoch": merged["current_epoch"],
+        "bank": merged_bank,
+        "stats": dict(tdb_stats),
+    }
+    merged["htm"] = {
+        "histories": histories,
+        "stats": dict(htm_stats),
+    }
+    return merged
+
+
 def _mdmb_entry_key(entry: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         str(entry.get("image_id", "")),
@@ -1096,6 +1258,24 @@ def _tfm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
         float(record.get("total_miss", 0)),
         float(record.get("relapse_count", 0)),
         _support_priority(record.get("support"))[1],
+    )
+
+
+def _fntdm_entry_priority(entry: Mapping[str, Any]) -> tuple[float, ...]:
+    return (
+        float(entry.get("quality", 0.0)),
+        float(entry.get("epoch_tp", 0)),
+        float(entry.get("score_tp", 0.0)),
+        float(entry.get("iou_tp", 0.0)),
+    )
+
+
+def _fntdm_history_priority(history: Mapping[str, Any]) -> tuple[float, ...]:
+    return (
+        float(history.get("last_epoch") or 0),
+        float(history.get("transition_count", 0)),
+        float(history.get("tp_count", 0)),
+        float(history.get("fn_count", 0)),
     )
 
 
@@ -1281,10 +1461,12 @@ def _is_optional_mdmb_key(key: str) -> bool:
         or key == "mdmbpp._extra_state"
         or key == "rasd._extra_state"
         or key == "tfm._extra_state"
+        or key == "fntdm._extra_state"
         or key.startswith("mdmb.")
         or key.startswith("mdmbpp.")
         or key.startswith("rasd.")
         or key.startswith("tfm.")
+        or key.startswith("fntdm.")
     )
 
 
@@ -1319,6 +1501,70 @@ def _refresh_hard_replay(
     if not callable(start_epoch):
         return
     start_epoch(mdmbpp=getattr(model, "mdmbpp", None), epoch=epoch)
+
+
+def _run_fntdm_epoch_mining(
+    *,
+    model: torch.nn.Module,
+    runtime_config: dict[str, Any],
+    device: torch.device,
+    amp: bool,
+    log_interval: int,
+    epoch: int,
+    total_epochs: int,
+    distributed: DistributedContext | None,
+) -> None:
+    base_model = unwrap_model(model)
+    fntdm = getattr(base_model, "fntdm", None)
+    should_mine = getattr(fntdm, "should_mine", None)
+    if fntdm is None or not callable(should_mine) or not bool(should_mine(epoch=epoch)):
+        barrier(distributed)
+        return
+
+    if not is_main_process(distributed):
+        barrier(distributed)
+        return
+
+    hook = getattr(base_model, "mine_fntdm_batch", None)
+    if not callable(hook):
+        barrier(distributed)
+        return
+
+    mining_loader = build_train_mining_dataloader(runtime_config)
+    start_time = time.perf_counter()
+    total_batches = len(mining_loader)
+    total_events = 0
+    total_gt = 0
+    was_training = base_model.training
+    try:
+        base_model.eval()
+        for step, (images, targets) in enumerate(mining_loader, start=1):
+            images = [image.to(device) for image in images]
+            targets = [_move_target_to_device(target, device) for target in targets]
+            total_gt += sum(int(target["boxes"].shape[0]) for target in targets)
+            with torch.no_grad(), torch.autocast(
+                device_type=device.type,
+                enabled=amp and device.type == "cuda",
+            ):
+                stats = hook(images, targets, epoch=epoch)
+            if isinstance(stats, Mapping):
+                total_events += int(stats.get("events", 0))
+
+            should_log = log_interval > 0 and (step % log_interval == 0 or step == total_batches)
+            if should_log:
+                elapsed = time.perf_counter() - start_time
+                avg_step_time = elapsed / max(step, 1)
+                remaining_steps = max(total_batches - step, 0)
+                epoch_eta = _format_eta(avg_step_time * remaining_steps)
+                print(
+                    f"[fntdm] epoch {epoch}/{total_epochs} "
+                    f"mining_step {step}/{total_batches} "
+                    f"epoch_eta={epoch_eta} events={total_events} gt={total_gt}"
+                )
+    finally:
+        if was_training:
+            base_model.train()
+    barrier(distributed)
 
 
 def _get_hard_replay_summary(train_loader) -> dict[str, Any] | None:

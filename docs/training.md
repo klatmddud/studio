@@ -138,11 +138,29 @@ uv run scripts/train.py \
   --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
   --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
-  --tfm-config modules/cfg/tfm.yaml
+  --tfm-config modules/cfg/tfm.yaml \
+  --fntdm-config modules/cfg/fntdm.yaml
 ```
 
 The same resolved paths are used for model construction, Hard Replay DataLoader setup, DDP worker
 spawn, and `metadata/modules.yaml` snapshots.
+
+### FN-TDM Interaction
+
+FN-TDM is configured through `modules/cfg/fntdm.yaml` and is disabled by default.
+
+When enabled for FCOS:
+
+- FCOS training forward can add an `fntdm` auxiliary loss after TCS selects hard current GTs.
+- After each training epoch satisfying `fntdm.htm.mine_interval` and `fntdm.htm.warmup_epochs`,
+  `engine.fit()` builds a deterministic train mining loader and runs one full train-set inference
+  pass to mine `FN -> TP` transitions.
+- TDB state is stored inside the model `state_dict` through `fntdm._extra_state`.
+- Under DDP, epoch-end HTM mining runs on rank 0 and FN-TDM state is synchronized before the next
+  epoch.
+
+This baseline is intentionally expensive and is meant as the clean reference implementation before
+adding online or subset mining variants.
 
 ### Multi-GPU DDP
 
@@ -222,8 +240,8 @@ COCO bbox metrics available for `checkpoint.monitor` and `metrics.primary`:
 ## Output Artifacts
 
 `{output_dir}/history.json` stores per-epoch training and validation records. When enabled, the
-record may include `mdmb`, `mdmbpp`, `rasd`, `tfm`, and `hard_replay` summaries alongside `train` and
-`val`.
+record may include `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `hard_replay` summaries alongside
+`train` and `val`.
 
 Additional outputs:
 
@@ -238,8 +256,9 @@ Additional outputs:
 
 `metadata/modules.yaml` is written during training only. It stores the parsed YAML mapping for each
 research module that is effectively enabled for the selected architecture, using keys such as
-`mdmbpp`, `rasd`, `hard_replay`, and `tfm`. If no research module is enabled, the file contains an empty
-mapping. `metadata/run.json` also records the resolved module config paths used by that run.
+`mdmbpp`, `rasd`, `hard_replay`, `tfm`, and `fntdm`. If no research module is enabled, the file
+contains an empty mapping. `metadata/run.json` also records the resolved module config paths used by
+that run.
 
 Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
 filtered with `score > 0.25`, GT/prediction pairs use global one-to-one matching at `IoU > 0.45`,
@@ -275,7 +294,8 @@ uv run scripts/train.py \
   --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
   --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
-  --tfm-config modules/cfg/tfm.yaml
+  --tfm-config modules/cfg/tfm.yaml \
+  --fntdm-config modules/cfg/fntdm.yaml
 
 uv run scripts/eval.py \
   --config scripts/cfg/eval.yaml \

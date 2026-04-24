@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `rasd`, and `tfm` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `rasd`, `tfm`, and `fntdm` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in
 `scripts/runtime/hard_replay.py` because it operates at the data-loading layer.
 
@@ -29,8 +29,8 @@ models:
 
 For parallel experiments, prefer per-run config files instead of editing the global YAML files.
 `scripts/train.py` accepts `--mdmb-config`, `--mdmbpp-config`, `--rasd-config`,
-`--hard-replay-config`, and `--tfm-config`; those paths override the defaults for that run only and
-are also used when writing `metadata/modules.yaml`.
+`--hard-replay-config`, `--tfm-config`, and `--fntdm-config`; those paths override the defaults for
+that run only and are also used when writing `metadata/modules.yaml`.
 
 ## Module Overview
 
@@ -163,22 +163,51 @@ Current scope:
 - When `confuser.enabled` is true, `cls_confusion` relapse targets also use wrong-class
   `MDMBPlusEntry.topk_candidates` as detached contrastive negatives
 
+### FN-TDM - False-Negative Transition Direction Memory (`modules/nn/fntdm.py`)
+
+Training-time direction memory for false-negative recovery transitions.
+
+- Hooks: `start_epoch()`, `end_epoch()`
+- Epoch-end mining hook: `FCOSWrapper.mine_fntdm_batch(...)`
+- Training path: FCOS adds an `fntdm` auxiliary loss after the base FCOS loss
+- Config: `modules/cfg/fntdm.yaml`
+- Arch support: FCOS
+
+Implemented V0 components:
+
+- HTM: epoch-end full-train mining of `FN -> TP` GT transitions from post-processed predictions
+- TDB: class-wise quality-gated top-K transition direction bank with `last`, `topk`, and `topk_age`
+  retrieval variants
+- TCS: current hard-GT selection from FCOS assigned positive classification/centerness confidence
+- TAL: anchor-shift cosine auxiliary loss using GT ROIAlign features and a shared projection head
+
+Current scope:
+
+- FCOS only
+- Training-only; inference, NMS, score thresholds, and FCOS assignment are unchanged
+- GT identity prefers `annotation_ids` / `gt_ids` supplied by the COCO data loader
+- HTM mining is intentionally expensive: one extra full train-set inference pass per mining epoch
+  on rank 0 under DDP, followed by FN-TDM state synchronization
+
 ## Runtime Integration
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, and `tfm` from `modules/cfg/*.yaml` or per-run CLI
-   config overrides.
-2. FCOS forward computes the base detection loss, refreshes TFM when enabled, and optionally adds `rasd`.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, `tfm`, and `fntdm` from `modules/cfg/*.yaml` or
+   per-run CLI config overrides.
+2. FCOS forward computes the base detection loss, refreshes TFM when enabled, and optionally adds
+   `rasd` and `fntdm`.
 3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.
-6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
+6. `engine.fit()` calls module epoch hooks, runs FN-TDM epoch-end mining when enabled, and refreshes
+   Hard Replay from `model.mdmbpp`.
 
-In multi-GPU DDP training, FCOS/MDMB++/RASD/TFM run independently on each rank during the epoch. At
-the epoch boundary, MDMB, MDMB++, and TFM `extra_state` payloads are gathered, merged by image/GT
-identity on rank 0, and broadcast back to every rank. This keeps the next epoch's Hard Replay
-planner, RASD teacher lookup, and TFM risk lookup based on the same global memory while avoiding
+In multi-GPU DDP training, FCOS/MDMB++/RASD/TFM/FN-TDM training losses run independently on each
+rank during the epoch. At the epoch boundary, MDMB, MDMB++, TFM, and FN-TDM `extra_state` payloads
+are gathered, merged by image/GT identity on rank 0, and broadcast back to every rank. FN-TDM HTM
+mining itself runs on rank 0 in V0. This keeps the next epoch's Hard Replay planner, RASD teacher
+lookup, TFM risk lookup, and FN-TDM direction bank based on the same global memory while avoiding
 per-step memory synchronization.
 
 Train metadata also snapshots active research-module YAML into
@@ -194,3 +223,4 @@ after architecture-specific overrides are applied.
 | Hard Replay | yes | no | no |
 | RASD | yes | no | no |
 | TFM | yes | no | no |
+| FN-TDM | yes | no | no |

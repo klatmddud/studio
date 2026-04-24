@@ -259,6 +259,20 @@ def build_train_dataloaders(
     return train_loader, val_loader
 
 
+def build_train_mining_dataloader(config: dict[str, Any]) -> DataLoader[Any]:
+    dataset = CocoDetectionDataset(
+        config["data"]["train_images"],
+        config["data"]["train_annotations"],
+    )
+    return _build_loader(
+        dataset,
+        batch_size=config["loader"]["batch_size"],
+        num_workers=config["loader"]["num_workers"],
+        pin_memory=config["loader"]["pin_memory"],
+        shuffle=False,
+    )
+
+
 def build_eval_dataloader(config: dict[str, Any]) -> DataLoader[Any]:
     dataset = CocoDetectionDataset(
         config["data"]["images"],
@@ -389,6 +403,7 @@ def _build_target(
     labels: list[int] = []
     areas: list[float] = []
     crowds: list[int] = []
+    annotation_ids: list[int] = []
 
     for annotation in annotations:
         x, y, w, h = annotation.get("bbox", [0.0, 0.0, 0.0, 0.0])
@@ -407,17 +422,23 @@ def _build_target(
         labels.append(category_id)
         areas.append(float(annotation.get("area", (x2 - x1) * (y2 - y1))))
         crowds.append(int(annotation.get("iscrowd", 0)))
+        try:
+            annotation_ids.append(int(annotation.get("id", -1)))
+        except (TypeError, ValueError):
+            annotation_ids.append(-1)
 
     if boxes:
         boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
         labels_tensor = torch.tensor(labels, dtype=torch.int64)
         area_tensor = torch.tensor(areas, dtype=torch.float32)
         crowd_tensor = torch.tensor(crowds, dtype=torch.int64)
+        annotation_ids_tensor = torch.tensor(annotation_ids, dtype=torch.int64)
     else:
         boxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
         labels_tensor = torch.zeros((0,), dtype=torch.int64)
         area_tensor = torch.zeros((0,), dtype=torch.float32)
         crowd_tensor = torch.zeros((0,), dtype=torch.int64)
+        annotation_ids_tensor = torch.zeros((0,), dtype=torch.int64)
 
     return {
         "boxes": boxes_tensor,
@@ -425,6 +446,8 @@ def _build_target(
         "image_id": torch.tensor(image_id, dtype=torch.int64),
         "area": area_tensor,
         "iscrowd": crowd_tensor,
+        "annotation_ids": annotation_ids_tensor,
+        "gt_ids": annotation_ids_tensor,
     }
 
 
