@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, and `rasd` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `rasd`, and `tfm` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in
 `scripts/runtime/hard_replay.py` because it operates at the data-loading layer.
 
@@ -28,9 +28,9 @@ models:
 ```
 
 For parallel experiments, prefer per-run config files instead of editing the global YAML files.
-`scripts/train.py` accepts `--mdmb-config`, `--mdmbpp-config`, `--rasd-config`, and
-`--hard-replay-config`; those paths override the defaults for that run only and are also used when
-writing `metadata/modules.yaml`.
+`scripts/train.py` accepts `--mdmb-config`, `--mdmbpp-config`, `--rasd-config`,
+`--hard-replay-config`, and `--tfm-config`; those paths override the defaults for that run only and
+are also used when writing `metadata/modules.yaml`.
 
 ## Module Overview
 
@@ -116,6 +116,27 @@ Important behavior:
   consumes a disjoint padded slice of global batch numbers so every rank runs the same number of
   optimizer steps.
 
+### TFM - Temporal Failure Memory (`modules/nn/tfm.py`)
+
+Lightweight per-GT temporal memory for TAMR experiments. TFM is intended to keep the useful
+longitudinal state from MDMB++ while avoiding post-step inference and dense candidate-summary
+storage.
+
+- Hooks: `start_epoch()`, `end_epoch()`
+- Update API: `tfm.update(...)`
+- Summary: `tfm.summary()`
+- Config: `modules/cfg/tfm.yaml`
+- Arch support: FCOS
+
+Key state:
+
+- `TFMRecord`: persistent per-GT state with miss streak, relapse count, last failure type, and risk
+- `TFMSupportPrototype`: optional compact feature teacher for anti-relapse distillation
+- `TFMRiskConfig`: bounded temporal risk scoring from miss/recovery/relapse history
+
+TFM is refreshed inside the normal FCOS training forward from assignment, classification,
+localization, and centerness signals. It does not trigger the MDMB/MDMB++ post-step inference pass.
+
 ### RASD - Relapse-Aware Support Distillation (`modules/nn/rasd.py`)
 
 Training-time support distillation for relapse GTs stored in `MDMB++`.
@@ -142,18 +163,19 @@ Current scope:
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, and `rasd` from `modules/cfg/*.yaml` or per-run CLI
+1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, and `tfm` from `modules/cfg/*.yaml` or per-run CLI
    config overrides.
-2. FCOS forward computes the base detection loss and optionally adds `rasd`.
+2. FCOS forward computes the base detection loss, refreshes TFM when enabled, and optionally adds `rasd`.
 3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.
 6. `engine.fit()` calls module epoch hooks and refreshes Hard Replay from `model.mdmbpp`.
 
-In multi-GPU DDP training, FCOS/MDMB++/RASD run independently on each rank during the epoch. At the
-epoch boundary, MDMB and MDMB++ `extra_state` payloads are gathered, merged by image/GT identity on
-rank 0, and broadcast back to every rank. This keeps the next epoch's Hard Replay planner and RASD
-teacher lookup based on the same global memory while avoiding per-step memory synchronization.
+In multi-GPU DDP training, FCOS/MDMB++/RASD/TFM run independently on each rank during the epoch. At
+the epoch boundary, MDMB, MDMB++, and TFM `extra_state` payloads are gathered, merged by image/GT
+identity on rank 0, and broadcast back to every rank. This keeps the next epoch's Hard Replay
+planner, RASD teacher lookup, and TFM risk lookup based on the same global memory while avoiding
+per-step memory synchronization.
 
 Train metadata also snapshots active research-module YAML into
 `{output_dir}/metadata/modules.yaml`. The file includes only modules that are effectively enabled
@@ -167,3 +189,4 @@ after architecture-specific overrides are applied.
 | MDMB++ | yes | no | no |
 | Hard Replay | yes | no | no |
 | RASD | yes | no | no |
+| TFM | yes | no | no |

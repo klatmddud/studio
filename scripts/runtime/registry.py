@@ -9,6 +9,7 @@ from modules.nn import (
     build_mdmb_from_yaml,
     build_mdmbpp_from_yaml,
     build_rasd_from_yaml,
+    build_tfm_from_yaml,
 )
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
@@ -34,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MDMB_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmb"]
 MDMBPP_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmbpp"]
 RASD_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["rasd"]
+TFM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["tfm"]
 
 
 def normalize_arch(raw_arch: str) -> str:
@@ -64,6 +66,7 @@ def build_model_from_config(
     mdmb = _build_mdmb(normalized_arch, module_paths["mdmb"])
     mdmbpp = _build_mdmbpp(normalized_arch, module_paths["mdmbpp"])
     rasd = _build_rasd(normalized_arch, module_paths["rasd"])
+    tfm = _build_tfm(normalized_arch, module_paths["tfm"])
     if normalized_arch == "fcos":
         if rasd is not None and mdmbpp is None:
             raise ValueError("RASD requires MDMB++ to be enabled for FCOS.")
@@ -76,6 +79,7 @@ def build_model_from_config(
             mdmb=mdmb,
             mdmbpp=mdmbpp,
             rasd=rasd,
+            tfm=tfm,
         )
     return builder(model_config, mdmb=mdmb)
 
@@ -127,3 +131,12 @@ def _build_rasd(arch: str, config_path: str | Path) -> nn.Module | None:
     if not path.is_file():
         return None
     return build_rasd_from_yaml(path, arch=arch)
+
+
+def _build_tfm(arch: str, config_path: str | Path) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    path = Path(config_path)
+    if not path.is_file():
+        return None
+    return build_tfm_from_yaml(path, arch=arch)

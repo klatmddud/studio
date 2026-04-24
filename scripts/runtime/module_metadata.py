@@ -9,6 +9,7 @@ from modules.nn import (
     load_mdmb_config,
     load_mdmbpp_config,
     load_rasd_config,
+    load_tfm_config,
     normalize_arch,
 )
 
@@ -24,6 +25,7 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "mdmbpp": load_mdmbpp_config,
     "rasd": load_rasd_config,
     "hard_replay": load_hard_replay_config,
+    "tfm": load_tfm_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
@@ -31,6 +33,7 @@ _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "mdmbpp": {"fcos"},
     "rasd": {"fcos"},
     "hard_replay": None,
+    "tfm": {"fcos"},
 }
 
 
@@ -43,7 +46,7 @@ def collect_enabled_module_configs(
     paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay"):
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm"):
         supported_arches = _ARCH_SUPPORT[name]
         if supported_arches is not None and normalized_arch not in supported_arches:
             continue

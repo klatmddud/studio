@@ -18,6 +18,7 @@ from modules.nn import (
     MDMBPlus,
     PerImageCandidateSummary,
     RelapseAwareSupportDistillation,
+    TemporalFailureMemory,
     pool_multiscale_box_features,
 )
 from modules.nn.mdmb import MissedDetectionMemoryBank, normalize_xyxy_boxes
@@ -48,12 +49,12 @@ def _has_replay_box_weights(targets: list[dict[str, torch.Tensor]] | None) -> bo
 
 class MDMBFCOS(FCOS):
     """
-    FCOS variant with MDMB/MDMB++ memory updates and optional UMR training modules.
+    FCOS variant with MDMB/MDMB++/TFM memory updates and optional UMR training modules.
 
     During training the wrapper can add RASD support-distillation loss and
-    apply replay-aware per-GT loss weights. After optimizer.step(), it runs an
-    extra no-grad inference pass to refresh MDMB and MDMB++ state from final
-    detections.
+    apply replay-aware per-GT loss weights. TFM is refreshed from the normal
+    training forward. After optimizer.step(), the wrapper runs an extra no-grad
+    inference pass only when MDMB or MDMB++ needs final-detection state.
     """
 
     def __init__(
@@ -62,12 +63,14 @@ class MDMBFCOS(FCOS):
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
+        tfm: TemporalFailureMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mdmb_ref = weakref.ref(mdmb) if mdmb is not None else None
         self._mdmbpp_ref = weakref.ref(mdmbpp) if mdmbpp is not None else None
         self._rasd_ref = weakref.ref(rasd) if rasd is not None else None
+        self._tfm_ref = weakref.ref(tfm) if tfm is not None else None
 
     def forward(
         self,
@@ -138,6 +141,15 @@ class MDMBFCOS(FCOS):
                     anchors=anchors,
                     matched_idxs=matched_idxs,
                 )
+            self._refresh_tfm_from_training_forward(
+                targets=targets,
+                image_shapes=images.image_sizes,
+                features=features,
+                head_outputs=head_outputs,
+                anchors=anchors,
+                matched_idxs=matched_idxs,
+                num_anchors_per_level=num_anchors_per_level,
+            )
 
             rasd = self._get_rasd()
             if rasd is not None and rasd.should_apply(mdmbpp=mdmbpp):
@@ -372,6 +384,197 @@ class MDMBFCOS(FCOS):
         lr = torch.minimum(left, right).clamp(min=0.0) / torch.maximum(left, right).clamp(min=eps)
         tb = torch.minimum(top, bottom).clamp(min=0.0) / torch.maximum(top, bottom).clamp(min=eps)
         return torch.sqrt((lr * tb).clamp(min=0.0))
+
+    @torch.no_grad()
+    def _refresh_tfm_from_training_forward(
+        self,
+        *,
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+        features: OrderedDict[str, torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        num_anchors_per_level: list[int],
+    ) -> None:
+        tfm = self._get_tfm()
+        if tfm is None or not tfm.should_update():
+            return
+
+        flat_features = None
+        if bool(tfm.config.support.enabled):
+            flat_features = self._flatten_tfm_feature_levels(
+                features=features,
+                num_anchors_per_level=num_anchors_per_level,
+            )
+
+        image_ids = []
+        gt_boxes_list = []
+        gt_labels_list = []
+        kept_image_shapes = []
+        gt_states_list = []
+        quality_list = []
+        gt_ids_list = []
+        support_feature_list = [] if flat_features is not None else None
+
+        for image_index, target in enumerate(targets):
+            if _is_replay_target(target):
+                continue
+            image_ids.append(
+                target.get("image_id", torch.tensor(image_index, device=target["boxes"].device))
+            )
+            gt_boxes_list.append(target["boxes"])
+            gt_labels_list.append(target["labels"])
+            kept_image_shapes.append(image_shapes[image_index])
+            gt_ids_list.append(self._get_tfm_gt_ids(target))
+
+            states, qualities, best_point_indices = self._collect_tfm_states_for_image(
+                image_index=image_index,
+                target=target,
+                head_outputs=head_outputs,
+                anchors_per_image=anchors[image_index],
+                matched_idxs_per_image=matched_idxs[image_index],
+                detected_quality_threshold=float(tfm.config.detected_quality_threshold),
+            )
+            gt_states_list.append(states)
+            quality_list.append(qualities)
+
+            if support_feature_list is not None:
+                image_features: dict[int, torch.Tensor] = {}
+                for gt_index, point_index in best_point_indices.items():
+                    image_features[int(gt_index)] = flat_features[image_index, int(point_index)].detach().cpu()
+                support_feature_list.append(image_features)
+
+        if not image_ids:
+            return
+
+        tfm.update(
+            image_ids=image_ids,
+            gt_boxes_list=gt_boxes_list,
+            gt_labels_list=gt_labels_list,
+            image_shapes=kept_image_shapes,
+            gt_states_list=gt_states_list,
+            quality_list=quality_list,
+            gt_ids_list=gt_ids_list,
+            support_feature_list=support_feature_list,
+            support_quality_list=quality_list if support_feature_list is not None else None,
+        )
+
+    def _collect_tfm_states_for_image(
+        self,
+        *,
+        image_index: int,
+        target: dict[str, torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors_per_image: torch.Tensor,
+        matched_idxs_per_image: torch.Tensor,
+        detected_quality_threshold: float,
+    ) -> tuple[list[str], list[float], dict[int, int]]:
+        gt_boxes = target["boxes"]
+        gt_labels = target["labels"].to(dtype=torch.int64)
+        num_gt = int(gt_boxes.shape[0])
+        states = ["missing_assignment"] * num_gt
+        qualities = [0.0] * num_gt
+        best_point_indices: dict[int, int] = {}
+        if num_gt == 0:
+            return states, qualities, best_point_indices
+
+        cls_logits = head_outputs["cls_logits"][image_index]
+        bbox_regression = head_outputs["bbox_regression"][image_index]
+        bbox_ctrness = head_outputs["bbox_ctrness"][image_index].flatten()
+        pos_mask = matched_idxs_per_image >= 0
+        if not bool(pos_mask.any().item()):
+            return states, qualities, best_point_indices
+
+        pos_indices = torch.where(pos_mask)[0]
+        matched_gt_indices = matched_idxs_per_image[pos_mask].to(dtype=torch.long)
+        pred_boxes = self._decode_boxes(
+            box_regression=bbox_regression[pos_mask],
+            anchors=anchors_per_image[pos_mask],
+        )
+        matched_gt_boxes = gt_boxes[matched_gt_indices]
+        ious = self._aligned_box_iou(pred_boxes, matched_gt_boxes).clamp(min=0.0, max=1.0)
+        cls_probs = torch.sigmoid(cls_logits[pos_mask])
+        ctr_probs = torch.sigmoid(bbox_ctrness[pos_mask]).clamp(min=0.0, max=1.0)
+
+        for gt_index in range(num_gt):
+            gt_pos_mask = matched_gt_indices == gt_index
+            if not bool(gt_pos_mask.any().item()):
+                continue
+            gt_label = int(gt_labels[gt_index].item())
+            if gt_label < 0 or gt_label >= cls_probs.shape[1]:
+                states[gt_index] = "unknown"
+                continue
+
+            local_pos = torch.where(gt_pos_mask)[0]
+            gt_cls_scores = cls_probs[local_pos, gt_label]
+            gt_ious = ious[local_pos]
+            gt_ctr = ctr_probs[local_pos]
+            quality_scores = (gt_cls_scores * gt_ious * gt_ctr).detach()
+            best_local = int(quality_scores.argmax().item())
+            best_quality = float(quality_scores[best_local].item())
+            best_point_indices[gt_index] = int(pos_indices[local_pos[best_local]].item())
+            qualities[gt_index] = best_quality
+
+            best_cls = float(gt_cls_scores.max().item())
+            best_iou = float(gt_ious.max().item())
+            competitor = self._max_competing_class_score(cls_probs[local_pos], gt_label)
+            if best_quality >= detected_quality_threshold:
+                states[gt_index] = "detected_like"
+            elif competitor > best_cls and competitor >= 0.25:
+                states[gt_index] = "classification_confusion"
+            elif best_iou < 0.5:
+                states[gt_index] = "localization_weak"
+            else:
+                states[gt_index] = "score_weak"
+
+        return states, qualities, best_point_indices
+
+    def _flatten_tfm_feature_levels(
+        self,
+        *,
+        features: OrderedDict[str, torch.Tensor],
+        num_anchors_per_level: list[int],
+    ) -> torch.Tensor | None:
+        flattened = []
+        for feature, expected_points in zip(features.values(), num_anchors_per_level, strict=True):
+            level_features = feature.permute(0, 2, 3, 1).reshape(feature.shape[0], -1, feature.shape[1])
+            if int(level_features.shape[1]) != int(expected_points):
+                return None
+            flattened.append(level_features)
+        if not flattened:
+            return None
+        return torch.cat(flattened, dim=1)
+
+    def _max_competing_class_score(self, scores: torch.Tensor, gt_label: int) -> float:
+        if scores.shape[1] <= 1:
+            return 0.0
+        competitor_scores = scores.clone()
+        competitor_scores[:, int(gt_label)] = -1.0
+        return float(competitor_scores.max().item())
+
+    def _aligned_box_iou(self, boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+        if boxes1.shape != boxes2.shape:
+            raise ValueError(
+                "FCOS aligned IoU expects matching box tensors. "
+                f"Got {tuple(boxes1.shape)} and {tuple(boxes2.shape)}."
+            )
+        x1 = torch.maximum(boxes1[:, 0], boxes2[:, 0])
+        y1 = torch.maximum(boxes1[:, 1], boxes2[:, 1])
+        x2 = torch.minimum(boxes1[:, 2], boxes2[:, 2])
+        y2 = torch.minimum(boxes1[:, 3], boxes2[:, 3])
+        inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
+        area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
+        union = (area1 + area2 - inter).clamp(min=torch.finfo(boxes1.dtype).eps)
+        return inter / union
+
+    def _get_tfm_gt_ids(self, target: dict[str, torch.Tensor]) -> torch.Tensor | None:
+        for key in ("gt_ids", "annotation_ids", "ann_ids"):
+            value = target.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+        return None
 
     def _decode_boxes(
         self,
@@ -1014,6 +1217,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._rasd_ref()
 
+    def _get_tfm(self) -> TemporalFailureMemory | None:
+        if self._tfm_ref is None:
+            return None
+        return self._tfm_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -1030,12 +1238,14 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
+        tfm: TemporalFailureMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.mdmb = mdmb
         self.mdmbpp = mdmbpp
         self.rasd = rasd
+        self.tfm = tfm
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -1046,13 +1256,13 @@ class FCOSWrapper(BaseDetectionWrapper):
         )
 
         head = cfg.get("head", {})
-        tfm = cfg.get("transform", {})
+        transform_cfg = cfg.get("transform", {})
 
         self.model = MDMBFCOS(
             backbone=backbone,
             num_classes=cfg.get("num_classes", 91),
-            min_size=tfm.get("min_size", 800),
-            max_size=tfm.get("max_size", 1333),
+            min_size=transform_cfg.get("min_size", 800),
+            max_size=transform_cfg.get("max_size", 1333),
             score_thresh=head.get("score_thresh", 0.2),
             nms_thresh=head.get("nms_thresh", 0.6),
             detections_per_img=head.get("detections_per_img", 100),
@@ -1060,6 +1270,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmb=mdmb,
             mdmbpp=mdmbpp,
             rasd=rasd,
+            tfm=tfm,
             **kwargs,
         )
 
@@ -1085,6 +1296,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         mdmb: MissedDetectionMemoryBank | None = None,
         mdmbpp: MDMBPlus | None = None,
         rasd: RelapseAwareSupportDistillation | None = None,
+        tfm: TemporalFailureMemory | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -1095,5 +1307,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             mdmb=mdmb,
             mdmbpp=mdmbpp,
             rasd=rasd,
+            tfm=tfm,
             **kwargs,
         )

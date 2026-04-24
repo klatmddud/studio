@@ -7,10 +7,11 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 ### FCOS (`fcos.py` -> `MDMBFCOS`)
 
 - Single-stage anchor-free detector
-- Integrates MDMB, MDMB++, and RASD modules when enabled in `modules/cfg/`
+- Integrates MDMB, MDMB++, RASD, and TFM modules when enabled in `modules/cfg/`
 - Applies Hard Replay per-GT loss weights when replay metadata is present in the batch
 - RASD adds a training-only `rasd` auxiliary loss for relapse GTs with stored MDMB++ support features
-- `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass, then refreshes MDMB / MDMB++ state
+- TFM refreshes from the normal training forward and adds no inference-time branch
+- `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass only for MDMB / MDMB++ state
 - Forward in train mode: returns `loss_dict`; in eval mode: returns predictions
 
 ### Faster R-CNN (`fasterrcnn.py`)

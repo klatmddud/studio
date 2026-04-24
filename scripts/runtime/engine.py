@@ -125,6 +125,7 @@ def fit(
         _call_model_hook(model, "mdmb", "start_epoch", epoch + 1)
         _call_model_hook(model, "mdmbpp", "start_epoch", epoch + 1)
         _call_model_hook(model, "rasd", "start_epoch", epoch + 1)
+        _call_model_hook(model, "tfm", "start_epoch", epoch + 1)
         _set_data_loader_epoch(train_loader, epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
         train_metrics = train_one_epoch(
@@ -143,11 +144,13 @@ def fit(
         _call_model_hook(model, "mdmb", "end_epoch", epoch + 1)
         _call_model_hook(model, "mdmbpp", "end_epoch", epoch + 1)
         _call_model_hook(model, "rasd", "end_epoch", epoch + 1)
+        _call_model_hook(model, "tfm", "end_epoch", epoch + 1)
         local_summaries = {
             "mdmb": _get_mdmb_summary(model),
             "mdmbpp": _get_module_summary(model, "mdmbpp"),
             "rasd": _get_module_summary(model, "rasd"),
             "hard_replay": _get_hard_replay_summary(train_loader),
+            "tfm": _get_module_summary(model, "tfm"),
         }
         merged_epoch_summaries = _merge_epoch_summaries(local_summaries, distributed)
         _synchronize_research_memory(model, distributed)
@@ -163,6 +166,7 @@ def fit(
         )
         rasd_summary = merged_epoch_summaries.get("rasd")
         hard_replay_summary = merged_epoch_summaries.get("hard_replay")
+        tfm_summary = _get_module_summary(model, "tfm")
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -176,6 +180,8 @@ def fit(
             record["rasd"] = rasd_summary
         if hard_replay_summary is not None:
             record["hard_replay"] = hard_replay_summary
+        if tfm_summary is not None:
+            record["tfm"] = tfm_summary
 
         should_eval = (
             val_loader is not None
@@ -603,6 +609,11 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         parts.append(f"rasd_losses={int(rasd_summary.get('losses', 0))}")
         parts.append(f"rasd_targets={int(rasd_summary.get('targets', 0))}")
 
+    tfm_summary = record.get("tfm")
+    if isinstance(tfm_summary, dict):
+        parts.append(f"tfm_records={int(tfm_summary.get('num_records', 0))}")
+        parts.append(f"tfm_mean_risk={float(tfm_summary.get('mean_risk', 0.0)):.3f}")
+
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -657,7 +668,7 @@ def _merge_epoch_summaries(
 ) -> dict[str, dict[str, Any] | None]:
     gathered = all_gather_object(dict(local_summaries), distributed)
     merged: dict[str, dict[str, Any] | None] = {}
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay"):
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm"):
         summaries = [
             item.get(name)
             for item in gathered
@@ -706,6 +717,30 @@ def _merge_summary_group(
                 "support_kept_this_epoch",
             ),
         )
+        return result
+    if name == "tfm":
+        _merge_count_keys(
+            result,
+            summaries,
+            (
+                "num_records",
+                "num_images",
+                "num_current_failures",
+                "num_support",
+            ),
+        )
+        _merge_weighted_mean(result, summaries, "mean_risk", "num_records")
+        result["global_max_miss_streak"] = max(
+            int(summary.get("global_max_miss_streak", 0)) for summary in summaries
+        )
+        state_counts: defaultdict[str, int] = defaultdict(int)
+        for summary in summaries:
+            raw_counts = summary.get("state_counts", {})
+            if not isinstance(raw_counts, Mapping):
+                continue
+            for state, count in raw_counts.items():
+                state_counts[str(state)] += int(count)
+        result["state_counts"] = dict(state_counts)
         return result
     if name == "hard_replay":
         _merge_count_keys(
@@ -793,6 +828,7 @@ def _synchronize_research_memory(
     sync_specs = (
         ("mdmb", _merge_mdmb_states),
         ("mdmbpp", _merge_mdmbpp_states),
+        ("tfm", _merge_tfm_states),
     )
     for attribute_name, merge_fn in sync_specs:
         module = getattr(base_model, attribute_name, None)
@@ -925,6 +961,50 @@ def _merge_mdmbpp_states(states: list[Any]) -> dict[str, Any] | None:
     return merged
 
 
+def _merge_tfm_states(states: list[Any]) -> dict[str, Any] | None:
+    valid = [state for state in states if isinstance(state, Mapping)]
+    if not valid:
+        return None
+    merged = dict(valid[0])
+    merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
+    merged["global_max_miss_streak"] = max(
+        int(state.get("global_max_miss_streak", 0)) for state in valid
+    )
+
+    records: dict[str, dict[str, Any]] = {}
+    for state in valid:
+        raw_records = state.get("records", {})
+        if not isinstance(raw_records, Mapping):
+            continue
+        for gt_uid, record in raw_records.items():
+            if not isinstance(record, Mapping):
+                continue
+            key = str(gt_uid)
+            candidate = dict(record)
+            current = records.get(key)
+            if current is None:
+                records[key] = candidate
+                continue
+            selected = _select_tfm_record(current, candidate)
+            selected["support"] = _select_support_snapshot(
+                current.get("support"),
+                candidate.get("support"),
+            )
+            records[key] = selected
+
+    image_index: defaultdict[str, list[str]] = defaultdict(list)
+    for gt_uid, record in records.items():
+        image_id = str(record.get("image_id", ""))
+        if image_id:
+            image_index[image_id].append(gt_uid)
+    merged["records"] = records
+    merged["image_index"] = {
+        image_id: sorted(gt_uids)
+        for image_id, gt_uids in image_index.items()
+    }
+    return merged
+
+
 def _mdmb_entry_key(entry: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         str(entry.get("image_id", "")),
@@ -974,6 +1054,15 @@ def _select_mdmbpp_entry(
     return dict(left if left_priority >= right_priority else right)
 
 
+def _select_tfm_record(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> dict[str, Any]:
+    left_priority = _tfm_record_priority(left)
+    right_priority = _tfm_record_priority(right)
+    return dict(left if left_priority >= right_priority else right)
+
+
 def _mdmbpp_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
     support = record.get("support")
     return (
@@ -996,6 +1085,17 @@ def _mdmbpp_entry_priority(
         float(entry.get("consecutive_miss_count", 0)),
         float(entry.get("total_miss_count", 0)),
         _support_priority(entry.get("support"))[1],
+    )
+
+
+def _tfm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
+    return (
+        float(record.get("last_seen_epoch", 0)),
+        float(record.get("risk", 0.0)),
+        float(record.get("miss_streak", 0)),
+        float(record.get("total_miss", 0)),
+        float(record.get("relapse_count", 0)),
+        _support_priority(record.get("support"))[1],
     )
 
 
@@ -1180,9 +1280,11 @@ def _is_optional_mdmb_key(key: str) -> bool:
         key == "mdmb._extra_state"
         or key == "mdmbpp._extra_state"
         or key == "rasd._extra_state"
+        or key == "tfm._extra_state"
         or key.startswith("mdmb.")
         or key.startswith("mdmbpp.")
         or key.startswith("rasd.")
+        or key.startswith("tfm.")
     )
 
 

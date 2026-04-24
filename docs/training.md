@@ -85,10 +85,10 @@ Main training loop:
 1. Build optimizer, scheduler, and grad scaler.
 2. Optionally resume from `checkpoint.resume`.
 3. For each epoch:
-   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, and `rasd` modules.
+   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, and `tfm` modules.
    - Refresh the Hard Replay `ReplayIndex` from `model.mdmbpp` if the train loader has a replay controller.
    - Run `train_one_epoch()`.
-   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, and `rasd`.
+   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, and `tfm`.
    - Optionally evaluate on the validation loader.
    - Save `best.pt` and `last.pt` according to checkpoint settings.
    - Append the epoch record to `history.json`.
@@ -96,6 +96,10 @@ Main training loop:
 Inside `train_one_epoch()`, FCOS may run `after_optimizer_step()` after every optimizer step.
 That post-step hook performs one no-grad inference pass and refreshes `mdmb` and `mdmbpp`
 state from the updated model.
+
+When TFM is enabled, FCOS refreshes `tfm` inside the normal training forward from assignment,
+classification, localization, and centerness signals. TFM does not require the post-step inference
+pass and does not change inference behavior.
 
 When RASD is enabled, FCOS reads relapse entries from `mdmbpp`, pools current GT features from the
 FPN, and appends a `rasd` auxiliary loss when matching support features exist. RASD is training-only
@@ -128,7 +132,8 @@ uv run scripts/train.py \
   --mdmb-config scripts/bash/mdmbpp_only/cfg/mdmb_disabled.yaml \
   --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
-  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml
+  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
+  --tfm-config modules/cfg/tfm.yaml
 ```
 
 The same resolved paths are used for model construction, Hard Replay DataLoader setup, DDP worker
@@ -156,10 +161,10 @@ DDP currently uses the NCCL backend and requires explicit CUDA ids such as `cuda
 multi-device training and multi-device evaluation are not supported. Validation during training runs
 on rank 0 only while the other workers wait at a barrier.
 
-Research module state is synchronized once per epoch. MDMB/MDMB++ local memory states are gathered
-after the epoch, merged on rank 0, and broadcast back before the next epoch. RASD summary counters
-are reduced for logging, while RASD itself remains training-only and stateless apart from epoch
-bookkeeping.
+Research module state is synchronized once per epoch. MDMB/MDMB++/TFM local memory states are
+gathered after the epoch, merged on rank 0, and broadcast back before the next epoch. RASD summary
+counters are reduced for logging, while RASD itself remains training-only and stateless apart from
+epoch bookkeeping.
 
 Current replay statistics include:
 
@@ -212,7 +217,7 @@ COCO bbox metrics available for `checkpoint.monitor` and `metrics.primary`:
 ## Output Artifacts
 
 `{output_dir}/history.json` stores per-epoch training and validation records. When enabled, the
-record may include `mdmb`, `mdmbpp`, `rasd`, and `hard_replay` summaries alongside `train` and
+record may include `mdmb`, `mdmbpp`, `rasd`, `tfm`, and `hard_replay` summaries alongside `train` and
 `val`.
 
 Additional outputs:
@@ -228,7 +233,7 @@ Additional outputs:
 
 `metadata/modules.yaml` is written during training only. It stores the parsed YAML mapping for each
 research module that is effectively enabled for the selected architecture, using keys such as
-`mdmbpp`, `rasd`, and `hard_replay`. If no research module is enabled, the file contains an empty
+`mdmbpp`, `rasd`, `hard_replay`, and `tfm`. If no research module is enabled, the file contains an empty
 mapping. `metadata/run.json` also records the resolved module config paths used by that run.
 
 Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
@@ -264,7 +269,8 @@ uv run scripts/train.py \
   --mdmb-config scripts/bash/mdmbpp_only/cfg/mdmb_disabled.yaml \
   --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
-  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml
+  --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
+  --tfm-config modules/cfg/tfm.yaml
 
 uv run scripts/eval.py \
   --config scripts/cfg/eval.yaml \

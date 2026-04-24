@@ -29,8 +29,8 @@ models/detection/
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # Module configs (all disabled by default, including hard_replay)
-  nn/                       # Module implementations (mdmb/mdmbpp/rasd)
+  cfg/                      # Module configs (all disabled by default, including hard_replay/tfm)
+  nn/                       # Module implementations (mdmb/mdmbpp/rasd/tfm)
 
 ops/                        # Reserved for custom ops (currently empty)
 ```
