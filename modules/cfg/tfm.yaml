@@ -22,6 +22,14 @@ support:
   ema_momentum: 0.9
   max_feature_elements: 4096
 
+assignment_bias:
+  enabled: false
+  min_risk: 0.5
+  cls_weight: 1.0
+  box_weight: 1.0
+  ctr_weight: 1.0
+  max_weight: 2.0
+
 failure_type_priors:
   missing_assignment: 1.0
   classification_confusion: 0.8

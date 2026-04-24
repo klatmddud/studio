@@ -23,6 +23,13 @@ loss_weight(gt)      = 1 + gamma * risk(gt)
 Start with loss reweighting because it is least invasive. Assignment expansion should be added only
 after verifying that weights alone are insufficient.
 
+Current implementation status:
+
+- Implemented: risk-gated positive-point loss weighting for FCOS classification, box regression,
+  and centerness losses.
+- Not implemented yet: assignment radius expansion, backup positives, or positive top-k changes.
+- Config: `modules/cfg/tfm.yaml` under `assignment_bias`.
+
 ## FCOS-Oriented Variant
 
 For FCOS, apply risk to the existing positive-location path:
@@ -88,4 +95,3 @@ Mitigation:
 - clip risk and weights
 - decay risk after recovery
 - require repeated failures before applying assignment expansion
-

@@ -133,9 +133,13 @@ Key state:
 - `TFMRecord`: persistent per-GT state with miss streak, relapse count, last failure type, and risk
 - `TFMSupportPrototype`: optional compact feature teacher for anti-relapse distillation
 - `TFMRiskConfig`: bounded temporal risk scoring from miss/recovery/relapse history
+- `TFMAssignmentBiasConfig`: optional risk-gated FCOS positive-point loss weighting
 
 TFM is refreshed inside the normal FCOS training forward from assignment, classification,
 localization, and centerness signals. It does not trigger the MDMB/MDMB++ post-step inference pass.
+When `assignment_bias.enabled: true`, FCOS looks up each matched GT's previous TFM risk and
+multiplies the matched positive point's classification, box, and centerness losses by bounded
+component weights. Assignment radius expansion and backup positives are not implemented yet.
 
 ### RASD - Relapse-Aware Support Distillation (`modules/nn/rasd.py`)
 

@@ -156,6 +156,49 @@ class TFMSupportConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TFMAssignmentBiasConfig:
+    enabled: bool = False
+    min_risk: float = 0.5
+    cls_weight: float = 1.0
+    box_weight: float = 1.0
+    ctr_weight: float = 1.0
+    max_weight: float = 2.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "TFMAssignmentBiasConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            min_risk=float(data.get("min_risk", 0.5)),
+            cls_weight=float(data.get("cls_weight", 1.0)),
+            box_weight=float(data.get("box_weight", 1.0)),
+            ctr_weight=float(data.get("ctr_weight", 1.0)),
+            max_weight=float(data.get("max_weight", 2.0)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not 0.0 <= self.min_risk <= 1.0:
+            raise ValueError("TFM assignment_bias.min_risk must satisfy 0 <= value <= 1.")
+        for field_name in ("cls_weight", "box_weight", "ctr_weight"):
+            if float(getattr(self, field_name)) < 0.0:
+                raise ValueError(f"TFM assignment_bias.{field_name} must be >= 0.")
+        if self.max_weight < 1.0:
+            raise ValueError("TFM assignment_bias.max_weight must be >= 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "min_risk": self.min_risk,
+            "cls_weight": self.cls_weight,
+            "box_weight": self.box_weight,
+            "ctr_weight": self.ctr_weight,
+            "max_weight": self.max_weight,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TFMConfig:
     enabled: bool = True
     warmup_epochs: int = 0
@@ -164,6 +207,7 @@ class TFMConfig:
     max_records: int | None = None
     risk: TFMRiskConfig = field(default_factory=TFMRiskConfig)
     support: TFMSupportConfig = field(default_factory=TFMSupportConfig)
+    assignment_bias: TFMAssignmentBiasConfig = field(default_factory=TFMAssignmentBiasConfig)
     failure_type_priors: dict[str, float] = field(
         default_factory=lambda: dict(_DEFAULT_FAILURE_TYPE_PRIORS)
     )
@@ -203,6 +247,14 @@ class TFMConfig:
         if isinstance(override_support, Mapping):
             support_mapping.update(override_support)
 
+        assignment_bias_mapping: dict[str, Any] = {}
+        top_assignment_bias = data.get("assignment_bias", {})
+        if isinstance(top_assignment_bias, Mapping):
+            assignment_bias_mapping.update(top_assignment_bias)
+        override_assignment_bias = model_overrides.get("assignment_bias", {})
+        if isinstance(override_assignment_bias, Mapping):
+            assignment_bias_mapping.update(override_assignment_bias)
+
         priors = dict(_DEFAULT_FAILURE_TYPE_PRIORS)
         top_priors = data.get("failure_type_priors", {})
         if isinstance(top_priors, Mapping):
@@ -230,6 +282,7 @@ class TFMConfig:
             max_records=None if max_records is None else int(max_records),
             risk=TFMRiskConfig.from_mapping(risk_mapping),
             support=TFMSupportConfig.from_mapping(support_mapping),
+            assignment_bias=TFMAssignmentBiasConfig.from_mapping(assignment_bias_mapping),
             failure_type_priors=priors,
             arch=normalized_arch,
         )
@@ -261,6 +314,7 @@ class TFMConfig:
             "max_records": self.max_records,
             "risk": self.risk.to_dict(),
             "support": self.support.to_dict(),
+            "assignment_bias": self.assignment_bias.to_dict(),
             "failure_type_priors": dict(self.failure_type_priors),
             "arch": self.arch,
         }
@@ -603,6 +657,7 @@ class TemporalFailureMemory(nn.Module):
             "num_images": len(self._image_index),
             "num_current_failures": num_current_failures,
             "num_support": num_support,
+            "assignment_bias_enabled": self.config.assignment_bias.enabled,
             "mean_risk": risk_sum / float(max(num_records, 1)),
             "global_max_miss_streak": self._global_max_miss_streak,
             "state_counts": state_counts,

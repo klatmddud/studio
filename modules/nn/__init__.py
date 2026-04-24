@@ -40,6 +40,7 @@ from .rasd import (
 from .tfm import (
     TFM,
     TFMConfig,
+    TFMAssignmentBiasConfig,
     TFMRecord,
     TFMRiskConfig,
     TFMState,
@@ -72,6 +73,7 @@ __all__ = [
     "SupportSnapshot",
     "TFM",
     "TFMConfig",
+    "TFMAssignmentBiasConfig",
     "TFMRecord",
     "TFMRiskConfig",
     "TFMState",

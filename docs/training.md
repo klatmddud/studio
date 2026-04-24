@@ -101,6 +101,11 @@ When TFM is enabled, FCOS refreshes `tfm` inside the normal training forward fro
 classification, localization, and centerness signals. TFM does not require the post-step inference
 pass and does not change inference behavior.
 
+When `tfm.assignment_bias.enabled` is true, FCOS uses the previous TFM record for each matched GT to
+increase positive-point loss weights for high-risk GTs. The current implementation only reweights
+classification, box regression, and centerness losses; it does not change center sampling or add
+backup positives.
+
 When RASD is enabled, FCOS reads relapse entries from `mdmbpp`, pools current GT features from the
 FPN, and appends a `rasd` auxiliary loss when matching support features exist. RASD is training-only
 and does not change inference, NMS, or score thresholds.

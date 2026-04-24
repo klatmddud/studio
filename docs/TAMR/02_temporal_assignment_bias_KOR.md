@@ -23,6 +23,13 @@ loss_weight(gt)      = 1 + gamma * risk(gt)
 가장 덜 침습적인 loss reweighting부터 시작한다. Assignment expansion은 weight만으로 부족하다는 것이 확인된
 뒤 추가하는 것이 안전하다.
 
+현재 구현 상태:
+
+- 구현됨: FCOS classification, box regression, centerness loss에 대한 risk-gated positive-point
+  loss weighting.
+- 아직 미구현: assignment radius expansion, backup positive, positive top-k 변경.
+- Config: `modules/cfg/tfm.yaml`의 `assignment_bias` 섹션.
+
 ## FCOS Variant
 
 FCOS에서는 기존 positive-location path에 risk를 적용한다.
@@ -87,4 +94,3 @@ historical failure risk가 prior로 들어간다.
 - risk와 weight를 clip한다.
 - recovery 이후 risk를 decay한다.
 - 반복 실패가 확인된 뒤에만 assignment expansion을 적용한다.
-

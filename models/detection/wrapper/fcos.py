@@ -131,15 +131,19 @@ class MDMBFCOS(FCOS):
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             mdmbpp = self._get_mdmbpp()
-            use_weighted = _has_replay_box_weights(targets)
+            tfm = self._get_tfm()
+            use_tfm_bias = self._should_apply_tfm_assignment_bias(tfm)
+            use_weighted = _has_replay_box_weights(targets) or use_tfm_bias
             if not use_weighted:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
             else:
-                losses = self._compute_replay_weighted_loss_dict(
+                losses = self._compute_weighted_loss_dict(
                     targets=targets,
+                    image_shapes=images.image_sizes,
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
+                    tfm=tfm if use_tfm_bias else None,
                 )
             self._refresh_tfm_from_training_forward(
                 targets=targets,
@@ -185,13 +189,15 @@ class MDMBFCOS(FCOS):
             return losses, detections
         return self.eager_outputs(losses, detections)
 
-    def _compute_replay_weighted_loss_dict(
+    def _compute_weighted_loss_dict(
         self,
         *,
         targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
         head_outputs: dict[str, torch.Tensor],
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
+        tfm: TemporalFailureMemory | None = None,
     ) -> dict[str, torch.Tensor]:
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
@@ -234,6 +240,34 @@ class MDMBFCOS(FCOS):
                 assignments=assignments,
                 key="replay_ctr_box_weights",
             )
+            if tfm is not None:
+                cls_weights = self._apply_tfm_assignment_bias(
+                    base_weights=cls_weights,
+                    tfm=tfm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="cls",
+                )
+                reg_weights = self._apply_tfm_assignment_bias(
+                    base_weights=reg_weights,
+                    tfm=tfm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="box",
+                )
+                ctr_weights = self._apply_tfm_assignment_bias(
+                    base_weights=ctr_weights,
+                    tfm=tfm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="ctr",
+                )
 
             cls_losses_by_class = raw["cls_losses_by_class"]
             cls_weights = cls_weights.to(dtype=cls_losses_by_class.dtype)
@@ -281,6 +315,127 @@ class MDMBFCOS(FCOS):
         replay_weights = box_weights.to(device=result.device, dtype=result.dtype)[selected_gt]
         result[pos_indices] = result[pos_indices] * replay_weights
         return result
+
+    def _should_apply_tfm_assignment_bias(self, tfm: TemporalFailureMemory | None) -> bool:
+        if tfm is None:
+            return False
+        if not bool(tfm.config.assignment_bias.enabled):
+            return False
+        if len(tfm) == 0:
+            return False
+        return tfm.should_update()
+
+    def _apply_tfm_assignment_bias(
+        self,
+        *,
+        base_weights: torch.Tensor,
+        tfm: TemporalFailureMemory,
+        target: dict[str, torch.Tensor],
+        image_shape: tuple[int, int],
+        image_index: int,
+        assignments: torch.Tensor,
+        component: str,
+    ) -> torch.Tensor:
+        if _is_replay_target(target):
+            return base_weights
+
+        pos_mask = assignments >= 0
+        if not bool(pos_mask.any().item()):
+            return base_weights
+
+        risks = self._lookup_tfm_gt_risks(
+            tfm=tfm,
+            target=target,
+            image_shape=image_shape,
+            image_index=image_index,
+            device=assignments.device,
+        )
+        if risks.numel() == 0:
+            return base_weights
+
+        scale = {
+            "cls": tfm.config.assignment_bias.cls_weight,
+            "box": tfm.config.assignment_bias.box_weight,
+            "ctr": tfm.config.assignment_bias.ctr_weight,
+        }[component]
+        gt_weights = self._tfm_component_weights(risks, tfm=tfm, scale=float(scale))
+        if bool((gt_weights == 1.0).all().item()):
+            return base_weights
+
+        result = base_weights.clone()
+        gt_indices = assignments[pos_mask].to(dtype=torch.long)
+        valid = gt_indices < gt_weights.numel()
+        if not bool(valid.any().item()):
+            return result
+
+        pos_indices = torch.where(pos_mask)[0][valid]
+        selected_gt = gt_indices[valid]
+        result[pos_indices] = result[pos_indices] * gt_weights[selected_gt].to(
+            device=result.device,
+            dtype=result.dtype,
+        )
+        return result
+
+    def _lookup_tfm_gt_risks(
+        self,
+        *,
+        tfm: TemporalFailureMemory,
+        target: dict[str, torch.Tensor],
+        image_shape: tuple[int, int],
+        image_index: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        gt_boxes = target["boxes"]
+        if gt_boxes.numel() == 0:
+            return torch.empty((0,), dtype=torch.float32, device=device)
+
+        image_id = target.get("image_id", torch.tensor(image_index, device=gt_boxes.device))
+        records = tfm.get_image_records(image_id)
+        risks = torch.zeros((gt_boxes.shape[0],), dtype=torch.float32, device=device)
+        if not records:
+            return risks
+
+        gt_labels = target["labels"].to(dtype=torch.int64)
+        gt_boxes_norm = normalize_xyxy_boxes(gt_boxes, image_shape).detach().cpu()
+        record_boxes = torch.stack([record.bbox for record in records], dim=0)
+        ious = box_ops.box_iou(gt_boxes_norm, record_boxes)
+        used_records: set[int] = set()
+        threshold = float(tfm.config.record_match_threshold)
+
+        for gt_index in range(int(gt_boxes_norm.shape[0])):
+            class_id = int(gt_labels[gt_index].item())
+            best_record = None
+            best_iou = threshold
+            for record_index, record in enumerate(records):
+                if record_index in used_records or int(record.class_id) != class_id:
+                    continue
+                iou = float(ious[gt_index, record_index].item())
+                if iou > best_iou:
+                    best_iou = iou
+                    best_record = record_index
+            if best_record is None:
+                continue
+            used_records.add(best_record)
+            risks[gt_index] = float(records[best_record].risk)
+        return risks
+
+    def _tfm_component_weights(
+        self,
+        risks: torch.Tensor,
+        *,
+        tfm: TemporalFailureMemory,
+        scale: float,
+    ) -> torch.Tensor:
+        if scale <= 0.0:
+            return torch.ones_like(risks)
+        config = tfm.config.assignment_bias
+        min_risk = float(config.min_risk)
+        if min_risk >= 1.0:
+            normalized = (risks >= 1.0).to(dtype=risks.dtype)
+        else:
+            normalized = ((risks - min_risk).clamp(min=0.0) / max(1.0 - min_risk, 1e-6)).clamp(max=1.0)
+        weights = 1.0 + float(scale) * normalized
+        return weights.clamp(max=float(config.max_weight))
 
     def _compute_raw_losses_for_image(
         self,
