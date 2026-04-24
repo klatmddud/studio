@@ -1,0 +1,45 @@
+enabled: true
+beta: 1.0
+temperature: 1.0
+replay_ratio: 0.25
+max_image_weight: 5.0
+min_replay_weight: 1.0
+replacement: true
+max_replays_per_gt_per_epoch: 4
+replay_recency_window: 3
+
+object_replay:
+  enabled: false
+  crop_ratio: 0.4
+  copy_paste_ratio: 0.3
+  pair_ratio: 0.3
+  crop:
+    enabled: false
+    context_scale: 1.0
+    min_context_px: 16
+  copy_paste:
+    enabled: false
+    paste_scale: 1.0
+    max_paste_overlap: 0.3
+    max_attempts: 20
+  pair:
+    enabled: false
+    require_same_batch: true
+    min_replay_slots: 2
+
+loss:
+  enabled: false
+  cls_weight: 1.0
+  reg_weight: 1.0
+  ctr_weight: 1.0
+  crop_box_weight: 1.5
+  pasted_box_weight: 2.0
+  pair_box_weight: 1.5
+  max_weight: 3.0
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

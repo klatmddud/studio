@@ -1,0 +1,42 @@
+enabled: true
+warmup_epochs: 5
+lambda_rasd: 0.03
+temperature: 0.2
+alpha_contrastive: 1.0
+
+min_relapse_streak: 1
+min_severity: 1.0
+min_support_score: 0.2
+max_support_age: 15
+record_match_threshold: 0.95
+
+max_targets_per_image: 5
+max_targets_per_batch: 16
+severity_weight_scale: 0.25
+relapse_weight_scale: 0.25
+max_target_weight: 3.0
+
+feature_pool:
+  output_size: 7
+  sampling_ratio: 2
+  representation: gap
+  normalize: true
+
+confuser:
+  enabled: false
+  iou_threshold: 0.3
+  min_score: 0.05
+  max_candidates_per_gt: 1
+
+failure_types:
+  - cls_confusion
+  - score_suppression
+  - nms_suppression
+  - loc_near_miss
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false
