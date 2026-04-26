@@ -499,6 +499,17 @@ class MDMBFCOS(FCOS):
             return False
         return True
 
+    def _should_apply_dhm_assignment_expansion(self, dhm: DetectionHysteresisMemory | None) -> bool:
+        if dhm is None:
+            return False
+        if not bool(dhm.config.assignment_expansion.enabled):
+            return False
+        if int(dhm.config.assignment_expansion.backup_topk) <= 0:
+            return False
+        if len(dhm) == 0:
+            return False
+        return True
+
     def _apply_dhm_loss_weighting(
         self,
         *,
@@ -966,7 +977,11 @@ class MDMBFCOS(FCOS):
         num_anchors_per_level: list[int],
     ) -> list[torch.Tensor]:
         matched_idxs: list[torch.Tensor] = []
-        for anchors_per_image, targets_per_image in zip(anchors, targets, strict=True):
+        dhm = self._get_dhm()
+        use_dhm_expansion = self._should_apply_dhm_assignment_expansion(dhm)
+        for image_index, (anchors_per_image, targets_per_image) in enumerate(
+            zip(anchors, targets, strict=True)
+        ):
             if targets_per_image["boxes"].numel() == 0:
                 matched_idxs.append(
                     torch.full(
@@ -1003,8 +1018,120 @@ class MDMBFCOS(FCOS):
             pairwise_match = pairwise_match.to(torch.float32) * (1e8 - gt_areas[None, :])
             min_values, matched_idx = pairwise_match.max(dim=1)
             matched_idx[min_values < 1e-5] = -1
+            if use_dhm_expansion and dhm is not None:
+                matched_idx = self._apply_dhm_assignment_expansion(
+                    dhm=dhm,
+                    target=targets_per_image,
+                    matched_idx=matched_idx,
+                    anchor_centers=anchor_centers,
+                    anchor_sizes=anchor_sizes,
+                    num_anchors_per_level=num_anchors_per_level,
+                    image_index=image_index,
+                )
             matched_idxs.append(matched_idx)
         return matched_idxs
+
+    def _apply_dhm_assignment_expansion(
+        self,
+        *,
+        dhm: DetectionHysteresisMemory,
+        target: dict[str, torch.Tensor],
+        matched_idx: torch.Tensor,
+        anchor_centers: torch.Tensor,
+        anchor_sizes: torch.Tensor,
+        num_anchors_per_level: list[int],
+        image_index: int,
+    ) -> torch.Tensor:
+        if _is_replay_target(target):
+            return matched_idx
+
+        gt_boxes = target["boxes"]
+        num_gt = int(gt_boxes.shape[0])
+        if num_gt == 0:
+            return matched_idx
+
+        records = self._lookup_dhm_gt_records(
+            dhm=dhm,
+            target=target,
+            image_shape=(0, 0),
+            image_index=image_index,
+        )
+        if not records:
+            return matched_idx
+
+        eligible: list[tuple[int, DHMRecord, float]] = []
+        for gt_index, record in enumerate(records):
+            if record is None:
+                continue
+            radius = float(dhm.assignment_expansion_radius_for_record(record))
+            if radius <= 1.0:
+                continue
+            eligible.append(
+                (
+                    gt_index,
+                    record,
+                    max(float(self.center_sampling_radius), radius),
+                )
+            )
+        if not eligible:
+            return matched_idx
+
+        config = dhm.config.assignment_expansion
+        backup_topk = int(config.backup_topk)
+        base_positive_count = int((matched_idx >= 0).sum().item())
+        max_extra = max(
+            backup_topk,
+            int(float(max(base_positive_count, 1)) * float(config.max_extra_positive_ratio) + 0.999),
+        )
+        if max_extra <= 0:
+            return matched_idx
+
+        x, y = anchor_centers.unsqueeze(dim=2).unbind(dim=1)
+        x0, y0, x1, y1 = gt_boxes.unsqueeze(dim=0).unbind(dim=2)
+        pairwise_dist = torch.stack([x - x0, y - y0, x1 - x, y1 - y], dim=2)
+        inside_box = pairwise_dist.min(dim=2).values > 0
+
+        lower_bound = anchor_sizes * 4
+        lower_bound[: num_anchors_per_level[0]] = 0
+        upper_bound = anchor_sizes * 8
+        upper_bound[-num_anchors_per_level[-1] :] = float("inf")
+        max_box_dist = pairwise_dist.max(dim=2).values
+        scale_match = (max_box_dist > lower_bound[:, None]) & (max_box_dist < upper_bound[:, None])
+        gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) / 2
+        center_dist = (anchor_centers[:, None, :] - gt_centers[None]).abs().max(dim=2).values
+
+        updated = matched_idx.clone()
+        remaining = max_extra
+        eligible = sorted(
+            eligible,
+            key=lambda item: (
+                float(item[1].instability_score),
+                float(item[1].consecutive_fn),
+                float(item[1].fn_count),
+            ),
+            reverse=True,
+        )
+        for gt_index, _record, radius in eligible:
+            if remaining <= 0:
+                break
+            candidate_mask = (
+                (updated < 0)
+                & inside_box[:, gt_index]
+                & scale_match[:, gt_index]
+                & (center_dist[:, gt_index] < float(radius) * anchor_sizes)
+            )
+            if not bool(candidate_mask.any().item()):
+                continue
+            candidate_indices = torch.where(candidate_mask)[0]
+            candidate_dist = center_dist[candidate_indices, gt_index]
+            add_count = min(backup_topk, remaining, int(candidate_indices.numel()))
+            if add_count <= 0:
+                continue
+            selected_order = torch.argsort(candidate_dist)[:add_count]
+            selected_indices = candidate_indices[selected_order]
+            updated[selected_indices] = int(gt_index)
+            remaining -= add_count
+        return updated
 
     @torch.no_grad()
     def _run_post_step_inference(

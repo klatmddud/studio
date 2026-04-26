@@ -208,13 +208,16 @@ Implemented V0 components:
 - Hysteresis statistics: forgetting, recovery, failure-type switching, state changes, streaks, and
   bounded instability score
 - Optional failure-type-aware loss weighting through `loss_weighting.enabled`
+- Optional HLAE assignment expansion through `assignment_expansion.enabled`
 
 Current scope:
 
 - FCOS only
-- Training-only; inference, NMS, score thresholds, and FCOS assignment are unchanged
+- Training-only; inference, NMS, and score thresholds are unchanged
 - No auxiliary loss is introduced; DHM only scales the existing FCOS loss terms for matched positive
   points when loss weighting is enabled
+- HLAE V0 preserves existing FCOS positive assignments and only converts a capped number of
+  currently negative points into positives for GTs whose last DHM state is `FN_BG`
 - GT identity prefers `annotation_ids` / `gt_ids`; box/class fallback matching is available but less
   stable when strong train-time resizing is used
 - Mining is intentionally expensive: one extra full train-set inference pass per mining epoch on
@@ -227,7 +230,8 @@ FCOS currently wires the following path:
 1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `dhm` from
    `modules/cfg/*.yaml` or per-run CLI config overrides.
 2. FCOS forward computes the base detection loss, refreshes TFM when enabled, and optionally adds
-   `rasd` and `fntdm`; DHM can reweight the base FCOS loss when enabled.
+   `rasd` and `fntdm`; DHM can reweight the base FCOS loss or apply HLAE assignment expansion when
+   enabled.
 3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.

@@ -115,6 +115,9 @@ When DHM is enabled, `engine.fit()` can run an epoch-end full train-set inferenc
 per-GT detection-state hysteresis records. When `dhm.loss_weighting.enabled` is true, FCOS uses the
 previous DHM instability score and dominant failure type to scale the existing classification, box,
 and centerness losses for matched positive points. DHM does not add an auxiliary loss.
+When `dhm.assignment_expansion.enabled` is true, FCOS applies HLAE before loss computation:
+`FN_BG` GTs with sufficient history can receive a small capped set of additional center-nearest
+positive points from positions that were negative under the standard FCOS assignment.
 
 ### Hard Replay Interaction
 
@@ -181,6 +184,9 @@ When enabled for FCOS:
 - `dhm._extra_state` stores the memory records in the model `state_dict`.
 - If `dhm.loss_weighting.enabled` is true, FCOS reweights existing positive-point detection losses
   from the previous memory state; no new loss key is added.
+- If `dhm.assignment_expansion.enabled` is true, HLAE preserves standard FCOS positives and adds up
+  to `dhm.assignment_expansion.backup_topk` extra positives per eligible `FN_BG` GT, capped by
+  `dhm.assignment_expansion.max_extra_positive_ratio` per image.
 - Under DDP, epoch-end mining runs on rank 0 and DHM state is synchronized before the next epoch.
 
 This is the clean full-mining baseline. Subset mining or online mining should be added as separate

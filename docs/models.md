@@ -13,8 +13,8 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 - FN-TDM adds a training-only `fntdm` auxiliary loss for selected hard GTs using stored
   false-negative transition directions
 - TFM refreshes from the normal training forward and can apply training-only assignment-bias loss weights
-- DHM mines per-GT detection-state hysteresis at epoch end and can reweight the existing FCOS loss
-  terms without adding an auxiliary loss
+- DHM mines per-GT detection-state hysteresis at epoch end, can reweight the existing FCOS loss
+  terms, and can apply HLAE training-only positive assignment expansion for `FN_BG` GTs
 - `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass only for MDMB / MDMB++ state
 - `mine_fntdm_batch()` hook: supports epoch-end full train-set HTM mining when FN-TDM is enabled
 - `mine_dhm_batch()` hook: supports epoch-end full train-set hysteresis mining when DHM is enabled

@@ -54,6 +54,7 @@ from .fntdm import (
     load_fntdm_config,
 )
 from .dhm import (
+    DHMAssignmentExpansionConfig,
     DHMConfig,
     DHMLossWeightingConfig,
     DHMMatchingConfig,
@@ -92,6 +93,7 @@ __all__ = [
     "MDMBObservation",
     "MissedDetectionMemoryBank",
     "CanonicalCandidate",
+    "DHMAssignmentExpansionConfig",
     "DHMConfig",
     "DHMLossWeightingConfig",
     "DHMMatchingConfig",

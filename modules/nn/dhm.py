@@ -290,11 +290,79 @@ class DHMLossWeightingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DHMAssignmentExpansionConfig:
+    enabled: bool = False
+    target_failure_types: tuple[str, ...] = ("FN_BG",)
+    min_observations: int = 2
+    min_instability: float = 0.35
+    radius_multiplier: float = 1.75
+    radius_max: float = 3.0
+    backup_topk: int = 3
+    max_extra_positive_ratio: float = 0.2
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMAssignmentExpansionConfig":
+        data = dict(raw or {})
+        raw_types = data.get("target_failure_types", ("FN_BG",))
+        if isinstance(raw_types, str):
+            target_failure_types = (raw_types,)
+        elif isinstance(raw_types, Sequence):
+            target_failure_types = tuple(str(item) for item in raw_types)
+        else:
+            target_failure_types = ("FN_BG",)
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            target_failure_types=target_failure_types,
+            min_observations=int(data.get("min_observations", 2)),
+            min_instability=float(data.get("min_instability", 0.35)),
+            radius_multiplier=float(data.get("radius_multiplier", 1.75)),
+            radius_max=float(data.get("radius_max", 3.0)),
+            backup_topk=int(data.get("backup_topk", 3)),
+            max_extra_positive_ratio=float(data.get("max_extra_positive_ratio", 0.2)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        unsupported_states = sorted(set(self.target_failure_types) - set(_FN_STATES))
+        if unsupported_states:
+            raise ValueError(
+                "DHM assignment_expansion.target_failure_types has unsupported states: "
+                f"{unsupported_states}."
+            )
+        if self.min_observations < 1:
+            raise ValueError("DHM assignment_expansion.min_observations must be >= 1.")
+        if not 0.0 <= self.min_instability <= 1.0:
+            raise ValueError("DHM assignment_expansion.min_instability must satisfy 0 <= value <= 1.")
+        if self.radius_multiplier < 1.0:
+            raise ValueError("DHM assignment_expansion.radius_multiplier must be >= 1.")
+        if self.radius_max < 1.0:
+            raise ValueError("DHM assignment_expansion.radius_max must be >= 1.")
+        if self.backup_topk < 0:
+            raise ValueError("DHM assignment_expansion.backup_topk must be >= 0.")
+        if self.max_extra_positive_ratio < 0.0:
+            raise ValueError("DHM assignment_expansion.max_extra_positive_ratio must be >= 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "target_failure_types": list(self.target_failure_types),
+            "min_observations": self.min_observations,
+            "min_instability": self.min_instability,
+            "radius_multiplier": self.radius_multiplier,
+            "radius_max": self.radius_max,
+            "backup_topk": self.backup_topk,
+            "max_extra_positive_ratio": self.max_extra_positive_ratio,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DHMConfig:
     enabled: bool = False
     mining: DHMMiningConfig = field(default_factory=DHMMiningConfig)
     scoring: DHMScoringConfig = field(default_factory=DHMScoringConfig)
     loss_weighting: DHMLossWeightingConfig = field(default_factory=DHMLossWeightingConfig)
+    assignment_expansion: DHMAssignmentExpansionConfig = field(default_factory=DHMAssignmentExpansionConfig)
     record_match_threshold: float = 0.95
     max_records: int | None = None
     arch: str | None = None
@@ -330,6 +398,9 @@ class DHMConfig:
             mining=DHMMiningConfig.from_mapping(merged.get("mining")),
             scoring=DHMScoringConfig.from_mapping(merged.get("scoring")),
             loss_weighting=DHMLossWeightingConfig.from_mapping(merged.get("loss_weighting")),
+            assignment_expansion=DHMAssignmentExpansionConfig.from_mapping(
+                merged.get("assignment_expansion")
+            ),
             record_match_threshold=float(merged.get("record_match_threshold", 0.95)),
             max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
             arch=normalized_arch,
@@ -349,6 +420,7 @@ class DHMConfig:
             "mining": self.mining.to_dict(),
             "scoring": self.scoring.to_dict(),
             "loss_weighting": self.loss_weighting.to_dict(),
+            "assignment_expansion": self.assignment_expansion.to_dict(),
             "record_match_threshold": self.record_match_threshold,
             "max_records": self.max_records,
             "arch": self.arch,
@@ -668,6 +740,21 @@ class DetectionHysteresisMemory(nn.Module):
         weight = 1.0 + base_scale * normalized
         return float(min(float(config.max_weight), max(1.0, weight)))
 
+    def assignment_expansion_radius_for_record(self, record: DHMRecord | None) -> float:
+        if record is None:
+            return 1.0
+        config = self.config.assignment_expansion
+        if not bool(config.enabled):
+            return 1.0
+        if str(record.last_state) not in set(config.target_failure_types):
+            return 1.0
+        if int(record.total_seen) < int(config.min_observations):
+            return 1.0
+        if float(record.instability_score) < float(config.min_instability):
+            return 1.0
+        radius = float(config.radius_multiplier) * (1.0 + float(record.instability_score))
+        return float(min(float(config.radius_max), max(1.0, radius)))
+
     def summary(self) -> dict[str, Any]:
         status_counts = Counter(record.status(self.config.scoring) for record in self._records.values())
         last_state_counts = Counter(record.last_state for record in self._records.values())
@@ -698,6 +785,12 @@ class DetectionHysteresisMemory(nn.Module):
                 "enabled": bool(self.config.loss_weighting.enabled),
                 "min_instability": float(self.config.loss_weighting.min_instability),
                 "max_weight": float(self.config.loss_weighting.max_weight),
+            },
+            "assignment_expansion": {
+                "enabled": bool(self.config.assignment_expansion.enabled),
+                "target_failure_types": list(self.config.assignment_expansion.target_failure_types),
+                "min_instability": float(self.config.assignment_expansion.min_instability),
+                "backup_topk": int(self.config.assignment_expansion.backup_topk),
             },
         }
 
@@ -970,4 +1063,3 @@ def _normalize_image_id(value: Any) -> str:
             return str(raw)
         return ",".join(str(item) for item in value.detach().cpu().flatten().tolist())
     return str(value)
-
