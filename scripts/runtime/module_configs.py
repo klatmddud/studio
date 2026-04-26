@@ -5,7 +5,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-MODULE_CONFIG_KEYS = ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm")
+MODULE_CONFIG_KEYS = ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm", "dhm")
 
 DEFAULT_MODULE_CONFIG_PATHS = {
     "mdmb": PROJECT_ROOT / "modules" / "cfg" / "mdmb.yaml",
@@ -14,6 +14,7 @@ DEFAULT_MODULE_CONFIG_PATHS = {
     "hard_replay": PROJECT_ROOT / "modules" / "cfg" / "hard_replay.yaml",
     "tfm": PROJECT_ROOT / "modules" / "cfg" / "tfm.yaml",
     "fntdm": PROJECT_ROOT / "modules" / "cfg" / "fntdm.yaml",
+    "dhm": PROJECT_ROOT / "modules" / "cfg" / "dhm.yaml",
 }
 
 

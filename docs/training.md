@@ -85,10 +85,11 @@ Main training loop:
 1. Build optimizer, scheduler, and grad scaler.
 2. Optionally resume from `checkpoint.resume`.
 3. For each epoch:
-   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, and `tfm` modules.
+   - Call `start_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `dhm` modules.
    - Refresh the Hard Replay `ReplayIndex` from `model.mdmbpp` if the train loader has a replay controller.
    - Run `train_one_epoch()`.
-   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, and `tfm`.
+   - Run FN-TDM and DHM epoch-end mining when their configs request full train-set mining.
+   - Call `end_epoch()` on enabled `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `dhm`.
    - Optionally evaluate on the validation loader.
    - Save `best.pt` and `last.pt` according to checkpoint settings.
    - Append the epoch record to `history.json`.
@@ -109,6 +110,11 @@ backup positives.
 When RASD is enabled, FCOS reads relapse entries from `mdmbpp`, pools current GT features from the
 FPN, and appends a `rasd` auxiliary loss when matching support features exist. RASD is training-only
 and does not change inference, NMS, or score thresholds.
+
+When DHM is enabled, `engine.fit()` can run an epoch-end full train-set inference pass to update
+per-GT detection-state hysteresis records. When `dhm.loss_weighting.enabled` is true, FCOS uses the
+previous DHM instability score and dominant failure type to scale the existing classification, box,
+and centerness losses for matched positive points. DHM does not add an auxiliary loss.
 
 ### Hard Replay Interaction
 
@@ -139,7 +145,8 @@ uv run scripts/train.py \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
   --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
   --tfm-config modules/cfg/tfm.yaml \
-  --fntdm-config modules/cfg/fntdm.yaml
+  --fntdm-config modules/cfg/fntdm.yaml \
+  --dhm-config modules/cfg/dhm.yaml
 ```
 
 The same resolved paths are used for model construction, Hard Replay DataLoader setup, DDP worker
@@ -161,6 +168,23 @@ When enabled for FCOS:
 
 This baseline is intentionally expensive and is meant as the clean reference implementation before
 adding online or subset mining variants.
+
+### DHM Interaction
+
+DHM is configured through `modules/cfg/dhm.yaml` and is disabled by default.
+
+When enabled for FCOS:
+
+- After each training epoch satisfying `dhm.mining.mine_interval` and
+  `dhm.mining.warmup_epochs`, `engine.fit()` builds a deterministic train mining loader and runs
+  one full train-set inference pass to update per-GT `TP`/`FN_*` hysteresis records.
+- `dhm._extra_state` stores the memory records in the model `state_dict`.
+- If `dhm.loss_weighting.enabled` is true, FCOS reweights existing positive-point detection losses
+  from the previous memory state; no new loss key is added.
+- Under DDP, epoch-end mining runs on rank 0 and DHM state is synchronized before the next epoch.
+
+This is the clean full-mining baseline. Subset mining or online mining should be added as separate
+variants after the full baseline is measured.
 
 ### Multi-GPU DDP
 
@@ -240,8 +264,8 @@ COCO bbox metrics available for `checkpoint.monitor` and `metrics.primary`:
 ## Output Artifacts
 
 `{output_dir}/history.json` stores per-epoch training and validation records. When enabled, the
-record may include `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `hard_replay` summaries alongside
-`train` and `val`.
+record may include `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, `dhm`, and `hard_replay` summaries
+alongside `train` and `val`.
 
 Additional outputs:
 
@@ -256,9 +280,9 @@ Additional outputs:
 
 `metadata/modules.yaml` is written during training only. It stores the parsed YAML mapping for each
 research module that is effectively enabled for the selected architecture, using keys such as
-`mdmbpp`, `rasd`, `hard_replay`, `tfm`, and `fntdm`. If no research module is enabled, the file
-contains an empty mapping. `metadata/run.json` also records the resolved module config paths used by
-that run.
+`mdmbpp`, `rasd`, `hard_replay`, `tfm`, `fntdm`, and `dhm`. If no research module is enabled, the
+file contains an empty mapping. `metadata/run.json` also records the resolved module config paths
+used by that run.
 
 Confusion matrix figures use Ultralytics YOLO-compatible detection matching: predictions are
 filtered with `score > 0.25`, GT/prediction pairs use global one-to-one matching at `IoU > 0.45`,
@@ -295,7 +319,8 @@ uv run scripts/train.py \
   --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml \
   --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml \
   --tfm-config modules/cfg/tfm.yaml \
-  --fntdm-config modules/cfg/fntdm.yaml
+  --fntdm-config modules/cfg/fntdm.yaml \
+  --dhm-config modules/cfg/dhm.yaml
 
 uv run scripts/eval.py \
   --config scripts/cfg/eval.yaml \

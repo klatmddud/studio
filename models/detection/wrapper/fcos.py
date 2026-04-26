@@ -15,6 +15,8 @@ from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from modules.nn import (
     CanonicalCandidate,
+    DetectionHysteresisMemory,
+    DHMRecord,
     FalseNegativeTransitionDirectionMemory,
     MDMBPlus,
     PerImageCandidateSummary,
@@ -66,6 +68,7 @@ class MDMBFCOS(FCOS):
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
         fntdm: FalseNegativeTransitionDirectionMemory | None = None,
+        dhm: DetectionHysteresisMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -74,6 +77,7 @@ class MDMBFCOS(FCOS):
         self._rasd_ref = weakref.ref(rasd) if rasd is not None else None
         self._tfm_ref = weakref.ref(tfm) if tfm is not None else None
         self._fntdm_ref = weakref.ref(fntdm) if fntdm is not None else None
+        self._dhm_ref = weakref.ref(dhm) if dhm is not None else None
 
     def forward(
         self,
@@ -135,8 +139,10 @@ class MDMBFCOS(FCOS):
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             mdmbpp = self._get_mdmbpp()
             tfm = self._get_tfm()
+            dhm = self._get_dhm()
             use_tfm_bias = self._should_apply_tfm_assignment_bias(tfm)
-            use_weighted = _has_replay_box_weights(targets) or use_tfm_bias
+            use_dhm_weighting = self._should_apply_dhm_loss_weighting(dhm)
+            use_weighted = _has_replay_box_weights(targets) or use_tfm_bias or use_dhm_weighting
             if not use_weighted:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
             else:
@@ -147,6 +153,7 @@ class MDMBFCOS(FCOS):
                     anchors=anchors,
                     matched_idxs=matched_idxs,
                     tfm=tfm if use_tfm_bias else None,
+                    dhm=dhm if use_dhm_weighting else None,
                 )
             self._refresh_tfm_from_training_forward(
                 targets=targets,
@@ -215,6 +222,7 @@ class MDMBFCOS(FCOS):
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
         tfm: TemporalFailureMemory | None = None,
+        dhm: DetectionHysteresisMemory | None = None,
     ) -> dict[str, torch.Tensor]:
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
@@ -279,6 +287,34 @@ class MDMBFCOS(FCOS):
                 ctr_weights = self._apply_tfm_assignment_bias(
                     base_weights=ctr_weights,
                     tfm=tfm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="ctr",
+                )
+            if dhm is not None:
+                cls_weights = self._apply_dhm_loss_weighting(
+                    base_weights=cls_weights,
+                    dhm=dhm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="cls",
+                )
+                reg_weights = self._apply_dhm_loss_weighting(
+                    base_weights=reg_weights,
+                    dhm=dhm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                    assignments=assignments,
+                    component="box",
+                )
+                ctr_weights = self._apply_dhm_loss_weighting(
+                    base_weights=ctr_weights,
+                    dhm=dhm,
                     target=target,
                     image_shape=image_shapes[image_index],
                     image_index=image_index,
@@ -453,6 +489,137 @@ class MDMBFCOS(FCOS):
             normalized = ((risks - min_risk).clamp(min=0.0) / max(1.0 - min_risk, 1e-6)).clamp(max=1.0)
         weights = 1.0 + float(scale) * normalized
         return weights.clamp(max=float(config.max_weight))
+
+    def _should_apply_dhm_loss_weighting(self, dhm: DetectionHysteresisMemory | None) -> bool:
+        if dhm is None:
+            return False
+        if not bool(dhm.config.loss_weighting.enabled):
+            return False
+        if len(dhm) == 0:
+            return False
+        return True
+
+    def _apply_dhm_loss_weighting(
+        self,
+        *,
+        base_weights: torch.Tensor,
+        dhm: DetectionHysteresisMemory,
+        target: dict[str, torch.Tensor],
+        image_shape: tuple[int, int],
+        image_index: int,
+        assignments: torch.Tensor,
+        component: str,
+    ) -> torch.Tensor:
+        if _is_replay_target(target):
+            return base_weights
+
+        pos_mask = assignments >= 0
+        if not bool(pos_mask.any().item()):
+            return base_weights
+
+        records = self._lookup_dhm_gt_records(
+            dhm=dhm,
+            target=target,
+            image_shape=image_shape,
+            image_index=image_index,
+        )
+        if not records:
+            return base_weights
+
+        gt_weights = torch.ones((len(records),), dtype=torch.float32, device=assignments.device)
+        for gt_index, record in enumerate(records):
+            gt_weights[gt_index] = float(dhm.loss_weight_for_record(record, component=component))
+        if bool((gt_weights == 1.0).all().item()):
+            return base_weights
+
+        result = base_weights.clone()
+        gt_indices = assignments[pos_mask].to(dtype=torch.long)
+        valid = gt_indices < gt_weights.numel()
+        if not bool(valid.any().item()):
+            return result
+
+        pos_indices = torch.where(pos_mask)[0][valid]
+        selected_gt = gt_indices[valid]
+        result[pos_indices] = result[pos_indices] * gt_weights[selected_gt].to(
+            device=result.device,
+            dtype=result.dtype,
+        )
+        return result
+
+    def _lookup_dhm_gt_records(
+        self,
+        *,
+        dhm: DetectionHysteresisMemory,
+        target: dict[str, torch.Tensor],
+        image_shape: tuple[int, int],
+        image_index: int,
+    ) -> list[DHMRecord | None]:
+        gt_boxes = target["boxes"]
+        num_gt = int(gt_boxes.shape[0])
+        if num_gt == 0:
+            return []
+
+        image_id = target.get("image_id", torch.tensor(image_index, device=gt_boxes.device))
+        image_records = dhm.get_image_records(image_id)
+        result: list[DHMRecord | None] = [None for _ in range(num_gt)]
+        if not image_records:
+            return result
+
+        gt_ids = self._get_tfm_gt_ids(target)
+        if isinstance(gt_ids, torch.Tensor) and int(gt_ids.numel()) == num_gt:
+            by_ann_id = {
+                str(record.ann_id): record
+                for record in image_records
+                if record.ann_id is not None
+            }
+            flattened = gt_ids.detach().cpu().flatten().tolist()
+            for gt_index, raw_gt_id in enumerate(flattened):
+                try:
+                    if int(raw_gt_id) < 0:
+                        continue
+                except (TypeError, ValueError):
+                    if str(raw_gt_id) == "":
+                        continue
+                record = by_ann_id.get(str(raw_gt_id))
+                if record is not None:
+                    result[gt_index] = record
+
+        unmatched_gt = [index for index, record in enumerate(result) if record is None]
+        if not unmatched_gt:
+            return result
+
+        gt_labels = target["labels"].to(dtype=torch.int64)
+        matched_uids = {record.gt_uid for record in result if record is not None}
+        candidate_records = [
+            record
+            for record in image_records
+            if record.gt_uid not in matched_uids
+        ]
+        if not candidate_records:
+            return result
+        record_boxes = torch.stack([record.bbox for record in candidate_records], dim=0).to(
+            device=gt_boxes.device,
+            dtype=gt_boxes.dtype,
+        )
+        ious = box_ops.box_iou(gt_boxes, record_boxes)
+        used_records: set[int] = set()
+        threshold = float(dhm.config.record_match_threshold)
+        for gt_index in unmatched_gt:
+            class_id = int(gt_labels[gt_index].item())
+            best_record = None
+            best_iou = threshold
+            for record_index, record in enumerate(candidate_records):
+                if record_index in used_records or int(record.class_id) != class_id:
+                    continue
+                iou = float(ious[gt_index, record_index].item())
+                if iou > best_iou:
+                    best_iou = iou
+                    best_record = record_index
+            if best_record is None:
+                continue
+            used_records.add(best_record)
+            result[gt_index] = candidate_records[best_record]
+        return result
 
     def _compute_raw_losses_for_image(
         self,
@@ -1028,6 +1195,47 @@ class MDMBFCOS(FCOS):
             epoch=epoch,
         )
 
+    @torch.no_grad()
+    def mine_dhm_batch(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int,
+    ) -> dict[str, int] | None:
+        dhm = self._get_dhm()
+        if dhm is None or not targets:
+            return None
+        if not dhm.should_mine(epoch=epoch):
+            return None
+
+        non_replay = [
+            (image, target)
+            for image, target in zip(images, targets, strict=True)
+            if not _is_replay_target(target)
+        ]
+        if not non_replay:
+            return None
+        images = [image for image, _ in non_replay]
+        targets = [target for _, target in non_replay]
+
+        was_training = self.training
+        try:
+            self.eval()
+            mined = self._run_post_step_inference(images, targets)
+        finally:
+            if was_training:
+                self.train()
+
+        detections = mined.get("detections")
+        if not isinstance(detections, list):
+            return None
+        return dhm.mine_batch(
+            detections=detections,
+            original_targets=targets,
+            epoch=epoch,
+        )
+
     def _collect_mdmbpp_support_features(
         self,
         *,
@@ -1443,6 +1651,11 @@ class MDMBFCOS(FCOS):
             return None
         return self._fntdm_ref()
 
+    def _get_dhm(self) -> DetectionHysteresisMemory | None:
+        if self._dhm_ref is None:
+            return None
+        return self._dhm_ref()
+
 
 class FCOSWrapper(BaseDetectionWrapper):
     """
@@ -1461,6 +1674,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
         fntdm: FalseNegativeTransitionDirectionMemory | None = None,
+        dhm: DetectionHysteresisMemory | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -1469,6 +1683,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         self.rasd = rasd
         self.tfm = tfm
         self.fntdm = fntdm
+        self.dhm = dhm
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -1495,6 +1710,7 @@ class FCOSWrapper(BaseDetectionWrapper):
             rasd=rasd,
             tfm=tfm,
             fntdm=fntdm,
+            dhm=dhm,
             **kwargs,
         )
 
@@ -1523,6 +1739,18 @@ class FCOSWrapper(BaseDetectionWrapper):
             return None
         return self.model.mine_fntdm_batch(images, targets, epoch=epoch)
 
+    @torch.no_grad()
+    def mine_dhm_batch(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]] | None,
+        *,
+        epoch: int,
+    ) -> dict[str, int] | None:
+        if self.dhm is None:
+            return None
+        return self.model.mine_dhm_batch(images, targets, epoch=epoch)
+
     @classmethod
     def from_yaml(
         cls,
@@ -1534,6 +1762,7 @@ class FCOSWrapper(BaseDetectionWrapper):
         rasd: RelapseAwareSupportDistillation | None = None,
         tfm: TemporalFailureMemory | None = None,
         fntdm: FalseNegativeTransitionDirectionMemory | None = None,
+        dhm: DetectionHysteresisMemory | None = None,
         **kwargs,
     ) -> "FCOSWrapper":
         """Create the wrapper from a YAML config path."""
@@ -1546,5 +1775,6 @@ class FCOSWrapper(BaseDetectionWrapper):
             rasd=rasd,
             tfm=tfm,
             fntdm=fntdm,
+            dhm=dhm,
             **kwargs,
         )

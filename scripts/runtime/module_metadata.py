@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from modules.nn import (
+    load_dhm_config,
     load_fntdm_config,
     load_mdmb_config,
     load_mdmbpp_config,
@@ -28,6 +29,7 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "hard_replay": load_hard_replay_config,
     "tfm": load_tfm_config,
     "fntdm": load_fntdm_config,
+    "dhm": load_dhm_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
@@ -37,6 +39,7 @@ _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "hard_replay": None,
     "tfm": {"fcos"},
     "fntdm": {"fcos"},
+    "dhm": {"fcos"},
 }
 
 
@@ -49,7 +52,7 @@ def collect_enabled_module_configs(
     paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm"):
+    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm", "dhm"):
         supported_arches = _ARCH_SUPPORT[name]
         if supported_arches is not None and normalized_arch not in supported_arches:
             continue

@@ -1,7 +1,7 @@
 # Research Modules
 
 Research features are configured from `modules/cfg/*.yaml`.
-`mdmb`, `mdmbpp`, `rasd`, `tfm`, and `fntdm` live in `modules/nn/`.
+`mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `dhm` live in `modules/nn/`.
 `hard_replay` is configured in the same folder but implemented in
 `scripts/runtime/hard_replay.py` because it operates at the data-loading layer.
 
@@ -29,8 +29,8 @@ models:
 
 For parallel experiments, prefer per-run config files instead of editing the global YAML files.
 `scripts/train.py` accepts `--mdmb-config`, `--mdmbpp-config`, `--rasd-config`,
-`--hard-replay-config`, `--tfm-config`, and `--fntdm-config`; those paths override the defaults for
-that run only and are also used when writing `metadata/modules.yaml`.
+`--hard-replay-config`, `--tfm-config`, `--fntdm-config`, and `--dhm-config`; those paths override
+the defaults for that run only and are also used when writing `metadata/modules.yaml`.
 
 ## Module Overview
 
@@ -189,26 +189,57 @@ Current scope:
 - HTM mining is intentionally expensive: one extra full train-set inference pass per mining epoch
   on rank 0 under DDP, followed by FN-TDM state synchronization
 
+### DHM - Detection Hysteresis Memory (`modules/nn/dhm.py`)
+
+Per-GT detection-state hysteresis memory for identifying unstable GTs without adding a new
+auxiliary loss.
+
+- Hooks: `start_epoch()`, `end_epoch()`
+- Epoch-end mining hook: `FCOSWrapper.mine_dhm_batch(...)`
+- Training path: optional FCOS positive-point reweighting of the existing classification, box, and
+  centerness losses
+- Config: `modules/cfg/dhm.yaml`
+- Arch support: FCOS
+
+Implemented V0 components:
+
+- Full train-set epoch-end mining from post-processed FCOS predictions
+- Per-GT state tracking for `TP`, `FN_BG`, `FN_CLS`, `FN_LOC`, and `FN_MISS`
+- Hysteresis statistics: forgetting, recovery, failure-type switching, state changes, streaks, and
+  bounded instability score
+- Optional failure-type-aware loss weighting through `loss_weighting.enabled`
+
+Current scope:
+
+- FCOS only
+- Training-only; inference, NMS, score thresholds, and FCOS assignment are unchanged
+- No auxiliary loss is introduced; DHM only scales the existing FCOS loss terms for matched positive
+  points when loss weighting is enabled
+- GT identity prefers `annotation_ids` / `gt_ids`; box/class fallback matching is available but less
+  stable when strong train-time resizing is used
+- Mining is intentionally expensive: one extra full train-set inference pass per mining epoch on
+  rank 0 under DDP, followed by DHM state synchronization
+
 ## Runtime Integration
 
 FCOS currently wires the following path:
 
-1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, `tfm`, and `fntdm` from `modules/cfg/*.yaml` or
-   per-run CLI config overrides.
+1. `registry.py` builds `mdmb`, `mdmbpp`, `rasd`, `tfm`, `fntdm`, and `dhm` from
+   `modules/cfg/*.yaml` or per-run CLI config overrides.
 2. FCOS forward computes the base detection loss, refreshes TFM when enabled, and optionally adds
-   `rasd` and `fntdm`.
+   `rasd` and `fntdm`; DHM can reweight the base FCOS loss when enabled.
 3. FCOS applies replay-aware per-GT weights when Hard Replay metadata is present in the batch.
 4. `FCOSWrapper.after_optimizer_step()` runs one no-grad post-step inference pass.
 5. That pass refreshes `mdmb` and `mdmbpp` state, including MDMB++ support feature snapshots when enabled.
-6. `engine.fit()` calls module epoch hooks, runs FN-TDM epoch-end mining when enabled, and refreshes
-   Hard Replay from `model.mdmbpp`.
+6. `engine.fit()` calls module epoch hooks, runs FN-TDM and DHM epoch-end mining when enabled, and
+   refreshes Hard Replay from `model.mdmbpp`.
 
-In multi-GPU DDP training, FCOS/MDMB++/RASD/TFM/FN-TDM training losses run independently on each
-rank during the epoch. At the epoch boundary, MDMB, MDMB++, TFM, and FN-TDM `extra_state` payloads
-are gathered, merged by image/GT identity on rank 0, and broadcast back to every rank. FN-TDM HTM
-mining itself runs on rank 0 in V0. This keeps the next epoch's Hard Replay planner, RASD teacher
-lookup, TFM risk lookup, and FN-TDM direction bank based on the same global memory while avoiding
-per-step memory synchronization.
+In multi-GPU DDP training, FCOS/MDMB++/RASD/TFM/FN-TDM/DHM training losses run independently on
+each rank during the epoch. At the epoch boundary, MDMB, MDMB++, TFM, FN-TDM, and DHM `extra_state`
+payloads are gathered, merged by image/GT identity on rank 0, and broadcast back to every rank.
+FN-TDM HTM mining and DHM mining run on rank 0 in V0. This keeps the next epoch's Hard Replay
+planner, RASD teacher lookup, TFM risk lookup, FN-TDM direction bank, and DHM instability lookup
+based on the same global memory while avoiding per-step memory synchronization.
 
 Train metadata also snapshots active research-module YAML into
 `{output_dir}/metadata/modules.yaml`. The file includes only modules that are effectively enabled
@@ -224,3 +255,4 @@ after architecture-specific overrides are applied.
 | RASD | yes | no | no |
 | TFM | yes | no | no |
 | FN-TDM | yes | no | no |
+| DHM | yes | no | no |

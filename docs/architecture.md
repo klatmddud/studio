@@ -12,7 +12,7 @@ scripts/
   runtime/
     config.py               # Config loading, env-var substitution, validation
     data.py                 # COCO dataset + DataLoader builders
-    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
+    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, epoch-end mining
     hard_replay.py          # MDMB++-guided replay planner + mixed batch sampler
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
@@ -29,8 +29,8 @@ models/detection/
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # Module configs (all disabled by default, including hard_replay/tfm)
-  nn/                       # Module implementations (mdmb/mdmbpp/rasd/tfm)
+  cfg/                      # Module configs (all disabled by default, including research modules)
+  nn/                       # Module implementations (mdmb/mdmbpp/rasd/tfm/fntdm/dhm)
 
 ops/                        # Reserved for custom ops (currently empty)
 ```

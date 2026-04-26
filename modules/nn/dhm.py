@@ -1,0 +1,973 @@
+from __future__ import annotations
+
+import hashlib
+from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+import torch
+import torch.nn as nn
+import yaml
+from torchvision.ops import boxes as box_ops
+
+from .mdmb import normalize_arch
+
+
+DHMState = Literal["TP", "FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"]
+
+_TP_STATE = "TP"
+_FN_STATES = ("FN_BG", "FN_CLS", "FN_LOC", "FN_MISS")
+_ALL_STATES = (_TP_STATE, *_FN_STATES)
+_COMPONENTS = ("cls", "box", "ctr")
+
+
+@dataclass(frozen=True, slots=True)
+class DHMMatchingConfig:
+    tau_iou: float = 0.5
+    tau_tp: float = 0.3
+    tau_near: float = 0.3
+    tau_bg_score: float = 0.1
+    tau_cls_evidence: float = 0.3
+    tau_loc_score: float = 0.3
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMMatchingConfig":
+        data = dict(raw or {})
+        config = cls(
+            tau_iou=float(data.get("tau_iou", 0.5)),
+            tau_tp=float(data.get("tau_tp", 0.3)),
+            tau_near=float(data.get("tau_near", 0.3)),
+            tau_bg_score=float(data.get("tau_bg_score", 0.1)),
+            tau_cls_evidence=float(data.get("tau_cls_evidence", 0.3)),
+            tau_loc_score=float(data.get("tau_loc_score", 0.3)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for field_name in (
+            "tau_iou",
+            "tau_tp",
+            "tau_near",
+            "tau_bg_score",
+            "tau_cls_evidence",
+            "tau_loc_score",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"DHM matching.{field_name} must satisfy 0 <= value <= 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tau_iou": self.tau_iou,
+            "tau_tp": self.tau_tp,
+            "tau_near": self.tau_near,
+            "tau_bg_score": self.tau_bg_score,
+            "tau_cls_evidence": self.tau_cls_evidence,
+            "tau_loc_score": self.tau_loc_score,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DHMMiningConfig:
+    enabled: bool = True
+    mode: str = "epoch_end_full_train"
+    mine_interval: int = 1
+    warmup_epochs: int = 0
+    matching: DHMMatchingConfig = field(default_factory=DHMMatchingConfig)
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMMiningConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", True)),
+            mode=str(data.get("mode", "epoch_end_full_train")),
+            mine_interval=int(data.get("mine_interval", 1)),
+            warmup_epochs=int(data.get("warmup_epochs", 0)),
+            matching=DHMMatchingConfig.from_mapping(data.get("matching")),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.mode != "epoch_end_full_train":
+            raise ValueError("DHM mining.mode currently supports only 'epoch_end_full_train'.")
+        if self.mine_interval < 1:
+            raise ValueError("DHM mining.mine_interval must be >= 1.")
+        if self.warmup_epochs < 0:
+            raise ValueError("DHM mining.warmup_epochs must be >= 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "mine_interval": self.mine_interval,
+            "warmup_epochs": self.warmup_epochs,
+            "matching": self.matching.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DHMScoringConfig:
+    min_observations: int = 3
+    forgetting_weight: float = 0.35
+    fn_rate_weight: float = 0.25
+    fn_streak_weight: float = 0.2
+    type_switch_weight: float = 0.15
+    recent_fn_weight: float = 0.05
+    stable_tp_discount: float = 0.2
+    streak_norm_epochs: int = 5
+    ema_momentum: float = 0.8
+    min_instability: float = 0.0
+    max_instability: float = 1.0
+    stable_tp_rate: float = 0.8
+    persistent_fn_rate: float = 0.8
+    oscillator_switches: int = 2
+    late_learner_min_epoch_gap: int = 3
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMScoringConfig":
+        data = dict(raw or {})
+        config = cls(
+            min_observations=int(data.get("min_observations", 3)),
+            forgetting_weight=float(data.get("forgetting_weight", 0.35)),
+            fn_rate_weight=float(data.get("fn_rate_weight", 0.25)),
+            fn_streak_weight=float(data.get("fn_streak_weight", 0.2)),
+            type_switch_weight=float(data.get("type_switch_weight", 0.15)),
+            recent_fn_weight=float(data.get("recent_fn_weight", 0.05)),
+            stable_tp_discount=float(data.get("stable_tp_discount", 0.2)),
+            streak_norm_epochs=int(data.get("streak_norm_epochs", 5)),
+            ema_momentum=float(data.get("ema_momentum", 0.8)),
+            min_instability=float(data.get("min_instability", 0.0)),
+            max_instability=float(data.get("max_instability", 1.0)),
+            stable_tp_rate=float(data.get("stable_tp_rate", 0.8)),
+            persistent_fn_rate=float(data.get("persistent_fn_rate", 0.8)),
+            oscillator_switches=int(data.get("oscillator_switches", 2)),
+            late_learner_min_epoch_gap=int(data.get("late_learner_min_epoch_gap", 3)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.min_observations < 1:
+            raise ValueError("DHM scoring.min_observations must be >= 1.")
+        for field_name in (
+            "forgetting_weight",
+            "fn_rate_weight",
+            "fn_streak_weight",
+            "type_switch_weight",
+            "recent_fn_weight",
+            "stable_tp_discount",
+        ):
+            if float(getattr(self, field_name)) < 0.0:
+                raise ValueError(f"DHM scoring.{field_name} must be >= 0.")
+        if self.streak_norm_epochs < 1:
+            raise ValueError("DHM scoring.streak_norm_epochs must be >= 1.")
+        if not 0.0 <= self.ema_momentum <= 1.0:
+            raise ValueError("DHM scoring.ema_momentum must satisfy 0 <= value <= 1.")
+        if not 0.0 <= self.min_instability <= 1.0:
+            raise ValueError("DHM scoring.min_instability must satisfy 0 <= value <= 1.")
+        if not 0.0 <= self.max_instability <= 1.0:
+            raise ValueError("DHM scoring.max_instability must satisfy 0 <= value <= 1.")
+        if self.min_instability > self.max_instability:
+            raise ValueError("DHM scoring.min_instability must be <= max_instability.")
+        for field_name in ("stable_tp_rate", "persistent_fn_rate"):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"DHM scoring.{field_name} must satisfy 0 <= value <= 1.")
+        if self.oscillator_switches < 1:
+            raise ValueError("DHM scoring.oscillator_switches must be >= 1.")
+        if self.late_learner_min_epoch_gap < 0:
+            raise ValueError("DHM scoring.late_learner_min_epoch_gap must be >= 0.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "min_observations": self.min_observations,
+            "forgetting_weight": self.forgetting_weight,
+            "fn_rate_weight": self.fn_rate_weight,
+            "fn_streak_weight": self.fn_streak_weight,
+            "type_switch_weight": self.type_switch_weight,
+            "recent_fn_weight": self.recent_fn_weight,
+            "stable_tp_discount": self.stable_tp_discount,
+            "streak_norm_epochs": self.streak_norm_epochs,
+            "ema_momentum": self.ema_momentum,
+            "min_instability": self.min_instability,
+            "max_instability": self.max_instability,
+            "stable_tp_rate": self.stable_tp_rate,
+            "persistent_fn_rate": self.persistent_fn_rate,
+            "oscillator_switches": self.oscillator_switches,
+            "late_learner_min_epoch_gap": self.late_learner_min_epoch_gap,
+        }
+
+
+def _default_failure_type_scales() -> dict[str, dict[str, float]]:
+    return {
+        "FN_BG": {"cls": 1.0, "box": 0.25, "ctr": 0.5},
+        "FN_CLS": {"cls": 1.0, "box": 0.25, "ctr": 0.25},
+        "FN_LOC": {"cls": 0.25, "box": 1.0, "ctr": 1.0},
+        "FN_MISS": {"cls": 1.0, "box": 0.5, "ctr": 0.5},
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class DHMLossWeightingConfig:
+    enabled: bool = False
+    min_instability: float = 0.5
+    cls_weight: float = 1.0
+    box_weight: float = 1.0
+    ctr_weight: float = 1.0
+    max_weight: float = 2.0
+    use_failure_type_scales: bool = True
+    failure_type_scales: dict[str, dict[str, float]] = field(default_factory=_default_failure_type_scales)
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMLossWeightingConfig":
+        data = dict(raw or {})
+        scales = _default_failure_type_scales()
+        raw_scales = data.get("failure_type_scales", {})
+        if isinstance(raw_scales, Mapping):
+            for state, raw_components in raw_scales.items():
+                if not isinstance(raw_components, Mapping):
+                    continue
+                state_key = str(state)
+                components = dict(scales.get(state_key, {}))
+                for component, value in raw_components.items():
+                    components[str(component)] = float(value)
+                scales[state_key] = components
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            min_instability=float(data.get("min_instability", 0.5)),
+            cls_weight=float(data.get("cls_weight", 1.0)),
+            box_weight=float(data.get("box_weight", 1.0)),
+            ctr_weight=float(data.get("ctr_weight", 1.0)),
+            max_weight=float(data.get("max_weight", 2.0)),
+            use_failure_type_scales=bool(data.get("use_failure_type_scales", True)),
+            failure_type_scales=scales,
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not 0.0 <= self.min_instability <= 1.0:
+            raise ValueError("DHM loss_weighting.min_instability must satisfy 0 <= value <= 1.")
+        for field_name in ("cls_weight", "box_weight", "ctr_weight"):
+            if float(getattr(self, field_name)) < 0.0:
+                raise ValueError(f"DHM loss_weighting.{field_name} must be >= 0.")
+        if self.max_weight < 1.0:
+            raise ValueError("DHM loss_weighting.max_weight must be >= 1.")
+        unsupported_states = sorted(set(self.failure_type_scales) - set(_FN_STATES))
+        if unsupported_states:
+            raise ValueError(f"DHM loss_weighting.failure_type_scales has unsupported states: {unsupported_states}.")
+        for state, components in self.failure_type_scales.items():
+            unsupported_components = sorted(set(components) - set(_COMPONENTS))
+            if unsupported_components:
+                raise ValueError(
+                    "DHM loss_weighting.failure_type_scales."
+                    f"{state} has unsupported components: {unsupported_components}."
+                )
+            for component, value in components.items():
+                if float(value) < 0.0:
+                    raise ValueError(
+                        f"DHM loss_weighting.failure_type_scales.{state}.{component} must be >= 0."
+                    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "min_instability": self.min_instability,
+            "cls_weight": self.cls_weight,
+            "box_weight": self.box_weight,
+            "ctr_weight": self.ctr_weight,
+            "max_weight": self.max_weight,
+            "use_failure_type_scales": self.use_failure_type_scales,
+            "failure_type_scales": {
+                state: dict(components)
+                for state, components in self.failure_type_scales.items()
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DHMConfig:
+    enabled: bool = False
+    mining: DHMMiningConfig = field(default_factory=DHMMiningConfig)
+    scoring: DHMScoringConfig = field(default_factory=DHMScoringConfig)
+    loss_weighting: DHMLossWeightingConfig = field(default_factory=DHMLossWeightingConfig)
+    record_match_threshold: float = 0.95
+    max_records: int | None = None
+    arch: str | None = None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None = None,
+        *,
+        arch: str | None = None,
+    ) -> "DHMConfig":
+        data = dict(raw or {})
+        normalized_arch = normalize_arch(arch or data.get("arch"))
+        model_overrides: dict[str, Any] = {}
+        if normalized_arch is not None:
+            per_model = data.get("models", {})
+            if isinstance(per_model, Mapping):
+                selected = per_model.get(normalized_arch, {})
+                if isinstance(selected, Mapping):
+                    model_overrides = dict(selected)
+
+        merged = dict(data)
+        for key, value in model_overrides.items():
+            if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+                nested = dict(merged[key])
+                nested.update(value)
+                merged[key] = nested
+            else:
+                merged[key] = value
+
+        config = cls(
+            enabled=bool(merged.get("enabled", False)),
+            mining=DHMMiningConfig.from_mapping(merged.get("mining")),
+            scoring=DHMScoringConfig.from_mapping(merged.get("scoring")),
+            loss_weighting=DHMLossWeightingConfig.from_mapping(merged.get("loss_weighting")),
+            record_match_threshold=float(merged.get("record_match_threshold", 0.95)),
+            max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
+            arch=normalized_arch,
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not 0.0 <= self.record_match_threshold <= 1.0:
+            raise ValueError("DHM record_match_threshold must satisfy 0 <= value <= 1.")
+        if self.max_records is not None and self.max_records < 1:
+            raise ValueError("DHM max_records must be null or >= 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "mining": self.mining.to_dict(),
+            "scoring": self.scoring.to_dict(),
+            "loss_weighting": self.loss_weighting.to_dict(),
+            "record_match_threshold": self.record_match_threshold,
+            "max_records": self.max_records,
+            "arch": self.arch,
+        }
+
+
+@dataclass(slots=True)
+class DHMRecord:
+    gt_uid: str
+    image_id: str
+    ann_id: str | None
+    class_id: int
+    bbox: torch.Tensor
+    first_seen_epoch: int | None = None
+    last_seen_epoch: int | None = None
+    first_tp_epoch: int | None = None
+    last_tp_epoch: int | None = None
+    last_fn_epoch: int | None = None
+    last_state: str = "UNSEEN"
+    last_score: float = 0.0
+    last_iou: float = 0.0
+    total_seen: int = 0
+    tp_count: int = 0
+    fn_count: int = 0
+    consecutive_tp: int = 0
+    consecutive_fn: int = 0
+    max_fn_streak: int = 0
+    forgetting_count: int = 0
+    recovery_count: int = 0
+    fn_type_switch_count: int = 0
+    state_change_count: int = 0
+    state_counts: dict[str, int] = field(default_factory=dict)
+    ema_score: float = 0.0
+    ema_iou: float = 0.0
+    instability_score: float = 0.0
+
+    @property
+    def dominant_failure_type(self) -> str | None:
+        best_state = None
+        best_count = 0
+        for state in _FN_STATES:
+            count = int(self.state_counts.get(state, 0))
+            if count > best_count:
+                best_state = state
+                best_count = count
+        return best_state
+
+    def update(
+        self,
+        *,
+        state: str,
+        score: float,
+        iou: float,
+        bbox: torch.Tensor,
+        epoch: int,
+        scoring: DHMScoringConfig,
+    ) -> dict[str, bool]:
+        if state not in _ALL_STATES:
+            raise ValueError(f"Unsupported DHM state: {state!r}")
+
+        prev_state = self.last_state
+        prev_was_tp = prev_state == _TP_STATE
+        prev_was_fn = prev_state in _FN_STATES
+        current_is_tp = state == _TP_STATE
+        current_is_fn = state in _FN_STATES
+
+        relapse = bool(prev_was_tp and current_is_fn)
+        recovery = bool(prev_was_fn and current_is_tp)
+        type_switch = bool(prev_state in _FN_STATES and state in _FN_STATES and prev_state != state)
+        state_change = bool(prev_state != "UNSEEN" and prev_state != state)
+
+        if self.first_seen_epoch is None:
+            self.first_seen_epoch = int(epoch)
+        self.last_seen_epoch = int(epoch)
+        if current_is_tp:
+            if self.first_tp_epoch is None:
+                self.first_tp_epoch = int(epoch)
+            self.last_tp_epoch = int(epoch)
+            self.tp_count += 1
+            self.consecutive_tp += 1
+            self.consecutive_fn = 0
+        else:
+            self.last_fn_epoch = int(epoch)
+            self.fn_count += 1
+            self.consecutive_fn += 1
+            self.consecutive_tp = 0
+            self.max_fn_streak = max(self.max_fn_streak, self.consecutive_fn)
+
+        self.total_seen += 1
+        self.state_counts[state] = int(self.state_counts.get(state, 0)) + 1
+        if relapse:
+            self.forgetting_count += 1
+        if recovery:
+            self.recovery_count += 1
+        if type_switch:
+            self.fn_type_switch_count += 1
+        if state_change:
+            self.state_change_count += 1
+
+        momentum = float(scoring.ema_momentum)
+        if self.total_seen <= 1:
+            self.ema_score = float(score)
+            self.ema_iou = float(iou)
+        else:
+            self.ema_score = momentum * float(self.ema_score) + (1.0 - momentum) * float(score)
+            self.ema_iou = momentum * float(self.ema_iou) + (1.0 - momentum) * float(iou)
+
+        self.last_state = state
+        self.last_score = float(score)
+        self.last_iou = float(iou)
+        self.bbox = bbox.detach().cpu().reshape(4)
+        self.instability_score = self._compute_instability(scoring)
+        return {
+            "relapse": relapse,
+            "recovery": recovery,
+            "type_switch": type_switch,
+            "state_change": state_change,
+        }
+
+    def status(self, scoring: DHMScoringConfig) -> str:
+        if self.total_seen < int(scoring.min_observations):
+            return "warming"
+        fn_rate = float(self.fn_count) / float(max(self.total_seen, 1))
+        tp_rate = float(self.tp_count) / float(max(self.total_seen, 1))
+        if self.fn_type_switch_count >= int(scoring.oscillator_switches):
+            return "oscillator"
+        if self.forgetting_count > 0:
+            return "relapser"
+        if fn_rate >= float(scoring.persistent_fn_rate):
+            return "persistent_fn"
+        if (
+            self.first_seen_epoch is not None
+            and self.first_tp_epoch is not None
+            and int(self.first_tp_epoch) - int(self.first_seen_epoch) >= int(scoring.late_learner_min_epoch_gap)
+            and self.consecutive_tp > 0
+        ):
+            return "late_learner"
+        if tp_rate >= float(scoring.stable_tp_rate) and self.forgetting_count == 0 and self.consecutive_fn == 0:
+            return "stable_tp"
+        return "mixed"
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "gt_uid": self.gt_uid,
+            "image_id": self.image_id,
+            "ann_id": self.ann_id,
+            "class_id": self.class_id,
+            "bbox": self.bbox.detach().cpu(),
+            "first_seen_epoch": self.first_seen_epoch,
+            "last_seen_epoch": self.last_seen_epoch,
+            "first_tp_epoch": self.first_tp_epoch,
+            "last_tp_epoch": self.last_tp_epoch,
+            "last_fn_epoch": self.last_fn_epoch,
+            "last_state": self.last_state,
+            "last_score": self.last_score,
+            "last_iou": self.last_iou,
+            "total_seen": self.total_seen,
+            "tp_count": self.tp_count,
+            "fn_count": self.fn_count,
+            "consecutive_tp": self.consecutive_tp,
+            "consecutive_fn": self.consecutive_fn,
+            "max_fn_streak": self.max_fn_streak,
+            "forgetting_count": self.forgetting_count,
+            "recovery_count": self.recovery_count,
+            "fn_type_switch_count": self.fn_type_switch_count,
+            "state_change_count": self.state_change_count,
+            "state_counts": dict(self.state_counts),
+            "ema_score": self.ema_score,
+            "ema_iou": self.ema_iou,
+            "instability_score": self.instability_score,
+        }
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, Any]) -> "DHMRecord":
+        return cls(
+            gt_uid=str(state["gt_uid"]),
+            image_id=str(state.get("image_id", "")),
+            ann_id=None if state.get("ann_id") is None else str(state.get("ann_id")),
+            class_id=int(state["class_id"]),
+            bbox=torch.as_tensor(state["bbox"], dtype=torch.float32).reshape(4),
+            first_seen_epoch=state.get("first_seen_epoch"),
+            last_seen_epoch=state.get("last_seen_epoch"),
+            first_tp_epoch=state.get("first_tp_epoch"),
+            last_tp_epoch=state.get("last_tp_epoch"),
+            last_fn_epoch=state.get("last_fn_epoch"),
+            last_state=str(state.get("last_state", "UNSEEN")),
+            last_score=float(state.get("last_score", 0.0)),
+            last_iou=float(state.get("last_iou", 0.0)),
+            total_seen=int(state.get("total_seen", 0)),
+            tp_count=int(state.get("tp_count", 0)),
+            fn_count=int(state.get("fn_count", 0)),
+            consecutive_tp=int(state.get("consecutive_tp", 0)),
+            consecutive_fn=int(state.get("consecutive_fn", 0)),
+            max_fn_streak=int(state.get("max_fn_streak", 0)),
+            forgetting_count=int(state.get("forgetting_count", 0)),
+            recovery_count=int(state.get("recovery_count", 0)),
+            fn_type_switch_count=int(state.get("fn_type_switch_count", 0)),
+            state_change_count=int(state.get("state_change_count", 0)),
+            state_counts={str(k): int(v) for k, v in dict(state.get("state_counts", {})).items()},
+            ema_score=float(state.get("ema_score", 0.0)),
+            ema_iou=float(state.get("ema_iou", 0.0)),
+            instability_score=float(state.get("instability_score", 0.0)),
+        )
+
+    def _compute_instability(self, scoring: DHMScoringConfig) -> float:
+        total = float(max(self.total_seen, 1))
+        forgetting_rate = float(self.forgetting_count) / float(max(self.total_seen - 1, 1))
+        fn_rate = float(self.fn_count) / total
+        fn_streak = min(1.0, float(self.max_fn_streak) / float(max(scoring.streak_norm_epochs, 1)))
+        type_switch_rate = float(self.fn_type_switch_count) / float(max(self.fn_count - 1, 1))
+        recent_fn = 1.0 if self.last_state in _FN_STATES else 0.0
+        stable_tp = float(self.consecutive_tp) / total
+
+        weighted = (
+            float(scoring.forgetting_weight) * forgetting_rate
+            + float(scoring.fn_rate_weight) * fn_rate
+            + float(scoring.fn_streak_weight) * fn_streak
+            + float(scoring.type_switch_weight) * type_switch_rate
+            + float(scoring.recent_fn_weight) * recent_fn
+        )
+        total_weight = (
+            float(scoring.forgetting_weight)
+            + float(scoring.fn_rate_weight)
+            + float(scoring.fn_streak_weight)
+            + float(scoring.type_switch_weight)
+            + float(scoring.recent_fn_weight)
+        )
+        score = weighted / max(total_weight, 1.0e-6)
+        score -= float(scoring.stable_tp_discount) * stable_tp
+        return float(max(float(scoring.min_instability), min(float(scoring.max_instability), score)))
+
+
+class DetectionHysteresisMemory(nn.Module):
+    def __init__(self, config: DHMConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.current_epoch = 0
+        self._records: dict[str, DHMRecord] = {}
+        self._image_index: defaultdict[str, set[str]] = defaultdict(set)
+        self._stats: Counter[str] = Counter()
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def start_epoch(self, epoch: int) -> None:
+        self.current_epoch = int(epoch)
+        self._stats.clear()
+
+    def end_epoch(self, epoch: int | None = None) -> None:
+        if epoch is not None:
+            self.current_epoch = int(epoch)
+
+    def should_mine(self, *, epoch: int | None = None) -> bool:
+        epoch_value = int(self.current_epoch if epoch is None else epoch)
+        if not self.config.enabled or not self.config.mining.enabled:
+            return False
+        if epoch_value <= int(self.config.mining.warmup_epochs):
+            return False
+        return epoch_value % int(self.config.mining.mine_interval) == 0
+
+    @torch.no_grad()
+    def mine_batch(
+        self,
+        *,
+        detections: Sequence[Mapping[str, torch.Tensor]],
+        original_targets: Sequence[Mapping[str, torch.Tensor]],
+        epoch: int,
+    ) -> dict[str, int]:
+        if not self.should_mine(epoch=epoch):
+            return {}
+        self.current_epoch = int(epoch)
+        stats = Counter()
+        for image_index, (detection, target) in enumerate(zip(detections, original_targets, strict=True)):
+            stats.update(self._mine_image(detection=detection, target=target, epoch=epoch, image_index=image_index))
+        self._stats.update(stats)
+        self._prune_records()
+        return {key: int(value) for key, value in stats.items()}
+
+    def get_record(self, gt_uid: str) -> DHMRecord | None:
+        return self._records.get(str(gt_uid))
+
+    def get_image_records(self, image_id: torch.Tensor | int | str) -> list[DHMRecord]:
+        image_key = _normalize_image_id(image_id)
+        return [
+            self._records[gt_uid]
+            for gt_uid in sorted(self._image_index.get(image_key, ()))
+            if gt_uid in self._records
+        ]
+
+    def loss_weight_for_record(self, record: DHMRecord | None, *, component: str) -> float:
+        if record is None:
+            return 1.0
+        config = self.config.loss_weighting
+        if not bool(config.enabled):
+            return 1.0
+        if component not in _COMPONENTS:
+            raise ValueError(f"Unsupported DHM loss component: {component!r}")
+        if int(record.total_seen) < int(self.config.scoring.min_observations):
+            return 1.0
+        instability = float(record.instability_score)
+        min_instability = float(config.min_instability)
+        if instability < min_instability:
+            return 1.0
+        if min_instability >= 1.0:
+            normalized = 1.0
+        else:
+            normalized = min(1.0, max(0.0, (instability - min_instability) / max(1.0 - min_instability, 1.0e-6)))
+        base_scale = {
+            "cls": float(config.cls_weight),
+            "box": float(config.box_weight),
+            "ctr": float(config.ctr_weight),
+        }[component]
+        if bool(config.use_failure_type_scales):
+            failure_type = record.dominant_failure_type
+            type_scales = config.failure_type_scales.get(str(failure_type), {}) if failure_type else {}
+            base_scale *= float(type_scales.get(component, 1.0))
+        weight = 1.0 + base_scale * normalized
+        return float(min(float(config.max_weight), max(1.0, weight)))
+
+    def summary(self) -> dict[str, Any]:
+        status_counts = Counter(record.status(self.config.scoring) for record in self._records.values())
+        last_state_counts = Counter(record.last_state for record in self._records.values())
+        dominant_failure_counts = Counter(
+            record.dominant_failure_type
+            for record in self._records.values()
+            if record.dominant_failure_type is not None
+        )
+        instability_sum = sum(float(record.instability_score) for record in self._records.values())
+        current_failures = sum(1 for record in self._records.values() if record.last_state in _FN_STATES)
+        return {
+            "enabled": self.config.enabled,
+            "arch": self.config.arch,
+            "current_epoch": self.current_epoch,
+            "num_records": len(self._records),
+            "num_images": len(self._image_index),
+            "num_current_failures": current_failures,
+            "mean_instability": instability_sum / float(max(len(self._records), 1)),
+            "global_max_fn_streak": max((record.max_fn_streak for record in self._records.values()), default=0),
+            "total_forgetting": sum(record.forgetting_count for record in self._records.values()),
+            "total_recovery": sum(record.recovery_count for record in self._records.values()),
+            "total_type_switch": sum(record.fn_type_switch_count for record in self._records.values()),
+            "last_state_counts": dict(last_state_counts),
+            "status_counts": dict(status_counts),
+            "dominant_failure_counts": dict(dominant_failure_counts),
+            "mining": {key: int(value) for key, value in self._stats.items()},
+            "loss_weighting": {
+                "enabled": bool(self.config.loss_weighting.enabled),
+                "min_instability": float(self.config.loss_weighting.min_instability),
+                "max_weight": float(self.config.loss_weighting.max_weight),
+            },
+        }
+
+    def get_extra_state(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "current_epoch": self.current_epoch,
+            "config": self.config.to_dict(),
+            "records": {gt_uid: record.to_state() for gt_uid, record in self._records.items()},
+            "stats": dict(self._stats),
+        }
+
+    def set_extra_state(self, state: Mapping[str, Any] | None) -> None:
+        if not isinstance(state, Mapping):
+            self._records.clear()
+            self._image_index.clear()
+            self._stats.clear()
+            return
+        self.current_epoch = int(state.get("current_epoch", self.current_epoch))
+        records: dict[str, DHMRecord] = {}
+        raw_records = state.get("records", {})
+        if isinstance(raw_records, Mapping):
+            for gt_uid, raw_record in raw_records.items():
+                if isinstance(raw_record, Mapping):
+                    records[str(gt_uid)] = DHMRecord.from_state(raw_record)
+        self._records = records
+        self._rebuild_image_index()
+        raw_stats = state.get("stats", {})
+        self._stats = Counter({str(k): int(v) for k, v in raw_stats.items()}) if isinstance(raw_stats, Mapping) else Counter()
+
+    def _mine_image(
+        self,
+        *,
+        detection: Mapping[str, torch.Tensor],
+        target: Mapping[str, torch.Tensor],
+        epoch: int,
+        image_index: int,
+    ) -> Counter[str]:
+        gt_boxes = target["boxes"].detach()
+        gt_labels = target["labels"].to(dtype=torch.int64)
+        gt_ids = _extract_gt_ids(target, int(gt_boxes.shape[0]))
+        image_id = _normalize_image_id(target.get("image_id", torch.tensor(image_index)))
+        pred_boxes = detection.get("boxes", gt_boxes.new_zeros((0, 4))).detach().to(dtype=torch.float32)
+        pred_labels = detection.get("labels", gt_labels.new_zeros((0,))).detach().to(dtype=torch.int64)
+        pred_scores = detection.get("scores", pred_boxes.new_zeros((0,))).detach().to(dtype=torch.float32)
+
+        stats: Counter[str] = Counter()
+        for gt_index in range(int(gt_boxes.shape[0])):
+            class_id = int(gt_labels[gt_index].item())
+            ann_id = gt_ids[gt_index]
+            gt_uid = _gt_uid(
+                image_id=image_id,
+                class_id=class_id,
+                bbox=gt_boxes[gt_index],
+                image_shape=None,
+                gt_id=ann_id,
+            )
+            detection_state = _assign_detection_state(
+                gt_box=gt_boxes[gt_index],
+                gt_label=class_id,
+                pred_boxes=pred_boxes,
+                pred_labels=pred_labels,
+                pred_scores=pred_scores,
+                matching=self.config.mining.matching,
+            )
+            state = str(detection_state["state"])
+            record = self._records.get(gt_uid)
+            if record is None:
+                record = DHMRecord(
+                    gt_uid=gt_uid,
+                    image_id=image_id,
+                    ann_id=None if ann_id is None else str(ann_id),
+                    class_id=class_id,
+                    bbox=gt_boxes[gt_index].detach().cpu().reshape(4),
+                )
+                self._records[gt_uid] = record
+                self._image_index[image_id].add(gt_uid)
+            flags = record.update(
+                state=state,
+                score=float(detection_state["score"]),
+                iou=float(detection_state["iou"]),
+                bbox=gt_boxes[gt_index].detach().cpu().reshape(4),
+                epoch=epoch,
+                scoring=self.config.scoring,
+            )
+            stats["gt_seen"] += 1
+            if state == _TP_STATE:
+                stats["num_tp"] += 1
+            else:
+                stats["num_fn"] += 1
+                stats[f"num_{state.lower()}"] += 1
+            if flags["relapse"]:
+                stats["relapses"] += 1
+            if flags["recovery"]:
+                stats["recoveries"] += 1
+            if flags["type_switch"]:
+                stats["type_switches"] += 1
+            if flags["state_change"]:
+                stats["state_changes"] += 1
+        return stats
+
+    def _rebuild_image_index(self) -> None:
+        image_index: defaultdict[str, set[str]] = defaultdict(set)
+        for gt_uid, record in self._records.items():
+            if record.image_id:
+                image_index[str(record.image_id)].add(gt_uid)
+        self._image_index = image_index
+
+    def _prune_records(self) -> None:
+        max_records = self.config.max_records
+        if max_records is None or len(self._records) <= int(max_records):
+            return
+        sorted_records = sorted(
+            self._records.items(),
+            key=lambda item: (
+                float(item[1].last_seen_epoch or 0),
+                float(item[1].instability_score),
+                float(item[1].forgetting_count),
+            ),
+            reverse=True,
+        )
+        self._records = dict(sorted_records[: int(max_records)])
+        self._rebuild_image_index()
+
+
+def load_dhm_config(path: str | Path, *, arch: str | None = None) -> DHMConfig:
+    config_path = Path(path).expanduser().resolve()
+    with open(config_path, "r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"DHM YAML must contain a mapping at the top level: {config_path}")
+    return DHMConfig.from_mapping(raw, arch=arch)
+
+
+def build_dhm_from_config(
+    raw_config: Mapping[str, Any] | DHMConfig,
+    *,
+    arch: str | None = None,
+) -> DetectionHysteresisMemory | None:
+    config = raw_config if isinstance(raw_config, DHMConfig) else DHMConfig.from_mapping(raw_config, arch=arch)
+    if not config.enabled:
+        return None
+    return DetectionHysteresisMemory(config)
+
+
+def build_dhm_from_yaml(
+    path: str | Path,
+    *,
+    arch: str | None = None,
+) -> DetectionHysteresisMemory | None:
+    config = load_dhm_config(path, arch=arch)
+    if not config.enabled:
+        return None
+    return DetectionHysteresisMemory(config)
+
+
+def _assign_detection_state(
+    *,
+    gt_box: torch.Tensor,
+    gt_label: int,
+    pred_boxes: torch.Tensor,
+    pred_labels: torch.Tensor,
+    pred_scores: torch.Tensor,
+    matching: DHMMatchingConfig,
+) -> dict[str, object]:
+    if pred_boxes.numel() == 0:
+        return {"state": "FN_MISS", "score": 0.0, "iou": 0.0}
+    gt_box = gt_box.to(device=pred_boxes.device, dtype=torch.float32).reshape(1, 4)
+    ious = box_ops.box_iou(gt_box, pred_boxes.to(dtype=torch.float32))[0].clamp(min=0.0, max=1.0)
+    target_mask = pred_labels == int(gt_label)
+    tp_mask = target_mask & (ious >= float(matching.tau_iou)) & (pred_scores >= float(matching.tau_tp))
+    if bool(tp_mask.any().item()):
+        tp_indices = torch.where(tp_mask)[0]
+        quality = pred_scores[tp_indices] * ious[tp_indices]
+        best = tp_indices[int(torch.argmax(quality).item())]
+        return {
+            "state": "TP",
+            "score": float(pred_scores[best].item()),
+            "iou": float(ious[best].item()),
+        }
+
+    best_any_iou = float(ious.max().item()) if ious.numel() else 0.0
+    best_target_score = 0.0
+    best_near_target_score = 0.0
+    best_near_wrong_score = 0.0
+    best_target_iou = 0.0
+    if bool(target_mask.any().item()):
+        best_target_score = float(pred_scores[target_mask].max().item())
+        evidence_mask = target_mask & (pred_scores >= float(matching.tau_cls_evidence))
+        if bool(evidence_mask.any().item()):
+            best_target_iou = float(ious[evidence_mask].max().item())
+    near_mask = ious >= float(matching.tau_near)
+    if bool((near_mask & target_mask).any().item()):
+        best_near_target_score = float(pred_scores[near_mask & target_mask].max().item())
+    if bool((near_mask & ~target_mask).any().item()):
+        best_near_wrong_score = float(pred_scores[near_mask & ~target_mask].max().item())
+
+    if best_any_iou < float(matching.tau_near) and best_target_score < float(matching.tau_bg_score):
+        state = "FN_MISS"
+    elif best_near_target_score < float(matching.tau_bg_score) and best_near_wrong_score < float(matching.tau_bg_score):
+        state = "FN_BG"
+    elif best_any_iou >= float(matching.tau_near) and best_near_target_score < float(matching.tau_tp):
+        state = "FN_CLS"
+    elif best_target_score >= float(matching.tau_loc_score) and best_target_iou < float(matching.tau_iou):
+        state = "FN_LOC"
+    else:
+        state = "FN_BG"
+
+    return {
+        "state": state,
+        "score": float(max(best_near_target_score, best_target_score)),
+        "iou": float(max(best_target_iou, best_any_iou)),
+    }
+
+
+def _extract_gt_ids(target: Mapping[str, Any], count: int) -> list[Any | None]:
+    for key in ("gt_ids", "annotation_ids", "ann_ids"):
+        value = target.get(key)
+        if value is None:
+            continue
+        if isinstance(value, torch.Tensor):
+            flattened = value.detach().cpu().flatten().tolist()
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            flattened = list(value)
+        else:
+            flattened = [value]
+        if len(flattened) == count:
+            return [None if _is_invalid_gt_id(item) else item for item in flattened]
+    return [None for _ in range(count)]
+
+
+def _is_invalid_gt_id(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return int(value) < 0
+    except (TypeError, ValueError):
+        return str(value) == ""
+
+
+def _gt_uid(
+    *,
+    image_id: str,
+    class_id: int,
+    bbox: torch.Tensor,
+    image_shape: Sequence[int] | None,
+    gt_id: Any | None,
+) -> str:
+    if gt_id is not None and not _is_invalid_gt_id(gt_id):
+        return f"{image_id}:ann:{gt_id}"
+    box = bbox.detach().cpu().to(dtype=torch.float32).flatten()
+    if image_shape is not None and len(image_shape) == 2:
+        height = max(1.0, float(image_shape[0]))
+        width = max(1.0, float(image_shape[1]))
+        scale = box.new_tensor([width, height, width, height])
+        box = box / scale
+    box_key = ",".join(f"{float(value):.6f}" for value in box.tolist())
+    digest = hashlib.sha1(f"{image_id}:{class_id}:{box_key}".encode("utf-8")).hexdigest()[:16]
+    return f"{image_id}:box:{class_id}:{digest}"
+
+
+def _normalize_image_id(value: Any) -> str:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return ""
+        if value.numel() == 1:
+            raw = value.detach().cpu().flatten()[0].item()
+            if isinstance(raw, float) and raw.is_integer():
+                return str(int(raw))
+            return str(raw)
+        return ",".join(str(item) for item in value.detach().cpu().flatten().tolist())
+    return str(value)
+

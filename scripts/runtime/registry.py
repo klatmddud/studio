@@ -6,6 +6,7 @@ from typing import Any
 import torch.nn as nn
 
 from modules.nn import (
+    build_dhm_from_yaml,
     build_fntdm_from_yaml,
     build_mdmb_from_yaml,
     build_mdmbpp_from_yaml,
@@ -38,6 +39,7 @@ MDMBPP_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmbpp"]
 RASD_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["rasd"]
 TFM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["tfm"]
 FNTDM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["fntdm"]
+DHM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["dhm"]
 
 
 def normalize_arch(raw_arch: str) -> str:
@@ -70,6 +72,7 @@ def build_model_from_config(
     rasd = _build_rasd(normalized_arch, module_paths["rasd"])
     tfm = _build_tfm(normalized_arch, module_paths["tfm"])
     fntdm = _build_fntdm(normalized_arch, module_paths["fntdm"])
+    dhm = _build_dhm(normalized_arch, module_paths["dhm"])
     if normalized_arch == "fcos":
         if rasd is not None and mdmbpp is None:
             raise ValueError("RASD requires MDMB++ to be enabled for FCOS.")
@@ -84,6 +87,7 @@ def build_model_from_config(
             rasd=rasd,
             tfm=tfm,
             fntdm=fntdm,
+            dhm=dhm,
         )
     return builder(model_config, mdmb=mdmb)
 
@@ -153,3 +157,12 @@ def _build_fntdm(arch: str, config_path: str | Path) -> nn.Module | None:
     if not path.is_file():
         return None
     return build_fntdm_from_yaml(path, arch=arch)
+
+
+def _build_dhm(arch: str, config_path: str | Path) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    path = Path(config_path)
+    if not path.is_file():
+        return None
+    return build_dhm_from_yaml(path, arch=arch)
