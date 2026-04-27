@@ -113,17 +113,29 @@ class DHMFCOS(FCOS):
                 )
 
             head_outputs = self.head(feature_list)
-            if self._should_use_custom_loss(dhm=dhm, dhmr=dhmr):
+            use_custom_loss = self._should_use_custom_loss(dhm=dhm, dhmr=dhmr)
+            if use_custom_loss:
                 losses = self._compute_weighted_loss_dict(
                     targets=targets,
                     image_shapes=images.image_sizes,
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
+                    num_anchors_per_level=num_anchors_per_level,
                     dhm=dhm,
                     dhmr=dhmr,
                 )
             else:
+                if dhm is not None and len(dhm) > 0:
+                    self._record_dhm_assignment_statistics_for_batch(
+                        targets=targets,
+                        image_shapes=images.image_sizes,
+                        head_outputs=head_outputs,
+                        anchors=anchors,
+                        matched_idxs=matched_idxs,
+                        num_anchors_per_level=num_anchors_per_level,
+                        dhm=dhm,
+                    )
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
 
             if dhmr is not None and dhm is not None:
@@ -163,6 +175,7 @@ class DHMFCOS(FCOS):
         head_outputs: dict[str, torch.Tensor],
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
+        num_anchors_per_level: list[int],
         dhm: DetectionHysteresisMemory | None = None,
         dhmr: DHMRepairModule | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -191,12 +204,19 @@ class DHMFCOS(FCOS):
             pos_mask = assignments >= 0
             total_pos += int(pos_mask.sum().item())
             records: list[DHMRecord | None] = []
-            if dhm is not None and (self._should_apply_dhm_loss_weighting(dhm) or dhmr is not None):
+            if dhm is not None and len(dhm) > 0:
                 records = self._lookup_dhm_gt_records(
                     dhm=dhm,
                     target=target,
                     image_shape=image_shapes[image_index],
                     image_index=image_index,
+                )
+                self._record_dhm_assignment_statistics(
+                    raw=raw,
+                    dhm=dhm,
+                    records=records,
+                    anchors_per_image=anchors[image_index],
+                    num_anchors_per_level=num_anchors_per_level,
                 )
 
             if dhm is not None:
@@ -305,6 +325,167 @@ class DHMFCOS(FCOS):
             matched_idxs=matched_idxs,
             dhm_records=records_by_image,
             decode_boxes=self._decode_boxes,
+        )
+
+    @torch.no_grad()
+    def _record_dhm_assignment_statistics_for_batch(
+        self,
+        *,
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        num_anchors_per_level: list[int],
+        dhm: DetectionHysteresisMemory,
+    ) -> None:
+        for image_index, target in enumerate(targets):
+            raw = self._compute_raw_losses_for_image(
+                image_index=image_index,
+                target=target,
+                head_outputs=head_outputs,
+                anchors_per_image=anchors[image_index],
+                matched_idxs_per_image=matched_idxs[image_index],
+            )
+            records = self._lookup_dhm_gt_records(
+                dhm=dhm,
+                target=target,
+                image_shape=image_shapes[image_index],
+                image_index=image_index,
+            )
+            self._record_dhm_assignment_statistics(
+                raw=raw,
+                dhm=dhm,
+                records=records,
+                anchors_per_image=anchors[image_index],
+                num_anchors_per_level=num_anchors_per_level,
+            )
+
+    @torch.no_grad()
+    def _record_dhm_assignment_statistics(
+        self,
+        *,
+        raw: dict[str, torch.Tensor],
+        dhm: DetectionHysteresisMemory,
+        records: list[DHMRecord | None],
+        anchors_per_image: torch.Tensor,
+        num_anchors_per_level: list[int],
+    ) -> None:
+        if not records:
+            return
+        observations = self._build_dhm_assignment_observations(
+            raw=raw,
+            anchors_per_image=anchors_per_image,
+            num_anchors_per_level=num_anchors_per_level,
+        )
+        if observations:
+            dhm.record_assignment_observations(
+                records=records,
+                observations=observations,
+                epoch=dhm.current_epoch,
+            )
+
+    @torch.no_grad()
+    def _build_dhm_assignment_observations(
+        self,
+        *,
+        raw: dict[str, torch.Tensor],
+        anchors_per_image: torch.Tensor,
+        num_anchors_per_level: list[int],
+    ) -> list[dict[str, object]]:
+        assignments = raw["assignments"]
+        gt_boxes = raw["gt_boxes"]
+        num_gt = int(gt_boxes.shape[0])
+        if num_gt == 0:
+            return []
+
+        anchor_centers = (anchors_per_image[:, :2] + anchors_per_image[:, 2:]) * 0.5
+        anchor_sizes = (anchors_per_image[:, 2] - anchors_per_image[:, 0]).clamp_min(1.0e-6)
+        gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) * 0.5
+        gt_wh = (gt_boxes[:, 2:] - gt_boxes[:, :2]).clamp_min(1.0)
+        gt_scale = gt_wh.max(dim=1).values.clamp_min(1.0)
+
+        x, y = anchor_centers.unsqueeze(dim=2).unbind(dim=1)
+        x0, y0, x1, y1 = gt_boxes.unsqueeze(dim=0).unbind(dim=2)
+        pairwise_dist = torch.stack([x - x0, y - y0, x1 - x, y1 - y], dim=2)
+        inside_box = pairwise_dist.min(dim=2).values > 0
+
+        lower_bound = anchor_sizes * 4
+        lower_bound[: num_anchors_per_level[0]] = 0
+        upper_bound = anchor_sizes * 8
+        upper_bound[-num_anchors_per_level[-1] :] = float("inf")
+        max_box_dist = pairwise_dist.max(dim=2).values
+        scale_match = (max_box_dist > lower_bound[:, None]) & (max_box_dist < upper_bound[:, None])
+        center_dist = (anchor_centers[:, None, :] - gt_centers[None]).abs().max(dim=2).values
+        near_candidate = (
+            inside_box
+            & scale_match
+            & (center_dist < float(self.center_sampling_radius) * anchor_sizes[:, None])
+        )
+
+        level_ids = self._fcos_level_ids(
+            num_anchors_per_level=num_anchors_per_level,
+            device=assignments.device,
+        )
+        observations: list[dict[str, object]] = []
+        for gt_index in range(num_gt):
+            pos_mask = assignments == int(gt_index)
+            pos_count = int(pos_mask.sum().item())
+            level_counts: dict[str, int] = {}
+            if pos_count > 0:
+                selected_levels = level_ids[pos_mask]
+                for level_index in torch.unique(selected_levels).detach().cpu().tolist():
+                    count = int((selected_levels == int(level_index)).sum().item())
+                    level_counts[f"P{int(level_index) + 3}"] = count
+                normalized_center_dist = (
+                    center_dist[pos_mask, gt_index] / gt_scale[gt_index]
+                )
+                center_dist_value = float(normalized_center_dist.mean().item())
+                ctr_target_value = float(raw["ctr_targets"][pos_mask].mean().item())
+                cls_loss_value = float(raw["cls_losses"][pos_mask].mean().item())
+                box_loss_value = float(raw["reg_losses"][pos_mask].mean().item())
+                ctr_loss_value = float(raw["ctr_losses"][pos_mask].mean().item())
+            else:
+                center_dist_value = 0.0
+                ctr_target_value = 0.0
+                cls_loss_value = 0.0
+                box_loss_value = 0.0
+                ctr_loss_value = 0.0
+
+            candidate_mask = near_candidate[:, gt_index]
+            near_candidate_count = int(candidate_mask.sum().item())
+            near_negative_count = int((candidate_mask & (assignments < 0)).sum().item())
+            ambiguous_count = int(
+                (candidate_mask & (assignments >= 0) & (assignments != int(gt_index))).sum().item()
+            )
+            observations.append(
+                {
+                    "pos_count": pos_count,
+                    "level_pos_counts": level_counts,
+                    "center_dist": center_dist_value,
+                    "centerness_target": ctr_target_value,
+                    "cls_loss": cls_loss_value,
+                    "box_loss": box_loss_value,
+                    "ctr_loss": ctr_loss_value,
+                    "near_candidate_count": near_candidate_count,
+                    "near_negative_count": near_negative_count,
+                    "ambiguous_assigned_elsewhere": ambiguous_count,
+                }
+            )
+        return observations
+
+    def _fcos_level_ids(
+        self,
+        *,
+        num_anchors_per_level: list[int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        return torch.cat(
+            [
+                torch.full((int(count),), level_index, dtype=torch.int64, device=device)
+                for level_index, count in enumerate(num_anchors_per_level)
+            ],
+            dim=0,
         )
 
     def _should_apply_dhm_loss_weighting(self, dhm: DetectionHysteresisMemory | None) -> bool:

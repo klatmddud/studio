@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +21,32 @@ _TP_STATE = "TP"
 _FN_STATES = ("FN_BG", "FN_CLS", "FN_LOC", "FN_MISS")
 _ALL_STATES = (_TP_STATE, *_FN_STATES)
 _COMPONENTS = ("cls", "box", "ctr")
+_ASSIGNMENT_MEAN_FIELDS = (
+    "pos_count",
+    "center_dist",
+    "centerness_target",
+    "cls_loss",
+    "box_loss",
+    "ctr_loss",
+    "near_candidate_count",
+    "near_negative_count",
+    "near_negative_ratio",
+    "ambiguous_assigned_elsewhere",
+    "ambiguous_ratio",
+)
+_ASSIGNMENT_VALUE_ATTRS = {
+    "pos_count": "last_pos_count",
+    "center_dist": "ema_center_dist",
+    "centerness_target": "ema_centerness_target",
+    "cls_loss": "ema_cls_loss",
+    "box_loss": "ema_box_loss",
+    "ctr_loss": "ema_ctr_loss",
+    "near_candidate_count": "last_near_candidate_count",
+    "near_negative_count": "last_near_negative_count",
+    "near_negative_ratio": "ema_near_negative_ratio",
+    "ambiguous_assigned_elsewhere": "last_ambiguous_assigned_elsewhere",
+    "ambiguous_ratio": "ema_ambiguous_ratio",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,9 +479,30 @@ class DHMRecord:
     fn_type_switch_count: int = 0
     state_change_count: int = 0
     state_counts: dict[str, int] = field(default_factory=dict)
+    transition_counts: dict[str, int] = field(default_factory=dict)
+    last_transition: str | None = None
     ema_score: float = 0.0
     ema_iou: float = 0.0
     instability_score: float = 0.0
+    assignment_seen: int = 0
+    last_assignment_epoch: int | None = None
+    last_pos_count: int = 0
+    zero_pos_count: int = 0
+    last_level_pos_counts: dict[str, int] = field(default_factory=dict)
+    level_pos_counts: dict[str, int] = field(default_factory=dict)
+    last_near_candidate_count: int = 0
+    last_near_negative_count: int = 0
+    last_ambiguous_assigned_elsewhere: int = 0
+    ema_pos_count: float = 0.0
+    ema_center_dist: float = 0.0
+    ema_centerness_target: float = 0.0
+    ema_cls_loss: float = 0.0
+    ema_box_loss: float = 0.0
+    ema_ctr_loss: float = 0.0
+    ema_near_negative_count: float = 0.0
+    ema_near_negative_ratio: float = 0.0
+    ema_ambiguous_assigned_elsewhere: float = 0.0
+    ema_ambiguous_ratio: float = 0.0
 
     @property
     def dominant_failure_type(self) -> str | None:
@@ -477,7 +524,7 @@ class DHMRecord:
         bbox: torch.Tensor,
         epoch: int,
         scoring: DHMScoringConfig,
-    ) -> dict[str, bool]:
+    ) -> dict[str, Any]:
         if state not in _ALL_STATES:
             raise ValueError(f"Unsupported DHM state: {state!r}")
 
@@ -490,7 +537,9 @@ class DHMRecord:
         relapse = bool(prev_was_tp and current_is_fn)
         recovery = bool(prev_was_fn and current_is_tp)
         type_switch = bool(prev_state in _FN_STATES and state in _FN_STATES and prev_state != state)
-        state_change = bool(prev_state != "UNSEEN" and prev_state != state)
+        has_previous_state = prev_state in _ALL_STATES
+        state_change = bool(has_previous_state and prev_state != state)
+        transition = f"{prev_state}->{state}" if has_previous_state else None
 
         if self.first_seen_epoch is None:
             self.first_seen_epoch = int(epoch)
@@ -519,6 +568,9 @@ class DHMRecord:
             self.fn_type_switch_count += 1
         if state_change:
             self.state_change_count += 1
+        if transition is not None:
+            self.transition_counts[transition] = int(self.transition_counts.get(transition, 0)) + 1
+            self.last_transition = transition
 
         momentum = float(scoring.ema_momentum)
         if self.total_seen <= 1:
@@ -538,7 +590,71 @@ class DHMRecord:
             "recovery": recovery,
             "type_switch": type_switch,
             "state_change": state_change,
+            "transition": transition,
         }
+
+    def update_assignment_statistics(
+        self,
+        observation: Mapping[str, Any],
+        *,
+        epoch: int,
+        scoring: DHMScoringConfig,
+    ) -> None:
+        momentum = float(scoring.ema_momentum)
+        first_observation = self.assignment_seen <= 0
+
+        pos_count = int(observation.get("pos_count", 0))
+        near_candidate_count = int(observation.get("near_candidate_count", 0))
+        near_negative_count = int(observation.get("near_negative_count", 0))
+        ambiguous_count = int(observation.get("ambiguous_assigned_elsewhere", 0))
+        near_negative_ratio = (
+            float(near_negative_count) / float(max(near_candidate_count, 1))
+            if near_candidate_count > 0
+            else 0.0
+        )
+        ambiguous_ratio = (
+            float(ambiguous_count) / float(max(near_candidate_count, 1))
+            if near_candidate_count > 0
+            else 0.0
+        )
+
+        self.assignment_seen += 1
+        self.last_assignment_epoch = int(epoch)
+        self.last_pos_count = pos_count
+        self.last_near_candidate_count = near_candidate_count
+        self.last_near_negative_count = near_negative_count
+        self.last_ambiguous_assigned_elsewhere = ambiguous_count
+        if pos_count <= 0:
+            self.zero_pos_count += 1
+
+        raw_level_counts = observation.get("level_pos_counts", {})
+        self.last_level_pos_counts = (
+            {str(key): int(value) for key, value in dict(raw_level_counts).items()}
+            if isinstance(raw_level_counts, Mapping)
+            else {}
+        )
+        for level, count in self.last_level_pos_counts.items():
+            self.level_pos_counts[level] = int(self.level_pos_counts.get(level, 0)) + int(count)
+
+        values = {
+            "pos_count": float(pos_count),
+            "center_dist": float(observation.get("center_dist", 0.0)),
+            "centerness_target": float(observation.get("centerness_target", 0.0)),
+            "cls_loss": float(observation.get("cls_loss", 0.0)),
+            "box_loss": float(observation.get("box_loss", 0.0)),
+            "ctr_loss": float(observation.get("ctr_loss", 0.0)),
+            "near_negative_count": float(near_negative_count),
+            "near_negative_ratio": near_negative_ratio,
+            "ambiguous_assigned_elsewhere": float(ambiguous_count),
+            "ambiguous_ratio": ambiguous_ratio,
+        }
+        for field_name, value in values.items():
+            attr_name = f"ema_{field_name}"
+            if first_observation:
+                setattr(self, attr_name, value)
+            else:
+                previous = float(getattr(self, attr_name))
+                setattr(self, attr_name, momentum * previous + (1.0 - momentum) * value)
 
     def status(self, scoring: DHMScoringConfig) -> str:
         if self.total_seen < int(scoring.min_observations):
@@ -588,9 +704,30 @@ class DHMRecord:
             "fn_type_switch_count": self.fn_type_switch_count,
             "state_change_count": self.state_change_count,
             "state_counts": dict(self.state_counts),
+            "transition_counts": dict(self.transition_counts),
+            "last_transition": self.last_transition,
             "ema_score": self.ema_score,
             "ema_iou": self.ema_iou,
             "instability_score": self.instability_score,
+            "assignment_seen": self.assignment_seen,
+            "last_assignment_epoch": self.last_assignment_epoch,
+            "last_pos_count": self.last_pos_count,
+            "zero_pos_count": self.zero_pos_count,
+            "last_level_pos_counts": dict(self.last_level_pos_counts),
+            "level_pos_counts": dict(self.level_pos_counts),
+            "last_near_candidate_count": self.last_near_candidate_count,
+            "last_near_negative_count": self.last_near_negative_count,
+            "last_ambiguous_assigned_elsewhere": self.last_ambiguous_assigned_elsewhere,
+            "ema_pos_count": self.ema_pos_count,
+            "ema_center_dist": self.ema_center_dist,
+            "ema_centerness_target": self.ema_centerness_target,
+            "ema_cls_loss": self.ema_cls_loss,
+            "ema_box_loss": self.ema_box_loss,
+            "ema_ctr_loss": self.ema_ctr_loss,
+            "ema_near_negative_count": self.ema_near_negative_count,
+            "ema_near_negative_ratio": self.ema_near_negative_ratio,
+            "ema_ambiguous_assigned_elsewhere": self.ema_ambiguous_assigned_elsewhere,
+            "ema_ambiguous_ratio": self.ema_ambiguous_ratio,
         }
 
     @classmethod
@@ -620,9 +757,45 @@ class DHMRecord:
             fn_type_switch_count=int(state.get("fn_type_switch_count", 0)),
             state_change_count=int(state.get("state_change_count", 0)),
             state_counts={str(k): int(v) for k, v in dict(state.get("state_counts", {})).items()},
+            transition_counts={
+                str(k): int(v)
+                for k, v in dict(state.get("transition_counts", {})).items()
+            },
+            last_transition=None
+            if state.get("last_transition") is None
+            else str(state.get("last_transition")),
             ema_score=float(state.get("ema_score", 0.0)),
             ema_iou=float(state.get("ema_iou", 0.0)),
             instability_score=float(state.get("instability_score", 0.0)),
+            assignment_seen=int(state.get("assignment_seen", 0)),
+            last_assignment_epoch=state.get("last_assignment_epoch"),
+            last_pos_count=int(state.get("last_pos_count", 0)),
+            zero_pos_count=int(state.get("zero_pos_count", 0)),
+            last_level_pos_counts={
+                str(k): int(v)
+                for k, v in dict(state.get("last_level_pos_counts", {})).items()
+            },
+            level_pos_counts={
+                str(k): int(v)
+                for k, v in dict(state.get("level_pos_counts", {})).items()
+            },
+            last_near_candidate_count=int(state.get("last_near_candidate_count", 0)),
+            last_near_negative_count=int(state.get("last_near_negative_count", 0)),
+            last_ambiguous_assigned_elsewhere=int(
+                state.get("last_ambiguous_assigned_elsewhere", 0)
+            ),
+            ema_pos_count=float(state.get("ema_pos_count", 0.0)),
+            ema_center_dist=float(state.get("ema_center_dist", 0.0)),
+            ema_centerness_target=float(state.get("ema_centerness_target", 0.0)),
+            ema_cls_loss=float(state.get("ema_cls_loss", 0.0)),
+            ema_box_loss=float(state.get("ema_box_loss", 0.0)),
+            ema_ctr_loss=float(state.get("ema_ctr_loss", 0.0)),
+            ema_near_negative_count=float(state.get("ema_near_negative_count", 0.0)),
+            ema_near_negative_ratio=float(state.get("ema_near_negative_ratio", 0.0)),
+            ema_ambiguous_assigned_elsewhere=float(
+                state.get("ema_ambiguous_assigned_elsewhere", 0.0)
+            ),
+            ema_ambiguous_ratio=float(state.get("ema_ambiguous_ratio", 0.0)),
         )
 
     def _compute_instability(self, scoring: DHMScoringConfig) -> float:
@@ -710,6 +883,36 @@ class DetectionHysteresisMemory(nn.Module):
             if gt_uid in self._records
         ]
 
+    def record_assignment_observations(
+        self,
+        *,
+        records: Sequence[DHMRecord | None],
+        observations: Sequence[Mapping[str, Any]],
+        epoch: int | None = None,
+    ) -> dict[str, int]:
+        if not self.config.enabled:
+            return {}
+        epoch_value = int(self.current_epoch if epoch is None else epoch)
+        stats = Counter()
+        for record, observation in zip(records, observations, strict=True):
+            if record is None:
+                stats["assignment_missing_record"] += 1
+                continue
+            record.update_assignment_statistics(
+                observation,
+                epoch=epoch_value,
+                scoring=self.config.scoring,
+            )
+            stats["assignment_observed"] += 1
+            if int(observation.get("pos_count", 0)) <= 0:
+                stats["assignment_zero_pos"] += 1
+            if int(observation.get("near_negative_count", 0)) > 0:
+                stats["assignment_near_negative_gt"] += 1
+            if int(observation.get("ambiguous_assigned_elsewhere", 0)) > 0:
+                stats["assignment_ambiguous_gt"] += 1
+        self._stats.update(stats)
+        return {key: int(value) for key, value in stats.items()}
+
     def loss_weight_for_record(self, record: DHMRecord | None, *, component: str) -> float:
         if record is None:
             return 1.0
@@ -765,6 +968,10 @@ class DetectionHysteresisMemory(nn.Module):
         )
         instability_sum = sum(float(record.instability_score) for record in self._records.values())
         current_failures = sum(1 for record in self._records.values() if record.last_state in _FN_STATES)
+        transition_counts = Counter()
+        for record in self._records.values():
+            for transition, count in record.transition_counts.items():
+                transition_counts[str(transition)] += int(count)
         return {
             "enabled": self.config.enabled,
             "arch": self.config.arch,
@@ -780,6 +987,17 @@ class DetectionHysteresisMemory(nn.Module):
             "last_state_counts": dict(last_state_counts),
             "status_counts": dict(status_counts),
             "dominant_failure_counts": dict(dominant_failure_counts),
+            "transition_matrix": _transition_matrix_from_counts(transition_counts),
+            "assignment_by_state": _assignment_groups(
+                self._records.values(),
+                group_by="state",
+                epoch=self.current_epoch,
+            ),
+            "assignment_by_transition": _assignment_groups(
+                self._records.values(),
+                group_by="transition",
+                epoch=self.current_epoch,
+            ),
             "mining": {key: int(value) for key, value in self._stats.items()},
             "loss_weighting": {
                 "enabled": bool(self.config.loss_weighting.enabled),
@@ -890,6 +1108,10 @@ class DetectionHysteresisMemory(nn.Module):
                 stats["type_switches"] += 1
             if flags["state_change"]:
                 stats["state_changes"] += 1
+            transition = flags.get("transition")
+            if transition is not None:
+                safe_transition = str(transition).replace("->", "_to_").lower()
+                stats[f"transition_{safe_transition}"] += 1
         return stats
 
     def _rebuild_image_index(self) -> None:
@@ -914,6 +1136,79 @@ class DetectionHysteresisMemory(nn.Module):
         )
         self._records = dict(sorted_records[: int(max_records)])
         self._rebuild_image_index()
+
+
+def _transition_matrix_from_counts(counts: Mapping[str, int]) -> dict[str, dict[str, int]]:
+    matrix: dict[str, dict[str, int]] = {}
+    for transition, count in counts.items():
+        if "->" not in str(transition):
+            continue
+        source, target = str(transition).split("->", 1)
+        if source not in _ALL_STATES or target not in _ALL_STATES:
+            continue
+        source_counts = matrix.setdefault(source, {})
+        source_counts[target] = int(source_counts.get(target, 0)) + int(count)
+    return matrix
+
+
+def _assignment_groups(
+    records: Iterable[DHMRecord],
+    *,
+    group_by: str,
+    epoch: int,
+) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if int(record.assignment_seen) <= 0:
+            continue
+        if record.last_assignment_epoch is None or int(record.last_assignment_epoch) != int(epoch):
+            continue
+        if group_by == "state":
+            group_key = str(record.last_state)
+        elif group_by == "transition":
+            if record.last_transition is None:
+                continue
+            group_key = str(record.last_transition)
+        else:
+            raise ValueError(f"Unsupported DHM assignment summary group: {group_by!r}")
+        bucket = groups.setdefault(
+            group_key,
+            {
+                "records": 0,
+                "zero_pos": 0,
+                "level_pos_counts": Counter(),
+                "_sums": defaultdict(float),
+            },
+        )
+        bucket["records"] += 1
+        if int(record.last_pos_count) <= 0:
+            bucket["zero_pos"] += 1
+        level_counts = bucket["level_pos_counts"]
+        if isinstance(level_counts, Counter):
+            for level, count in record.last_level_pos_counts.items():
+                level_counts[str(level)] += int(count)
+        sums = bucket["_sums"]
+        if isinstance(sums, defaultdict):
+            for field_name in _ASSIGNMENT_MEAN_FIELDS:
+                attr_name = _ASSIGNMENT_VALUE_ATTRS[field_name]
+                sums[field_name] += float(getattr(record, attr_name))
+
+    result: dict[str, dict[str, Any]] = {}
+    for group_key, bucket in groups.items():
+        count = int(bucket.get("records", 0))
+        if count <= 0:
+            continue
+        sums = bucket.get("_sums", {})
+        group_result = {
+            "records": count,
+            "zero_pos_rate": float(bucket.get("zero_pos", 0)) / float(count),
+            "level_pos_counts": dict(bucket.get("level_pos_counts", {})),
+        }
+        if isinstance(sums, Mapping):
+            for field_name in _ASSIGNMENT_MEAN_FIELDS:
+                group_result[f"mean_{field_name}"] = float(sums.get(field_name, 0.0)) / float(count)
+        result[group_key] = group_result
+    return result
 
 
 def load_dhm_config(path: str | Path, *, arch: str | None = None) -> DHMConfig:

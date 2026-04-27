@@ -70,12 +70,18 @@ Mining behavior:
 - Runs after the normal training epoch.
 - Uses no-grad evaluation-style FCOS predictions over the train set.
 - Updates per-GT states: `TP`, `FN_BG`, `FN_CLS`, `FN_LOC`, `FN_MISS`.
-- Logs counts such as FN total, relapses, recoveries, and state changes.
+- Logs counts such as FN total, relapses, recoveries, state changes, and state-transition counts.
 
 Training behavior:
 
+- When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
 - If `dhm.loss_weighting.enabled` is true and DHM has records, FCOS reweights raw classification, box, and centerness losses by GT state.
 - If `dhm.assignment_expansion.enabled` is true and DHM has eligible records, FCOS adds backup positive points before loss computation.
+
+`history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
+`dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
+driven by missing positive assignment, poor localization/centerness quality, or ambiguous GT
+competition before enabling a repair intervention.
 
 ## DHM-R Interaction
 

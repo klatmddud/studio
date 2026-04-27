@@ -19,10 +19,11 @@ Key concepts:
 
 - States: `TP`, `FN_BG`, `FN_CLS`, `FN_LOC`, `FN_MISS`.
 - Mining: `DetectionHysteresisMemory.mine_batch(...)` compares detections against GT boxes and updates per-GT records.
-- Records: `DHMRecord` stores last state, FN streaks, recovery/forgetting counts, dominant failure type, instability score, and annotation ID.
+- Records: `DHMRecord` stores last state, FN streaks, recovery/forgetting counts, dominant failure type, transition counts, instability score, annotation ID, and compact FCOS assignment statistics.
+- Assignment statistics: FCOS logs per-GT positive counts, FPN level histograms, centerness/loss means, near-candidate/near-negative counts, and ambiguous points assigned to other GTs.
 - Loss weighting: optional training-only weights for FCOS classification, box, and centerness loss terms.
 - Assignment expansion: optional training-only positive-point expansion for eligible hard GTs.
-- Summary: `dhm.summary()` is logged under the `dhm` key in `history.json`.
+- Summary: `dhm.summary()` is logged under the `dhm` key in `history.json` with `transition_matrix`, `assignment_by_state`, and `assignment_by_transition` aggregates.
 - Config: `modules/cfg/dhm.yaml`.
 
 ## DHM-R - Detection Hysteresis Memory Repair (`modules/nn/dhmr.py`)
@@ -47,7 +48,7 @@ Key concepts:
 ## Runtime Flow
 
 1. `registry.py` builds enabled DHM/DHM-R modules for FCOS.
-2. FCOS forward computes the base detection loss.
+2. FCOS forward computes the base detection loss and, when DHM records exist, logs compact per-GT assignment statistics.
 3. If DHM loss weighting is enabled and DHM has records, FCOS reweights raw per-point losses.
 4. If DHM assignment expansion is enabled and DHM has eligible records, FCOS adds extra positive points before loss computation.
 5. If DHM-R HLRT residual replay is enabled, FCOS adds replay positive points from temporal residual memory.

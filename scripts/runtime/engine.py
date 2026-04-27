@@ -684,6 +684,19 @@ def _merge_summary_group(
                     counts[str(state)] += int(count)
             result[nested_key] = dict(counts)
 
+        result["transition_matrix"] = _merge_nested_count_dicts(
+            source_summaries,
+            "transition_matrix",
+        )
+        result["assignment_by_state"] = _merge_assignment_summary_dicts(
+            source_summaries,
+            "assignment_by_state",
+        )
+        result["assignment_by_transition"] = _merge_assignment_summary_dicts(
+            source_summaries,
+            "assignment_by_transition",
+        )
+
         mining_counts: defaultdict[str, int] = defaultdict(int)
         for summary in summaries:
             raw_mining = summary.get("mining", {})
@@ -768,6 +781,78 @@ def _merge_summary_group(
     return result
 
 
+def _merge_nested_count_dicts(
+    summaries: Sequence[Mapping[str, Any]],
+    key: str,
+) -> dict[str, dict[str, int]]:
+    merged: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for summary in summaries:
+        raw = summary.get(key, {})
+        if not isinstance(raw, Mapping):
+            continue
+        for outer_key, inner in raw.items():
+            if not isinstance(inner, Mapping):
+                continue
+            for inner_key, value in inner.items():
+                merged[str(outer_key)][str(inner_key)] += int(value)
+    return {
+        outer_key: dict(inner_counts)
+        for outer_key, inner_counts in merged.items()
+    }
+
+
+def _merge_assignment_summary_dicts(
+    summaries: Sequence[Mapping[str, Any]],
+    key: str,
+) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for summary in summaries:
+        raw = summary.get(key, {})
+        if not isinstance(raw, Mapping):
+            continue
+        for group_key, group_value in raw.items():
+            if not isinstance(group_value, Mapping):
+                continue
+            count = int(group_value.get("records", 0))
+            if count <= 0:
+                continue
+            bucket = buckets.setdefault(
+                str(group_key),
+                {
+                    "records": 0,
+                    "level_pos_counts": defaultdict(int),
+                    "_weighted": defaultdict(float),
+                },
+            )
+            bucket["records"] += count
+            level_counts = group_value.get("level_pos_counts", {})
+            if isinstance(level_counts, Mapping):
+                for level, value in level_counts.items():
+                    bucket["level_pos_counts"][str(level)] += int(value)
+            weighted = bucket["_weighted"]
+            for metric, value in group_value.items():
+                if metric in {"records", "level_pos_counts"}:
+                    continue
+                if isinstance(value, (int, float)):
+                    weighted[str(metric)] += float(value) * float(count)
+
+    result: dict[str, dict[str, Any]] = {}
+    for group_key, bucket in buckets.items():
+        count = int(bucket.get("records", 0))
+        if count <= 0:
+            continue
+        group_result: dict[str, Any] = {
+            "records": count,
+            "level_pos_counts": dict(bucket.get("level_pos_counts", {})),
+        }
+        weighted = bucket.get("_weighted", {})
+        if isinstance(weighted, Mapping):
+            for metric, value in weighted.items():
+                group_result[str(metric)] = float(value) / float(count)
+        result[group_key] = group_result
+    return result
+
+
 def _merge_weighted_mean(
     result: dict[str, Any],
     summaries: Sequence[Mapping[str, Any]],
@@ -830,7 +915,7 @@ def _merge_dhm_states(states: list[Any]) -> dict[str, Any] | None:
             if current is None:
                 records[key] = candidate
                 continue
-            records[key] = _select_dhm_record(current, candidate)
+            records[key] = _merge_dhm_record(current, candidate)
 
     merged["records"] = records
     merged["stats"] = dict(stats)
@@ -862,13 +947,53 @@ def _merge_dhmr_states(states: list[Any]) -> dict[str, Any] | None:
     return merged
 
 
-def _select_dhm_record(
+def _merge_dhm_record(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
 ) -> dict[str, Any]:
     left_priority = _dhm_record_priority(left)
     right_priority = _dhm_record_priority(right)
-    return dict(left if left_priority >= right_priority else right)
+    selected = dict(left if left_priority >= right_priority else right)
+    assignment_source = _select_dhm_assignment_record(left, right)
+    for field_name in (
+        "assignment_seen",
+        "last_assignment_epoch",
+        "last_pos_count",
+        "zero_pos_count",
+        "last_level_pos_counts",
+        "level_pos_counts",
+        "last_near_candidate_count",
+        "last_near_negative_count",
+        "last_ambiguous_assigned_elsewhere",
+        "ema_pos_count",
+        "ema_center_dist",
+        "ema_centerness_target",
+        "ema_cls_loss",
+        "ema_box_loss",
+        "ema_ctr_loss",
+        "ema_near_negative_count",
+        "ema_near_negative_ratio",
+        "ema_ambiguous_assigned_elsewhere",
+        "ema_ambiguous_ratio",
+    ):
+        if field_name in assignment_source:
+            selected[field_name] = assignment_source[field_name]
+    return selected
+
+
+def _select_dhm_assignment_record(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    left_priority = (
+        float(left.get("last_assignment_epoch") or 0),
+        float(left.get("assignment_seen", 0)),
+    )
+    right_priority = (
+        float(right.get("last_assignment_epoch") or 0),
+        float(right.get("assignment_seen", 0)),
+    )
+    return left if left_priority >= right_priority else right
 
 
 def _dhm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
