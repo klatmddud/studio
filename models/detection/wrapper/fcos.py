@@ -84,7 +84,6 @@ class DHMFCOS(FCOS):
             features = OrderedDict([("0", features)])
         feature_list = list(features.values())
 
-        head_outputs = self.head(feature_list)
         anchors = self.anchor_generator(images, feature_list)
         num_anchors_per_level = [x.size(2) * x.size(3) for x in feature_list]
 
@@ -96,6 +95,24 @@ class DHMFCOS(FCOS):
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             dhm = self._get_dhm()
             dhmr = self._get_dhmr()
+            if self._should_apply_typed_film(dhm=dhm, dhmr=dhmr):
+                records_by_image = [
+                    self._lookup_dhm_gt_records(
+                        dhm=dhm,
+                        target=target,
+                        image_shape=images.image_sizes[image_index],
+                        image_index=image_index,
+                    )
+                    for image_index, target in enumerate(targets)
+                ]
+                feature_list = dhmr.apply_typed_film(
+                    feature_maps=feature_list,
+                    matched_idxs=matched_idxs,
+                    dhm_records=records_by_image,
+                    num_anchors_per_level=num_anchors_per_level,
+                )
+
+            head_outputs = self.head(feature_list)
             if self._should_use_custom_loss(dhm=dhm, dhmr=dhmr):
                 losses = self._compute_weighted_loss_dict(
                     targets=targets,
@@ -121,6 +138,7 @@ class DHMFCOS(FCOS):
                 )
 
         else:
+            head_outputs = self.head(feature_list)
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
             for key in head_outputs:
                 split_head_outputs[key] = list(head_outputs[key].split(num_anchors_per_level, dim=1))
@@ -332,6 +350,18 @@ class DHMFCOS(FCOS):
         if len(dhm) == 0:
             return False
         return bool(dhmr.uses_assignment_replay())
+
+    def _should_apply_typed_film(
+        self,
+        *,
+        dhm: DetectionHysteresisMemory | None,
+        dhmr: DHMRepairModule | None,
+    ) -> bool:
+        if dhm is None or dhmr is None:
+            return False
+        if len(dhm) == 0:
+            return False
+        return bool(dhmr.uses_typed_film())
 
     def _apply_dhm_loss_weighting(
         self,

@@ -37,6 +37,8 @@ Key concepts:
 - HLRT can independently enable residual memory, residual replay, native IoU loss weighting, side-aware boundary loss, and a centerness quality gate through `modules/cfg/dhmr.yaml`.
 - HLRT residual replay adds extra FCOS positive points for eligible `FN_LOC` GTs without changing the image batch or dataset annotations.
 - HLRT side-aware loss is logged as `dhmr_hlrt_side`.
+- `typed_film` can learn one FiLM embedding each for `FN_LOC`, `FN_CLS`, and `FN_BG`; during training it modulates matched positive feature locations before the FCOS head while keeping the standard detection losses.
+- `typed_film` logs `enabled`, `warmup_factor`, `selected_points`, `selected_gt`, and per-state selected-GT counts under `state_counts`.
 - Uses FCOS logits, anchor points, matched GT indices, and DHM records.
 - Maintains compact residual records for state synchronization and summary logging.
 - Summary: `dhmr.summary()` is logged under the `dhmr` key in `history.json`.
@@ -49,10 +51,11 @@ Key concepts:
 3. If DHM loss weighting is enabled and DHM has records, FCOS reweights raw per-point losses.
 4. If DHM assignment expansion is enabled and DHM has eligible records, FCOS adds extra positive points before loss computation.
 5. If DHM-R HLRT residual replay is enabled, FCOS adds replay positive points from temporal residual memory.
-6. If DHM-R HLRT native hooks are enabled, FCOS applies IoU loss weighting, optional centerness target gating, and optional `dhmr_hlrt_side`.
-7. DHM-R updates HLRT residual memory from eligible `FN_LOC` positive points.
-8. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
-9. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
+6. If DHM-R `typed_film` is enabled, FCOS applies training-only FiLM modulation to positive points matched to `FN_LOC`, `FN_CLS`, or `FN_BG` records before running the head.
+7. If DHM-R HLRT native hooks are enabled, FCOS applies IoU loss weighting, optional centerness target gating, and optional `dhmr_hlrt_side`.
+8. DHM-R updates HLRT residual memory from eligible `FN_LOC` positive points.
+9. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
+10. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
 
 ## Support Matrix
 

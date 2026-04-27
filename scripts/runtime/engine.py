@@ -572,10 +572,13 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     dhmr_summary = record.get("dhmr")
     if isinstance(dhmr_summary, dict):
         hlrt = dhmr_summary.get("hlrt", {})
+        typed_film = dhmr_summary.get("typed_film", {})
         parts.append(f"dhmr_residual_records={int(dhmr_summary.get('num_residual_records', 0))}")
         if isinstance(hlrt, Mapping) and bool(hlrt.get("enabled", False)):
             parts.append(f"hlrt_replay_points={int(hlrt.get('hlrt_replay_points', 0))}")
             parts.append(f"hlrt_side_points={int(hlrt.get('hlrt_side_points', 0))}")
+        if isinstance(typed_film, Mapping) and bool(typed_film.get("enabled", False)):
+            parts.append(f"typed_film_points={int(typed_film.get('selected_points', 0))}")
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
@@ -692,6 +695,8 @@ def _merge_summary_group(
         return result
     if name == "dhmr":
         hlrt_counts: defaultdict[str, int] = defaultdict(int)
+        typed_counts: defaultdict[str, int] = defaultdict(int)
+        typed_state_counts: defaultdict[str, int] = defaultdict(int)
         side_loss_weighted = 0.0
         side_loss_count = 0
         result["num_residual_records"] = max(
@@ -712,6 +717,17 @@ def _merge_summary_group(
             losses = int(hlrt.get("hlrt_side_losses", 0))
             side_loss_weighted += float(hlrt.get("mean_side_loss", 0.0)) * float(losses)
             side_loss_count += losses
+            typed_film = summary.get("typed_film", {})
+            if isinstance(typed_film, Mapping):
+                for key, value in typed_film.items():
+                    if str(key) in {"enabled", "warmup_factor", "state_counts"}:
+                        continue
+                    if isinstance(value, (int, float)):
+                        typed_counts[str(key)] += int(value)
+                raw_state_counts = typed_film.get("state_counts", {})
+                if isinstance(raw_state_counts, Mapping):
+                    for state, count in raw_state_counts.items():
+                        typed_state_counts[str(state)] += int(count)
         hlrt_result = dict(hlrt_counts)
         hlrt_result["enabled"] = any(
             bool(summary.get("hlrt", {}).get("enabled", False))
@@ -735,6 +751,19 @@ def _merge_summary_group(
         )
         hlrt_result["mean_side_loss"] = side_loss_weighted / float(max(side_loss_count, 1))
         result["hlrt"] = hlrt_result
+        typed_result = dict(typed_counts)
+        typed_result["enabled"] = any(
+            bool(summary.get("typed_film", {}).get("enabled", False))
+            for summary in summaries
+            if isinstance(summary.get("typed_film"), Mapping)
+        )
+        typed_result["warmup_factor"] = max(
+            float(summary.get("typed_film", {}).get("warmup_factor", 0.0))
+            for summary in summaries
+            if isinstance(summary.get("typed_film"), Mapping)
+        ) if any(isinstance(summary.get("typed_film"), Mapping) for summary in summaries) else 0.0
+        typed_result["state_counts"] = dict(typed_state_counts)
+        result["typed_film"] = typed_result
         return result
     return result
 

@@ -46,6 +46,17 @@ hlrt:
     min_quality: 0.05
     max_quality: 1.0
 
+typed_film:
+  enabled: false
+  embedding_dim: 32
+  feature_dim: 256
+  target_states: [FN_LOC, FN_CLS, FN_BG]
+  min_observations: 3
+  min_instability: 0.25
+  start_epoch: 1
+  warmup_epochs: 2
+  scale: 1.0
+
 models:
   fcos: {}
   fasterrcnn:

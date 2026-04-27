@@ -85,6 +85,8 @@ When enabled, DHM-R uses HLRT for eligible previous DHM `FN_LOC` records. HLRT a
 
 HLRT residual replay changes only the FCOS training assignment by adding capped extra positive points. It does not duplicate images, change the dataset, or alter evaluation postprocessing. HLRT side-aware supervision is logged as `dhmr_hlrt_side`.
 
+DHM-R can also enable `typed_film`, a training-only feature conditioning path for DHM `FN_LOC`, `FN_CLS`, and `FN_BG` records. It applies trainable FiLM embeddings to matched positive feature locations before the FCOS head, but it does not add an auxiliary loss or change evaluation postprocessing.
+
 ## Checkpointing
 
 Checkpoint fields:

@@ -15,6 +15,11 @@ from .dhm import DHMRecord
 
 
 _EDGE_NAMES = ("left", "top", "right", "bottom")
+_TYPED_FILM_STATES = ("FN_LOC", "FN_CLS", "FN_BG")
+_TYPED_FILM_STATE_TO_INDEX = {
+    state: index
+    for index, state in enumerate(_TYPED_FILM_STATES)
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,9 +320,84 @@ class HLRTConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TypedFiLMConfig:
+    enabled: bool = False
+    embedding_dim: int = 32
+    feature_dim: int = 256
+    target_states: tuple[str, ...] = _TYPED_FILM_STATES
+    min_observations: int = 3
+    min_instability: float = 0.25
+    start_epoch: int = 1
+    warmup_epochs: int = 2
+    scale: float = 1.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "TypedFiLMConfig":
+        data = dict(raw or {})
+        raw_states = data.get("target_states", _TYPED_FILM_STATES)
+        if isinstance(raw_states, str):
+            target_states = (raw_states,)
+        elif isinstance(raw_states, Sequence):
+            target_states = tuple(str(state) for state in raw_states)
+        else:
+            raise TypeError("DHM-R typed_film.target_states must be a string or sequence.")
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            embedding_dim=int(data.get("embedding_dim", 32)),
+            feature_dim=int(data.get("feature_dim", 256)),
+            target_states=target_states,
+            min_observations=int(data.get("min_observations", 3)),
+            min_instability=float(data.get("min_instability", 0.25)),
+            start_epoch=int(data.get("start_epoch", 1)),
+            warmup_epochs=int(data.get("warmup_epochs", 2)),
+            scale=float(data.get("scale", 1.0)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if int(self.embedding_dim) < 1:
+            raise ValueError("DHM-R typed_film.embedding_dim must be >= 1.")
+        if int(self.feature_dim) < 1:
+            raise ValueError("DHM-R typed_film.feature_dim must be >= 1.")
+        if int(self.min_observations) < 1:
+            raise ValueError("DHM-R typed_film.min_observations must be >= 1.")
+        if not 0.0 <= float(self.min_instability) <= 1.0:
+            raise ValueError("DHM-R typed_film.min_instability must satisfy 0 <= value <= 1.")
+        if int(self.start_epoch) < 0:
+            raise ValueError("DHM-R typed_film.start_epoch must be >= 0.")
+        if int(self.warmup_epochs) < 0:
+            raise ValueError("DHM-R typed_film.warmup_epochs must be >= 0.")
+        if float(self.scale) < 0.0:
+            raise ValueError("DHM-R typed_film.scale must be >= 0.")
+        if not self.target_states:
+            raise ValueError("DHM-R typed_film.target_states must not be empty.")
+        unsupported = sorted(set(self.target_states) - set(_TYPED_FILM_STATES))
+        if unsupported:
+            raise ValueError(
+                "DHM-R typed_film.target_states has unsupported states: "
+                f"{unsupported}. Supported states: {list(_TYPED_FILM_STATES)}."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "embedding_dim": self.embedding_dim,
+            "feature_dim": self.feature_dim,
+            "target_states": list(self.target_states),
+            "min_observations": self.min_observations,
+            "min_instability": self.min_instability,
+            "start_epoch": self.start_epoch,
+            "warmup_epochs": self.warmup_epochs,
+            "scale": self.scale,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DHMRConfig:
     enabled: bool = False
     hlrt: HLRTConfig = field(default_factory=HLRTConfig)
+    typed_film: TypedFiLMConfig = field(default_factory=TypedFiLMConfig)
     arch: str | None = None
 
     @classmethod
@@ -349,6 +429,7 @@ class DHMRConfig:
         return cls(
             enabled=bool(merged.get("enabled", False)),
             hlrt=HLRTConfig.from_mapping(merged.get("hlrt")),
+            typed_film=TypedFiLMConfig.from_mapping(merged.get("typed_film")),
             arch=normalized_arch,
         )
 
@@ -356,6 +437,7 @@ class DHMRConfig:
         return {
             "enabled": self.enabled,
             "hlrt": self.hlrt.to_dict(),
+            "typed_film": self.typed_film.to_dict(),
             "arch": self.arch,
         }
 
@@ -426,6 +508,21 @@ class DHMRepairModule(nn.Module):
         self._residual_records: dict[str, HLRTResidualRecord] = {}
         self._stats: Counter[str] = Counter()
         self._hlrt_side_loss_sum = 0.0
+        if bool(config.typed_film.enabled):
+            typed = config.typed_film
+            self.typed_film_embeddings = nn.Embedding(
+                len(_TYPED_FILM_STATES),
+                int(typed.embedding_dim),
+            )
+            self.typed_film_projection = nn.Linear(
+                int(typed.embedding_dim),
+                int(typed.feature_dim) * 2,
+            )
+            nn.init.zeros_(self.typed_film_projection.weight)
+            nn.init.zeros_(self.typed_film_projection.bias)
+        else:
+            self.typed_film_embeddings = None
+            self.typed_film_projection = None
 
     def start_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
@@ -447,6 +544,28 @@ class DHMRepairModule(nn.Module):
             return 1.0
         progress = max(0, self.current_epoch - int(hlrt.start_epoch) + 1)
         return min(1.0, float(progress) / float(warmup))
+
+    def typed_film_warmup_factor(self) -> float:
+        typed = self.config.typed_film
+        if not self.config.enabled or not typed.enabled:
+            return 0.0
+        if self.current_epoch < int(typed.start_epoch):
+            return 0.0
+        warmup = int(typed.warmup_epochs)
+        if warmup <= 0:
+            return 1.0
+        progress = max(0, self.current_epoch - int(typed.start_epoch) + 1)
+        return min(1.0, float(progress) / float(warmup))
+
+    def uses_typed_film(self) -> bool:
+        typed = self.config.typed_film
+        return bool(
+            self.typed_film_embeddings is not None
+            and self.typed_film_projection is not None
+            and self.typed_film_warmup_factor() > 0.0
+            and float(typed.scale) > 0.0
+            and bool(typed.target_states)
+        )
 
     def uses_native_loss_hooks(self) -> bool:
         if self.hlrt_warmup_factor() <= 0.0:
@@ -547,6 +666,105 @@ class DHMRepairModule(nn.Module):
             return 0.0
         return float(config.loss_weight) * self.hlrt_warmup_factor()
 
+    def apply_typed_film(
+        self,
+        *,
+        feature_maps: Sequence[torch.Tensor],
+        matched_idxs: Sequence[torch.Tensor],
+        dhm_records: Sequence[Sequence[DHMRecord | None]],
+        num_anchors_per_level: Sequence[int],
+    ) -> list[torch.Tensor]:
+        if not self.uses_typed_film():
+            return list(feature_maps)
+        if not feature_maps:
+            return list(feature_maps)
+        typed = self.config.typed_film
+        first = feature_maps[0]
+        if first.ndim != 4:
+            self._stats["typed_film_skipped_bad_feature_shape"] += 1
+            return list(feature_maps)
+        batch_size = int(first.shape[0])
+        feature_dim = int(first.shape[1])
+        if feature_dim != int(typed.feature_dim):
+            self._stats["typed_film_skipped_feature_dim"] += 1
+            return list(feature_maps)
+
+        flat_chunks: list[torch.Tensor] = []
+        shapes: list[tuple[int, int, int, int]] = []
+        for feature in feature_maps:
+            if feature.ndim != 4:
+                self._stats["typed_film_skipped_bad_feature_shape"] += 1
+                return list(feature_maps)
+            n, c, h, w = (int(dim) for dim in feature.shape)
+            if n != batch_size or c != feature_dim:
+                self._stats["typed_film_skipped_feature_dim"] += 1
+                return list(feature_maps)
+            shapes.append((n, c, h, w))
+            flat_chunks.append(feature.permute(0, 2, 3, 1).reshape(n, h * w, c))
+
+        expected_points = sum(int(value) for value in num_anchors_per_level)
+        flat_features = torch.cat(flat_chunks, dim=1)
+        if int(flat_features.shape[1]) != expected_points:
+            self._stats["typed_film_skipped_anchor_mismatch"] += 1
+            return list(feature_maps)
+
+        image_indices: list[torch.Tensor] = []
+        point_indices: list[torch.Tensor] = []
+        state_indices: list[torch.Tensor] = []
+        target_states = set(str(state) for state in typed.target_states)
+        for image_index, assignments in enumerate(matched_idxs):
+            if image_index >= batch_size:
+                break
+            if assignments.numel() == 0:
+                continue
+            if int(assignments.numel()) != int(flat_features.shape[1]):
+                self._stats["typed_film_skipped_assignment_mismatch"] += 1
+                continue
+            records = dhm_records[image_index] if image_index < len(dhm_records) else []
+            for gt_index, record in enumerate(records):
+                if not self._is_typed_film_record_active(
+                    record,
+                    target_states=target_states,
+                ):
+                    continue
+                indices = torch.where(assignments == int(gt_index))[0]
+                if indices.numel() == 0:
+                    self._stats["typed_film_skipped_no_positive_points"] += 1
+                    continue
+                state = str(record.last_state)
+                state_index = _TYPED_FILM_STATE_TO_INDEX[state]
+                image_indices.append(torch.full_like(indices, int(image_index)))
+                point_indices.append(indices)
+                state_indices.append(torch.full_like(indices, int(state_index)))
+                self._stats["typed_film_selected_gt"] += 1
+                self._stats["typed_film_selected_points"] += int(indices.numel())
+                self._stats[f"typed_film_state_{state}"] += 1
+
+        if not point_indices:
+            return list(feature_maps)
+
+        selected_images = torch.cat(image_indices, dim=0).to(device=flat_features.device, dtype=torch.long)
+        selected_points = torch.cat(point_indices, dim=0).to(device=flat_features.device, dtype=torch.long)
+        selected_states = torch.cat(state_indices, dim=0).to(device=flat_features.device, dtype=torch.long)
+        embeddings = self.typed_film_embeddings(selected_states)
+        gamma_beta = self.typed_film_projection(embeddings).to(dtype=flat_features.dtype)
+        gamma_delta, beta = gamma_beta.chunk(2, dim=1)
+        factor = flat_features.new_tensor(float(typed.scale) * self.typed_film_warmup_factor())
+        selected_features = flat_features[selected_images, selected_points]
+        modulated = selected_features * (1.0 + factor * torch.tanh(gamma_delta)) + factor * beta
+
+        updated_flat = flat_features.clone()
+        updated_flat[selected_images, selected_points] = modulated
+
+        result: list[torch.Tensor] = []
+        offset = 0
+        for n, c, h, w in shapes:
+            count = h * w
+            chunk = updated_flat[:, offset : offset + count, :]
+            result.append(chunk.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous())
+            offset += count
+        return result
+
     @torch.no_grad()
     def update_hlrt_residual_memory(
         self,
@@ -633,6 +851,21 @@ class DHMRepairModule(nn.Module):
                     key: int(value)
                     for key, value in self._stats.items()
                     if str(key).startswith("hlrt_")
+                },
+            },
+            "typed_film": {
+                "enabled": bool(self.config.typed_film.enabled),
+                "warmup_factor": self.typed_film_warmup_factor(),
+                "selected_points": int(self._stats.get("typed_film_selected_points", 0)),
+                "selected_gt": int(self._stats.get("typed_film_selected_gt", 0)),
+                "state_counts": {
+                    state: int(self._stats.get(f"typed_film_state_{state}", 0))
+                    for state in _TYPED_FILM_STATES
+                },
+                **{
+                    key: int(value)
+                    for key, value in self._stats.items()
+                    if str(key).startswith("typed_film_skipped_")
                 },
             },
         }
@@ -806,6 +1039,25 @@ class DHMRepairModule(nn.Module):
         if float(record.instability_score) < float(hlrt.min_instability):
             if count_stats:
                 self._stats["hlrt_skipped_low_instability"] += 1
+            return False
+        return True
+
+    def _is_typed_film_record_active(
+        self,
+        record: DHMRecord | None,
+        *,
+        target_states: set[str],
+    ) -> bool:
+        typed = self.config.typed_film
+        if record is None:
+            return False
+        if str(record.last_state) not in target_states:
+            return False
+        if int(record.total_seen) < int(typed.min_observations):
+            self._stats["typed_film_skipped_low_observations"] += 1
+            return False
+        if float(record.instability_score) < float(typed.min_instability):
+            self._stats["typed_film_skipped_low_instability"] += 1
             return False
         return True
 
