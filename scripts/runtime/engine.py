@@ -573,12 +573,15 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     if isinstance(dhmr_summary, dict):
         hlrt = dhmr_summary.get("hlrt", {})
         typed_film = dhmr_summary.get("typed_film", {})
+        border_refinement = dhmr_summary.get("border_refinement", {})
         parts.append(f"dhmr_residual_records={int(dhmr_summary.get('num_residual_records', 0))}")
         if isinstance(hlrt, Mapping) and bool(hlrt.get("enabled", False)):
             parts.append(f"hlrt_replay_points={int(hlrt.get('hlrt_replay_points', 0))}")
             parts.append(f"hlrt_side_points={int(hlrt.get('hlrt_side_points', 0))}")
         if isinstance(typed_film, Mapping) and bool(typed_film.get("enabled", False)):
             parts.append(f"typed_film_points={int(typed_film.get('selected_points', 0))}")
+        if isinstance(border_refinement, Mapping) and bool(border_refinement.get("enabled", False)):
+            parts.append(f"border_refine_points={int(border_refinement.get('selected_points', 0))}")
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
@@ -710,6 +713,9 @@ def _merge_summary_group(
         hlrt_counts: defaultdict[str, int] = defaultdict(int)
         typed_counts: defaultdict[str, int] = defaultdict(int)
         typed_state_counts: defaultdict[str, int] = defaultdict(int)
+        border_counts: defaultdict[str, int] = defaultdict(int)
+        border_mean_sums: defaultdict[str, float] = defaultdict(float)
+        border_mean_count = 0
         side_loss_weighted = 0.0
         side_loss_count = 0
         result["num_residual_records"] = max(
@@ -741,6 +747,20 @@ def _merge_summary_group(
                 if isinstance(raw_state_counts, Mapping):
                     for state, count in raw_state_counts.items():
                         typed_state_counts[str(state)] += int(count)
+            border_refinement = summary.get("border_refinement", {})
+            if isinstance(border_refinement, Mapping):
+                losses = int(border_refinement.get("losses", 0))
+                for key, value in border_refinement.items():
+                    key = str(key)
+                    if key in {"enabled", "active", "warmup_factor"} or key.startswith("mean_"):
+                        continue
+                    if isinstance(value, (int, float)):
+                        border_counts[key] += int(value)
+                if losses > 0:
+                    border_mean_count += losses
+                    for key, value in border_refinement.items():
+                        if str(key).startswith("mean_") and isinstance(value, (int, float)):
+                            border_mean_sums[str(key)] += float(value) * float(losses)
         hlrt_result = dict(hlrt_counts)
         hlrt_result["enabled"] = any(
             bool(summary.get("hlrt", {}).get("enabled", False))
@@ -777,6 +797,25 @@ def _merge_summary_group(
         ) if any(isinstance(summary.get("typed_film"), Mapping) for summary in summaries) else 0.0
         typed_result["state_counts"] = dict(typed_state_counts)
         result["typed_film"] = typed_result
+        border_result = dict(border_counts)
+        border_result["enabled"] = any(
+            bool(summary.get("border_refinement", {}).get("enabled", False))
+            for summary in summaries
+            if isinstance(summary.get("border_refinement"), Mapping)
+        )
+        border_result["active"] = any(
+            bool(summary.get("border_refinement", {}).get("active", False))
+            for summary in summaries
+            if isinstance(summary.get("border_refinement"), Mapping)
+        )
+        border_result["warmup_factor"] = max(
+            float(summary.get("border_refinement", {}).get("warmup_factor", 0.0))
+            for summary in summaries
+            if isinstance(summary.get("border_refinement"), Mapping)
+        ) if any(isinstance(summary.get("border_refinement"), Mapping) for summary in summaries) else 0.0
+        for key, value in border_mean_sums.items():
+            border_result[key] = float(value) / float(max(border_mean_count, 1))
+        result["border_refinement"] = border_result
         return result
     return result
 

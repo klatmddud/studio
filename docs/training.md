@@ -77,11 +77,17 @@ Training behavior:
 - When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
 - If `dhm.loss_weighting.enabled` is true and DHM has records, FCOS reweights raw classification, box, and centerness losses by GT state.
 - If `dhm.assignment_expansion.enabled` is true and DHM has eligible records, FCOS adds backup positive points before loss computation.
+- If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
 `dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
 driven by missing positive assignment, poor localization/centerness quality, or ambiguous GT
 competition before enabling a repair intervention.
+
+`history.json` also stores DHM-R border-refinement aggregates under
+`dhmr.border_refinement` when the module is enabled. These include selected point counts,
+selected GT counts, and mean raw GIoU, residual, quality, and refined-IoU values for the
+training-only auxiliary head.
 
 ## DHM-R Interaction
 

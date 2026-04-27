@@ -14,6 +14,7 @@ from .dhm import (
     load_dhm_config,
 )
 from .dhmr import (
+    BorderRefinementConfig,
     DHMR,
     DHMRConfig,
     DHMRepairModule,
@@ -42,6 +43,7 @@ __all__ = [
     "DHMR",
     "DHMRConfig",
     "DHMRepairModule",
+    "BorderRefinementConfig",
     "DetectionHysteresisMemory",
     "HLRTConfig",
     "HLRTIoULossWeightingConfig",

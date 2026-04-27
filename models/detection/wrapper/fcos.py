@@ -139,6 +139,20 @@ class DHMFCOS(FCOS):
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
 
             if dhmr is not None and dhm is not None:
+                losses.update(
+                    self._compute_dhmr_border_refinement_losses(
+                        dhmr=dhmr,
+                        dhm=dhm,
+                        targets=targets,
+                        image_shapes=images.image_sizes,
+                        padded_shape=tuple(int(dim) for dim in images.tensors.shape[-2:]),
+                        feature_maps=feature_list,
+                        head_outputs=head_outputs,
+                        anchors=anchors,
+                        matched_idxs=matched_idxs,
+                        num_anchors_per_level=num_anchors_per_level,
+                    )
+                )
                 self._update_dhmr_hlrt_memory(
                     dhmr=dhmr,
                     dhm=dhm,
@@ -324,6 +338,44 @@ class DHMFCOS(FCOS):
             anchors=anchors,
             matched_idxs=matched_idxs,
             dhm_records=records_by_image,
+            decode_boxes=self._decode_boxes,
+        )
+
+    def _compute_dhmr_border_refinement_losses(
+        self,
+        *,
+        dhmr: DHMRepairModule,
+        dhm: DetectionHysteresisMemory,
+        targets: list[dict[str, torch.Tensor]],
+        image_shapes: list[tuple[int, int]],
+        padded_shape: tuple[int, int],
+        feature_maps: list[torch.Tensor],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        matched_idxs: list[torch.Tensor],
+        num_anchors_per_level: list[int],
+    ) -> dict[str, torch.Tensor]:
+        del image_shapes
+        if len(dhm) == 0 or not dhmr.uses_border_refinement():
+            return {}
+        records_by_image = [
+            self._lookup_dhm_gt_records(
+                dhm=dhm,
+                target=target,
+                image_shape=(0, 0),
+                image_index=image_index,
+            )
+            for image_index, target in enumerate(targets)
+        ]
+        return dhmr.compute_border_refinement_loss(
+            targets=targets,
+            feature_maps=feature_maps,
+            head_outputs=head_outputs,
+            anchors=anchors,
+            matched_idxs=matched_idxs,
+            dhm_records=records_by_image,
+            num_anchors_per_level=num_anchors_per_level,
+            padded_shape=padded_shape,
             decode_boxes=self._decode_boxes,
         )
 
