@@ -12,8 +12,7 @@ scripts/
   runtime/
     config.py               # Config loading, env-var substitution, validation
     data.py                 # COCO dataset + DataLoader builders
-    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, epoch-end mining
-    hard_replay.py          # MDMB++-guided replay planner + mixed batch sampler
+    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, DHM mining
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
@@ -24,13 +23,13 @@ models/detection/
   cfg/                      # Per-architecture YAML (fcos/fasterrcnn/dino)
   wrapper/
     _base.py                # Backbone + FPN builder
-    fcos.py                 # FCOS wrapper with research hooks
+    fcos.py                 # FCOS wrapper with DHM/DHM-R hooks
     fasterrcnn.py           # FasterRCNN wrapper
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # Module configs (all disabled by default, including research modules)
-  nn/                       # Module implementations (mdmb/mdmbpp/rasd/tfm/fntdm/dhm)
+  cfg/                      # DHM/DHM-R module configs, disabled by default
+  nn/                       # DHM/DHM-R implementations and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```
@@ -51,20 +50,16 @@ ops/                        # Reserved for custom ops (currently empty)
 train.py
   -> load_runtime_config()       # merge YAML + env vars
   -> build_model_from_path()     # registry.py -> wrapper
-  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset / Hard Replay sampler
-  -> fit()                       # engine.py -> training loop
+  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset
+  -> fit()                       # engine.py -> training loop + optional DHM mining
 ```
-
-When `modules/cfg/hard_replay.yaml` is enabled for the active architecture, the training loader
-uses a mixed-batch replay sampler. `engine.fit()` refreshes that sampler's epoch-level
-`ReplayIndex` from `model.mdmbpp` before each epoch starts.
 
 ## Supported Architectures
 
 | arch key | Wrapper | Backbone options |
 |---|---|---|
-| `fcos` | `MDMBFCOS` | ResNet18/50, MobileNetV2/V3 |
+| `fcos` | `DHMFCOS` | ResNet18/50, MobileNetV2/V3 |
 | `fasterrcnn` | `FasterRCNN` | ResNet50/101, MobileNetV2/V3 |
-| `dino` | `DINOWrapper` | ResNet50 |
+| `dino` | `DINOWrapper` | External backend-defined |
 
 `arch` is inferred from the model YAML filename, for example `fcos.yaml` -> `fcos`.

@@ -11,8 +11,6 @@ from typing import Any, Callable, Mapping, Sequence
 import torch
 import torch.nn as nn
 
-from modules.nn.mdmb import MissedDetectionMemoryBank
-
 from ._base import BaseDetectionWrapper, load_cfg
 
 
@@ -53,7 +51,6 @@ class DINOWrapper(BaseDetectionWrapper):
         cfg: dict[str, Any],
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
-        mdmb: MissedDetectionMemoryBank | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> None:
@@ -65,7 +62,6 @@ class DINOWrapper(BaseDetectionWrapper):
         self.inference_cfg = cfg.get("inference", {})
         self.loss_cfg = cfg.get("loss", {})
         self.label_cfg = cfg.get("labels", {})
-        self.mdmb = mdmb
 
         builder = self._resolve_backend_builder(cfg, backend_builder)
         built = self._invoke_builder(
@@ -73,7 +69,6 @@ class DINOWrapper(BaseDetectionWrapper):
             cfg=cfg,
             pre_neck=pre_neck,
             post_neck=post_neck,
-            mdmb=mdmb,
             extra_kwargs=kwargs,
         )
 
@@ -135,7 +130,6 @@ class DINOWrapper(BaseDetectionWrapper):
         yaml_path: str | Path,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
-        mdmb: MissedDetectionMemoryBank | None = None,
         backend_builder: BackendBuilder | str | None = None,
         **kwargs,
     ) -> "DINOWrapper":
@@ -144,7 +138,6 @@ class DINOWrapper(BaseDetectionWrapper):
             load_cfg(yaml_path),
             pre_neck=pre_neck,
             post_neck=post_neck,
-            mdmb=mdmb,
             backend_builder=backend_builder,
             **kwargs,
         )
@@ -421,7 +414,6 @@ class DINOWrapper(BaseDetectionWrapper):
         cfg: dict[str, Any],
         pre_neck: nn.Module | None,
         post_neck: nn.Module | None,
-        mdmb: MissedDetectionMemoryBank | None,
         extra_kwargs: dict[str, Any],
     ) -> Any:
         backend_cfg = cfg.get("backend", {})
@@ -434,7 +426,6 @@ class DINOWrapper(BaseDetectionWrapper):
             "num_classes": self.num_classes,
             "pre_neck": pre_neck,
             "post_neck": post_neck,
-            "mdmb": mdmb,
             **builder_kwargs,
         }
 

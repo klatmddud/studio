@@ -2,11 +2,10 @@ from __future__ import annotations
 
 """Faster R-CNN wrapper: YAML config -> torchvision FasterRCNN."""
 
-import torch.nn as nn
 from torchvision.models.detection import FasterRCNN
 from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
 
-from modules.nn.mdmb import MissedDetectionMemoryBank
+import torch.nn as nn
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
@@ -24,11 +23,9 @@ class FasterRCNNWrapper(BaseDetectionWrapper):
         cfg: dict,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
-        mdmb: MissedDetectionMemoryBank | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
-        self.mdmb = mdmb
 
         backbone = build_backbone_with_fpn(
             cfg,
@@ -39,13 +36,13 @@ class FasterRCNNWrapper(BaseDetectionWrapper):
 
         rpn = cfg.get("rpn", {})
         roi = cfg.get("roi_head", {})
-        tfm = cfg.get("transform", {})
+        transform_cfg = cfg.get("transform", {})
 
         self.model = FasterRCNN(
             backbone=backbone,
             num_classes=cfg.get("num_classes", 91),
-            min_size=tfm.get("min_size", 800),
-            max_size=tfm.get("max_size", 1333),
+            min_size=transform_cfg.get("min_size", 800),
+            max_size=transform_cfg.get("max_size", 1333),
             rpn_pre_nms_top_n_train=rpn.get("pre_nms_top_n_train", 2000),
             rpn_pre_nms_top_n_test=rpn.get("pre_nms_top_n_test", 1000),
             rpn_post_nms_top_n_train=rpn.get("post_nms_top_n_train", 2000),
@@ -72,7 +69,6 @@ class FasterRCNNWrapper(BaseDetectionWrapper):
         yaml_path: str,
         pre_neck: nn.Module | None = None,
         post_neck: nn.Module | None = None,
-        mdmb: MissedDetectionMemoryBank | None = None,
         **kwargs,
     ) -> "FasterRCNNWrapper":
         """Create the wrapper from a YAML config path."""
@@ -80,6 +76,5 @@ class FasterRCNNWrapper(BaseDetectionWrapper):
             load_cfg(yaml_path),
             pre_neck=pre_neck,
             post_neck=post_neck,
-            mdmb=mdmb,
             **kwargs,
         )

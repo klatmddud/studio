@@ -12,7 +12,7 @@ import torch.nn as nn
 import yaml
 from torchvision.ops import boxes as box_ops
 
-from .mdmb import normalize_arch
+from .common import normalize_arch
 
 
 DHMState = Literal["TP", "FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"]

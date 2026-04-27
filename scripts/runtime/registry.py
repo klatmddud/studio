@@ -7,17 +7,13 @@ import torch.nn as nn
 
 from modules.nn import (
     build_dhm_from_yaml,
-    build_fntdm_from_yaml,
-    build_mdmb_from_yaml,
-    build_mdmbpp_from_yaml,
-    build_rasd_from_yaml,
-    build_tfm_from_yaml,
+    build_dhmr_from_yaml,
 )
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
-from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
+from .module_configs import resolve_module_config_paths
 
 ARCH_ALIASES = {
     "faster_rcnn": "fasterrcnn",
@@ -32,15 +28,6 @@ MODEL_BUILDERS = {
     "fasterrcnn": FasterRCNNWrapper,
     "fcos": FCOSWrapper,
 }
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MDMB_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmb"]
-MDMBPP_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["mdmbpp"]
-RASD_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["rasd"]
-TFM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["tfm"]
-FNTDM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["fntdm"]
-DHM_CONFIG_PATH = DEFAULT_MODULE_CONFIG_PATHS["dhm"]
-
 
 def normalize_arch(raw_arch: str) -> str:
     return ARCH_ALIASES.get(raw_arch.lower(), raw_arch.lower())
@@ -67,29 +54,17 @@ def build_model_from_config(
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
-    mdmb = _build_mdmb(normalized_arch, module_paths["mdmb"])
-    mdmbpp = _build_mdmbpp(normalized_arch, module_paths["mdmbpp"])
-    rasd = _build_rasd(normalized_arch, module_paths["rasd"])
-    tfm = _build_tfm(normalized_arch, module_paths["tfm"])
-    fntdm = _build_fntdm(normalized_arch, module_paths["fntdm"])
     dhm = _build_dhm(normalized_arch, module_paths["dhm"])
+    dhmr = _build_dhmr(normalized_arch, module_paths["dhmr"])
     if normalized_arch == "fcos":
-        if rasd is not None and mdmbpp is None:
-            raise ValueError("RASD requires MDMB++ to be enabled for FCOS.")
-        if rasd is not None and not bool(mdmbpp.config.store_support_feature):
-            raise ValueError(
-                "RASD requires the active MDMB++ config to set store_support_feature: true."
-            )
+        if dhmr is not None and dhm is None:
+            raise ValueError("DHM-R requires DHM to be enabled for FCOS.")
         return builder(
             model_config,
-            mdmb=mdmb,
-            mdmbpp=mdmbpp,
-            rasd=rasd,
-            tfm=tfm,
-            fntdm=fntdm,
             dhm=dhm,
+            dhmr=dhmr,
         )
-    return builder(model_config, mdmb=mdmb)
+    return builder(model_config)
 
 
 def build_model_from_path(
@@ -114,51 +89,6 @@ def build_model_from_path(
     return model, model_config, arch, resolved_path
 
 
-def _build_mdmb(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_mdmb_from_yaml(path, arch=arch)
-
-
-def _build_mdmbpp(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_mdmbpp_from_yaml(path, arch=arch)
-
-
-def _build_rasd(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_rasd_from_yaml(path, arch=arch)
-
-
-def _build_tfm(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_tfm_from_yaml(path, arch=arch)
-
-
-def _build_fntdm(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_fntdm_from_yaml(path, arch=arch)
-
-
 def _build_dhm(arch: str, config_path: str | Path) -> nn.Module | None:
     if arch != "fcos":
         return None
@@ -166,3 +96,12 @@ def _build_dhm(arch: str, config_path: str | Path) -> nn.Module | None:
     if not path.is_file():
         return None
     return build_dhm_from_yaml(path, arch=arch)
+
+
+def _build_dhmr(arch: str, config_path: str | Path) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    path = Path(config_path)
+    if not path.is_file():
+        return None
+    return build_dhmr_from_yaml(path, arch=arch)

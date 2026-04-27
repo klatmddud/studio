@@ -1,6 +1,6 @@
 # AGENTS.md
 
-PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Includes research modules (MDMB, MDMB++, Hard Replay, RASD) for improving detection performance.
+PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module wiring is limited to DHM and DHM-R.
 
 ## Quick Reference
 
@@ -9,7 +9,7 @@ PyTorch object detection training framework supporting FCOS, Faster R-CNN, and D
 | Project layout, entry points, tech stack | [docs/architecture.md](docs/architecture.md) |
 | Training config, engine, checkpointing | [docs/training.md](docs/training.md) |
 | Model architectures and wrappers | [docs/models.md](docs/models.md) |
-| Research modules (MDMB, UMR modules) | [docs/modules.md](docs/modules.md) |
+| Research modules (DHM, DHM-R) | [docs/modules.md](docs/modules.md) |
 | Dataset format, DataLoader, env vars | [docs/data.md](docs/data.md) |
 
 ## Common Commands
@@ -21,7 +21,7 @@ uv sync
 # Train
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --seed 42 --device cuda:0 cuda:1
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --mdmb-config scripts/bash/mdmbpp_only/cfg/mdmb_disabled.yaml --mdmbpp-config scripts/bash/mdmbpp_only/cfg/mdmbpp_only.yaml --rasd-config scripts/bash/mdmbpp_only/cfg/rasd_disabled.yaml --hard-replay-config scripts/bash/mdmbpp_only/cfg/hard_replay_disabled.yaml
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --dhm-config modules/cfg/dhm.yaml --dhmr-config modules/cfg/dhmr.yaml
 
 # Evaluate
 uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --checkpoint runs/train/checkpoints/best.pt
@@ -29,20 +29,20 @@ uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/c
 
 ## Documentation Policy
 
-코드를 수정하거나 추가할 때 관련 문서도 함께 업데이트한다.
+When code changes affect training, model wrappers, modules, data loading, or commands, update the related docs in the same change.
 
-| 변경 내용 | 업데이트할 문서 |
+| Change | Update |
 |---|---|
-| 학습/평가 흐름, config 스키마, 체크포인트 | [docs/training.md](docs/training.md) |
-| 프로젝트 구조, 진입점, 의존성 | [docs/architecture.md](docs/architecture.md) |
-| 모델 아키텍처, 래퍼, config 필드 | [docs/models.md](docs/models.md) |
-| 연구 모듈 추가/수정/삭제 | [docs/modules.md](docs/modules.md) |
-| 데이터셋 형식, DataLoader, 환경변수 | [docs/data.md](docs/data.md) |
-| 자주 쓰는 커맨드, 규칙 변경 | 이 파일 (AGENTS.md) |
+| Training/evaluation flow, config schema, checkpointing | [docs/training.md](docs/training.md) |
+| Project structure, entry points, dependencies | [docs/architecture.md](docs/architecture.md) |
+| Model architecture, wrappers, config fields | [docs/models.md](docs/models.md) |
+| Research modules | [docs/modules.md](docs/modules.md) |
+| Dataset format, DataLoader, environment variables | [docs/data.md](docs/data.md) |
+| Common commands or repository rules | This file |
 
 ## Key Conventions
 
 - Config uses `${ENV_VAR}` placeholders resolved from `.env` at runtime.
 - `--data kitti` selects dataset-specific env vars (`KITTI_*`); omit if using raw paths in YAML.
-- `checkpoint.dir` defaults to `checkpoints/` (relative to cwd); `output_dir` defaults to `runs/train`.
-- All research modules are **disabled by default** in `modules/cfg/*.yaml`.
+- `checkpoint.dir` defaults to `checkpoints/` relative to cwd; `output_dir` defaults to `runs/train`.
+- Research modules are disabled by default in `modules/cfg/*.yaml`.

@@ -7,39 +7,23 @@ from typing import Any
 
 from modules.nn import (
     load_dhm_config,
-    load_fntdm_config,
-    load_mdmb_config,
-    load_mdmbpp_config,
-    load_rasd_config,
-    load_tfm_config,
+    load_dhmr_config,
     normalize_arch,
 )
 
 from .config import load_yaml_file
-from .hard_replay import load_hard_replay_config
 from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
-    "mdmb": load_mdmb_config,
-    "mdmbpp": load_mdmbpp_config,
-    "rasd": load_rasd_config,
-    "hard_replay": load_hard_replay_config,
-    "tfm": load_tfm_config,
-    "fntdm": load_fntdm_config,
     "dhm": load_dhm_config,
+    "dhmr": load_dhmr_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
-    "mdmb": {"fcos"},
-    "mdmbpp": {"fcos"},
-    "rasd": {"fcos"},
-    "hard_replay": None,
-    "tfm": {"fcos"},
-    "fntdm": {"fcos"},
     "dhm": {"fcos"},
+    "dhmr": {"fcos"},
 }
 
 
@@ -52,7 +36,7 @@ def collect_enabled_module_configs(
     paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
-    for name in ("mdmb", "mdmbpp", "rasd", "hard_replay", "tfm", "fntdm", "dhm"):
+    for name in ("dhm", "dhmr"):
         supported_arches = _ARCH_SUPPORT[name]
         if supported_arches is not None and normalized_arch not in supported_arches:
             continue

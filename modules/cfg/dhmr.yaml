@@ -1,0 +1,35 @@
+enabled: false
+
+temporal_edge_repair:
+  enabled: true
+  input_dim: 256
+  hidden_dim: 128
+  min_observations: 3
+  min_fn_loc_count: 2
+  min_instability: 0.25
+  max_gt_per_image: 16
+  max_points_per_gt: 4
+  max_points_per_batch: 128
+  target_delta_clip: 2.0
+  smooth_l1_beta: 0.1
+  edge_ema_momentum: 0.8
+  min_edge_observations: 1
+  use_temporal_edge_weights: true
+  use_dominant_edge_mask: true
+  non_dominant_edge_weight: 0.25
+  min_edge_weight: 0.25
+  max_edge_weight: 2.0
+  consistency_weight: 0.1
+  direction_weight: 0.05
+  direction_min_abs_delta: 0.02
+  direction_margin: 0.0
+  loss_weight: 0.25
+  start_epoch: 1
+  warmup_epochs: 2
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

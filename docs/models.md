@@ -2,35 +2,30 @@
 
 ## Architecture Wrappers (`models/detection/wrapper/`)
 
-All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVision.
+All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchVision.
 
-### FCOS (`fcos.py` -> `MDMBFCOS`)
+### FCOS (`fcos.py` -> `DHMFCOS`)
 
-- Single-stage anchor-free detector
-- Integrates MDMB, MDMB++, RASD, TFM, FN-TDM, and DHM modules when enabled in `modules/cfg/`
-- Applies Hard Replay per-GT loss weights when replay metadata is present in the batch
-- RASD adds a training-only `rasd` auxiliary loss for relapse GTs with stored MDMB++ support features
-- FN-TDM adds a training-only `fntdm` auxiliary loss for selected hard GTs using stored
-  false-negative transition directions
-- TFM refreshes from the normal training forward and can apply training-only assignment-bias loss weights
-- DHM mines per-GT detection-state hysteresis at epoch end, can reweight the existing FCOS loss
-  terms, and can apply HLAE training-only positive assignment expansion for `FN_BG` GTs
-- `after_optimizer_step()` hook: runs one post-step no-grad FCOS inference pass only for MDMB / MDMB++ state
-- `mine_fntdm_batch()` hook: supports epoch-end full train-set HTM mining when FN-TDM is enabled
-- `mine_dhm_batch()` hook: supports epoch-end full train-set hysteresis mining when DHM is enabled
-- Forward in train mode: returns `loss_dict`; in eval mode: returns predictions
+- Single-stage anchor-free detector.
+- Integrates DHM and DHM-R when enabled in `modules/cfg/`.
+- DHM mines per-GT detection-state hysteresis at epoch end.
+- DHM can reweight existing FCOS classification, box, and centerness losses.
+- DHM can apply HLAE training-only positive assignment expansion for eligible hard GTs.
+- DHM-R reads previous DHM records and can add a `dhmr_edge` training-only auxiliary loss for `FN_LOC` GTs through the Temporal Edge Repair branch.
+- `mine_dhm_batch()` supports epoch-end full train-set hysteresis mining when DHM is enabled.
+- Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
 
 ### Faster R-CNN (`fasterrcnn.py`)
 
-- Two-stage region proposal detector
-- Plain TorchVision FasterRCNN; no research modules are currently wired up
-- Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3
+- Two-stage region proposal detector.
+- Plain TorchVision FasterRCNN; no research modules are currently wired up.
+- Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3.
 
 ### DINO (`dino.py` -> `DINOWrapper`)
 
-- Transformer-based detector (DEtection with INtroduced queries + Optimized)
-- External backend builder (see `backend.builder` YAML field); no research modules wired
-- Requires ResNet50 backbone
+- Transformer-based detector adapter.
+- Uses an external backend builder via the `backend.builder` YAML field.
+- No research modules are currently wired up.
 
 ## Model Config Fields
 
@@ -51,11 +46,10 @@ All wrappers inherit from `_base.py` which builds the backbone + FPN via TorchVi
 
 `build_model_from_path(model_yaml, runtime_config)`:
 
-1. Loads model YAML
-2. Infers `arch` from filename stem
-3. Dispatches to the appropriate wrapper class
-4. Loads module configs from `modules/cfg/` and attaches enabled modules
-5. Returns `(model, model_config, arch, model_config_path)`
+1. Loads model YAML.
+2. Infers `arch` from filename stem.
+3. Dispatches to the appropriate wrapper class.
+4. Loads DHM/DHM-R configs from `modules/cfg/` and attaches enabled modules for FCOS.
+5. Returns `(model, model_config, arch, model_config_path)`.
 
-`num_classes` is resolved at build time: model YAML value takes precedence; otherwise inferred from
-`train_annotations` via `dataset_meta.py`.
+`num_classes` is resolved at build time: model YAML value takes precedence; otherwise it is inferred from `train_annotations` via `dataset_meta.py`.

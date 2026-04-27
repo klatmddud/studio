@@ -22,12 +22,6 @@ _MAP_KEYS = [
     ("bbox_mAP_75", "mAP75"),
 ]
 
-_MDMB_KEYS = [
-    ("num_entries", "Miss entries"),
-    ("num_images", "Miss images"),
-]
-
-
 def plot_loss_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
     records = [record for record in history if "train" in record]
     if not records:
@@ -73,26 +67,6 @@ def plot_map_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     _save_figure(fig, output_dir / "figures" / "map.png")
-
-
-def plot_mdmb_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
-    records = [record for record in history if record.get("mdmb") is not None]
-    if not records:
-        return
-
-    epochs = [record["epoch"] for record in records]
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for key, label in _MDMB_KEYS:
-        values = [record["mdmb"].get(key, 0) for record in records]
-        ax.plot(epochs, values, label=label, linewidth=1.8, marker="o", markersize=3)
-
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Count")
-    ax.set_title("MDMB: Missed Detection Bank Stats")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    _save_figure(fig, output_dir / "figures" / "mdmb.png")
 
 
 def build_confusion_matrix(
@@ -222,43 +196,6 @@ def plot_confusion_matrices(
         title="Confusion Matrix Normalized",
         normalize=True,
     )
-
-
-def plot_mdmb_per_class(
-    model: torch.nn.Module,
-    data_loader,
-    output_dir: Path,
-) -> None:
-    mdmb = getattr(model, "mdmb", None)
-    if mdmb is None:
-        return
-
-    coco = data_loader.dataset.coco
-    cat_ids = sorted(coco.cats.keys())
-    cat_to_idx = {cid: index for index, cid in enumerate(cat_ids)}
-    class_names = [coco.cats[cid]["name"] for cid in cat_ids]
-
-    counts = np.zeros(len(cat_ids), dtype=np.int64)
-    for _, entries in mdmb.items():
-        for entry in entries:
-            index = cat_to_idx.get(int(entry.class_id))
-            if index is not None:
-                counts[index] += 1
-
-    if counts.sum() == 0:
-        return
-
-    fig, ax = plt.subplots(figsize=(max(8, len(class_names) * 0.8), 6))
-    x = np.arange(len(class_names))
-    ax.bar(x, counts, color="steelblue")
-    ax.set_xticks(x)
-    ax.set_xticklabels(class_names, rotation=45, ha="right")
-    ax.set_xlabel("Class")
-    ax.set_ylabel("Count")
-    ax.set_title("MDMB: Miss Detections per Class (best.pt)")
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    _save_figure(fig, output_dir / "figures" / "mdmb_per_class.png")
 
 
 def _plot_single_cm(
