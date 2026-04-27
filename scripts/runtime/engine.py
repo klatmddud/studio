@@ -571,10 +571,11 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
 
     dhmr_summary = record.get("dhmr")
     if isinstance(dhmr_summary, dict):
-        edge = dhmr_summary.get("temporal_edge_repair", {})
-        parts.append(f"dhmr_edge_records={int(dhmr_summary.get('edge_records', 0))}")
-        if isinstance(edge, Mapping):
-            parts.append(f"dhmr_edge_points={int(edge.get('selected_points', 0))}")
+        hlrt = dhmr_summary.get("hlrt", {})
+        parts.append(f"dhmr_residual_records={int(dhmr_summary.get('num_residual_records', 0))}")
+        if isinstance(hlrt, Mapping) and bool(hlrt.get("enabled", False)):
+            parts.append(f"hlrt_replay_points={int(hlrt.get('hlrt_replay_points', 0))}")
+            parts.append(f"hlrt_side_points={int(hlrt.get('hlrt_side_points', 0))}")
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
@@ -690,34 +691,50 @@ def _merge_summary_group(
         result["mining"] = dict(mining_counts)
         return result
     if name == "dhmr":
-        edge_counts: defaultdict[str, int] = defaultdict(int)
-        loss_weighted = 0.0
-        edge_loss_weighted = 0.0
-        consistency_loss_weighted = 0.0
-        direction_loss_weighted = 0.0
-        loss_count = 0
-        result["edge_records"] = max(int(summary.get("edge_records", 0)) for summary in summaries)
-        result["loss_weight"] = max(float(summary.get("loss_weight", 0.0)) for summary in summaries)
+        hlrt_counts: defaultdict[str, int] = defaultdict(int)
+        side_loss_weighted = 0.0
+        side_loss_count = 0
+        result["num_residual_records"] = max(
+            int(summary.get("num_residual_records", 0))
+            for summary in summaries
+        )
+        result["hlrt_warmup_factor"] = max(
+            float(summary.get("hlrt_warmup_factor", 0.0))
+            for summary in summaries
+        )
         for summary in summaries:
-            edge = summary.get("temporal_edge_repair", {})
-            if not isinstance(edge, Mapping):
+            hlrt = summary.get("hlrt", {})
+            if not isinstance(hlrt, Mapping):
                 continue
-            for key, value in edge.items():
+            for key, value in hlrt.items():
                 if isinstance(value, (int, float)) and not str(key).startswith("mean_"):
-                    edge_counts[str(key)] += int(value)
-            losses = int(edge.get("losses", 0))
-            loss_weighted += float(edge.get("mean_loss", 0.0)) * float(losses)
-            edge_loss_weighted += float(edge.get("mean_edge_loss", 0.0)) * float(losses)
-            consistency_loss_weighted += float(edge.get("mean_consistency_loss", 0.0)) * float(losses)
-            direction_loss_weighted += float(edge.get("mean_direction_loss", 0.0)) * float(losses)
-            loss_count += losses
-        edge_result = dict(edge_counts)
-        edge_result["mean_loss"] = loss_weighted / float(max(loss_count, 1))
-        edge_result["mean_edge_loss"] = edge_loss_weighted / float(max(loss_count, 1))
-        edge_result["mean_consistency_loss"] = consistency_loss_weighted / float(max(loss_count, 1))
-        edge_result["mean_direction_loss"] = direction_loss_weighted / float(max(loss_count, 1))
-        edge_result["mean_points_per_loss"] = float(edge_counts.get("selected_points", 0)) / float(max(loss_count, 1))
-        result["temporal_edge_repair"] = edge_result
+                    hlrt_counts[str(key)] += int(value)
+            losses = int(hlrt.get("hlrt_side_losses", 0))
+            side_loss_weighted += float(hlrt.get("mean_side_loss", 0.0)) * float(losses)
+            side_loss_count += losses
+        hlrt_result = dict(hlrt_counts)
+        hlrt_result["enabled"] = any(
+            bool(summary.get("hlrt", {}).get("enabled", False))
+            for summary in summaries
+            if isinstance(summary.get("hlrt"), Mapping)
+        )
+        hlrt_result["native_loss_hooks"] = any(
+            bool(summary.get("hlrt", {}).get("native_loss_hooks", False))
+            for summary in summaries
+            if isinstance(summary.get("hlrt"), Mapping)
+        )
+        hlrt_result["assignment_replay"] = any(
+            bool(summary.get("hlrt", {}).get("assignment_replay", False))
+            for summary in summaries
+            if isinstance(summary.get("hlrt"), Mapping)
+        )
+        hlrt_result["residual_memory"] = any(
+            bool(summary.get("hlrt", {}).get("residual_memory", False))
+            for summary in summaries
+            if isinstance(summary.get("hlrt"), Mapping)
+        )
+        hlrt_result["mean_side_loss"] = side_loss_weighted / float(max(side_loss_count, 1))
+        result["hlrt"] = hlrt_result
         return result
     return result
 
@@ -799,7 +816,7 @@ def _merge_dhmr_states(states: list[Any]) -> dict[str, Any] | None:
     merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
     records: dict[str, Mapping[str, Any]] = {}
     for state in valid:
-        raw_records = state.get("edge_records", {})
+        raw_records = state.get("residual_records", {})
         if not isinstance(raw_records, Mapping):
             continue
         for gt_uid, raw_record in raw_records.items():
@@ -811,8 +828,8 @@ def _merge_dhmr_states(states: list[Any]) -> dict[str, Any] | None:
             if current is None:
                 records[key] = candidate
                 continue
-            records[key] = _select_dhmr_edge_record(current, candidate)
-    merged["edge_records"] = records
+            records[key] = _select_dhmr_residual_record(current, candidate)
+    merged["residual_records"] = records
     return merged
 
 
@@ -836,16 +853,16 @@ def _dhm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
     )
 
 
-def _select_dhmr_edge_record(
+def _select_dhmr_residual_record(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
 ) -> dict[str, Any]:
-    left_priority = _dhmr_edge_record_priority(left)
-    right_priority = _dhmr_edge_record_priority(right)
+    left_priority = _dhmr_residual_record_priority(left)
+    right_priority = _dhmr_residual_record_priority(right)
     return dict(left if left_priority >= right_priority else right)
 
 
-def _dhmr_edge_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
+def _dhmr_residual_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
     return (
         float(record.get("last_epoch") or 0),
         float(record.get("observations", 0)),

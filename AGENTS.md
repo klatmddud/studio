@@ -22,6 +22,7 @@ uv sync
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --seed 42 --device cuda:0 cuda:1
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --dhm-config modules/cfg/dhm.yaml --dhmr-config modules/cfg/dhmr.yaml
+bash scripts/bash/baseline/train.bash
 
 # Evaluate
 uv run scripts/eval.py --config scripts/cfg/eval.yaml --model models/detection/cfg/fcos.yaml --checkpoint runs/train/checkpoints/best.pt

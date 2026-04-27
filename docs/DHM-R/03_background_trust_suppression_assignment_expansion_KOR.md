@@ -219,7 +219,7 @@ latency, NMS, score threshold는 유지된다.
 
 DHM-R은 failure type별로 서로 다른 repair path를 둔다.
 
-- `FN_LOC`: Temporal Edge Repair Module
+- `FN_LOC`: HLRT
 - `FN_CLS`: Confusion Prototype Memory Module
 - `FN_BG`: Background Trust Suppression + Assignment Expansion
 

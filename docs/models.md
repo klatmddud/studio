@@ -11,7 +11,7 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - DHM mines per-GT detection-state hysteresis at epoch end.
 - DHM can reweight existing FCOS classification, box, and centerness losses.
 - DHM can apply HLAE training-only positive assignment expansion for eligible hard GTs.
-- DHM-R reads previous DHM records and can add a `dhmr_edge` training-only auxiliary loss for `FN_LOC` GTs through the Temporal Edge Repair branch.
+- DHM-R reads previous DHM records and applies HLRT hooks for `FN_LOC` GTs: residual memory, residual replay, bbox loss weighting, side-aware loss, and quality gating.
 - `mine_dhm_batch()` supports epoch-end full train-set hysteresis mining when DHM is enabled.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
 

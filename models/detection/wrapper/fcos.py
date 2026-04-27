@@ -23,7 +23,7 @@ from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 
 class DHMFCOS(FCOS):
-    """FCOS variant with DHM mining/weighting and optional DHM-R edge repair loss."""
+    """FCOS variant with DHM mining/weighting and optional DHM-R HLRT hooks."""
 
     def __init__(
         self,
@@ -95,7 +95,8 @@ class DHMFCOS(FCOS):
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
             dhm = self._get_dhm()
-            if self._should_apply_dhm_loss_weighting(dhm):
+            dhmr = self._get_dhmr()
+            if self._should_use_custom_loss(dhm=dhm, dhmr=dhmr):
                 losses = self._compute_weighted_loss_dict(
                     targets=targets,
                     image_shapes=images.image_sizes,
@@ -103,26 +104,21 @@ class DHMFCOS(FCOS):
                     anchors=anchors,
                     matched_idxs=matched_idxs,
                     dhm=dhm,
+                    dhmr=dhmr,
                 )
             else:
                 losses = self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
 
-            dhmr = self._get_dhmr()
             if dhmr is not None and dhm is not None:
-                dhmr_loss = self._compute_dhmr_loss(
+                self._update_dhmr_hlrt_memory(
                     dhmr=dhmr,
                     dhm=dhm,
                     targets=targets,
                     image_shapes=images.image_sizes,
-                    features=features,
                     head_outputs=head_outputs,
                     anchors=anchors,
                     matched_idxs=matched_idxs,
-                    num_anchors_per_level=num_anchors_per_level,
                 )
-                if bool(torch.isfinite(dhmr_loss).item()) and float(dhmr_loss.detach().item()) != 0.0:
-                    losses = dict(losses)
-                    losses["dhmr_edge"] = dhmr_loss
 
         else:
             split_head_outputs: dict[str, list[torch.Tensor]] = {}
@@ -150,11 +146,14 @@ class DHMFCOS(FCOS):
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
         dhm: DetectionHysteresisMemory | None = None,
+        dhmr: DHMRepairModule | None = None,
     ) -> dict[str, torch.Tensor]:
         cls_template = head_outputs["cls_logits"]
         cls_sum = cls_template.new_zeros(())
         reg_sum = cls_template.new_zeros(())
         ctr_sum = cls_template.new_zeros(())
+        hlrt_side_sum = cls_template.new_zeros(())
+        hlrt_side_points = 0
         total_pos = 0
 
         for image_index, target in enumerate(targets):
@@ -173,6 +172,14 @@ class DHMFCOS(FCOS):
 
             pos_mask = assignments >= 0
             total_pos += int(pos_mask.sum().item())
+            records: list[DHMRecord | None] = []
+            if dhm is not None and (self._should_apply_dhm_loss_weighting(dhm) or dhmr is not None):
+                records = self._lookup_dhm_gt_records(
+                    dhm=dhm,
+                    target=target,
+                    image_shape=image_shapes[image_index],
+                    image_index=image_index,
+                )
 
             if dhm is not None:
                 cls_weights = self._apply_dhm_loss_weighting(
@@ -203,6 +210,31 @@ class DHMFCOS(FCOS):
                     component="ctr",
                 )
 
+            ctr_losses = raw["ctr_losses"]
+            if dhmr is not None and records:
+                reg_weights = self._apply_dhmr_hlrt_iou_weights(
+                    base_weights=reg_weights,
+                    dhmr=dhmr,
+                    records=records,
+                    assignments=assignments,
+                )
+                ctr_losses = self._apply_dhmr_hlrt_quality_gate(
+                    raw=raw,
+                    dhmr=dhmr,
+                    records=records,
+                    assignments=assignments,
+                )
+                side_loss = self._compute_dhmr_hlrt_side_loss(
+                    raw=raw,
+                    dhmr=dhmr,
+                    records=records,
+                    assignments=assignments,
+                )
+                if side_loss is not None:
+                    side_value, side_points = side_loss
+                    hlrt_side_sum = hlrt_side_sum + side_value
+                    hlrt_side_points += side_points
+
             cls_losses_by_class = raw["cls_losses_by_class"]
             cls_weights = cls_weights.to(dtype=cls_losses_by_class.dtype)
             reg_weights = reg_weights.to(dtype=cls_losses_by_class.dtype)
@@ -211,38 +243,34 @@ class DHMFCOS(FCOS):
             cls_sum = cls_sum + (cls_losses_by_class * cls_weights.unsqueeze(1)).sum()
             if bool(pos_mask.any().item()):
                 reg_sum = reg_sum + (raw["reg_losses"][pos_mask] * reg_weights[pos_mask]).sum()
-                ctr_sum = ctr_sum + (raw["ctr_losses"][pos_mask] * ctr_weights[pos_mask]).sum()
+                ctr_sum = ctr_sum + (ctr_losses[pos_mask] * ctr_weights[pos_mask]).sum()
 
         normalizer = cls_sum.new_tensor(float(max(total_pos, 1)))
-        return {
+        losses = {
             "classification": cls_sum / normalizer,
             "bbox_regression": reg_sum / normalizer,
             "bbox_ctrness": ctr_sum / normalizer,
         }
+        if int(hlrt_side_points) > 0:
+            side_scaled = hlrt_side_sum / normalizer
+            losses["dhmr_hlrt_side"] = side_scaled
+            if dhmr is not None:
+                dhmr.record_hlrt_side_loss(loss=side_scaled, selected_points=hlrt_side_points)
+        return losses
 
-    def _compute_dhmr_loss(
+    def _update_dhmr_hlrt_memory(
         self,
         *,
         dhmr: DHMRepairModule,
         dhm: DetectionHysteresisMemory,
         targets: list[dict[str, torch.Tensor]],
         image_shapes: list[tuple[int, int]],
-        features: OrderedDict[str, torch.Tensor],
         head_outputs: dict[str, torch.Tensor],
         anchors: list[torch.Tensor],
         matched_idxs: list[torch.Tensor],
-        num_anchors_per_level: list[int],
-    ) -> torch.Tensor:
-        template = head_outputs["cls_logits"]
-        zero = template.new_zeros(())
+    ) -> None:
         if len(dhm) == 0:
-            return zero
-        flat_features = self._flatten_feature_levels(
-            features=features,
-            num_anchors_per_level=num_anchors_per_level,
-        )
-        if flat_features is None:
-            return zero
+            return
         records_by_image = [
             self._lookup_dhm_gt_records(
                 dhm=dhm,
@@ -252,9 +280,8 @@ class DHMFCOS(FCOS):
             )
             for image_index, target in enumerate(targets)
         ]
-        return dhmr.compute_loss(
+        dhmr.update_hlrt_residual_memory(
             targets=targets,
-            flat_features=flat_features,
             head_outputs=head_outputs,
             anchors=anchors,
             matched_idxs=matched_idxs,
@@ -271,6 +298,18 @@ class DHMFCOS(FCOS):
             return False
         return True
 
+    def _should_use_custom_loss(
+        self,
+        *,
+        dhm: DetectionHysteresisMemory | None,
+        dhmr: DHMRepairModule | None,
+    ) -> bool:
+        if self._should_apply_dhm_loss_weighting(dhm):
+            return True
+        if dhm is None or dhmr is None or len(dhm) == 0:
+            return False
+        return bool(dhmr.uses_native_loss_hooks())
+
     def _should_apply_dhm_assignment_expansion(self, dhm: DetectionHysteresisMemory | None) -> bool:
         if dhm is None:
             return False
@@ -281,6 +320,18 @@ class DHMFCOS(FCOS):
         if len(dhm) == 0:
             return False
         return True
+
+    def _should_apply_hlrt_assignment_replay(
+        self,
+        *,
+        dhm: DetectionHysteresisMemory | None,
+        dhmr: DHMRepairModule | None,
+    ) -> bool:
+        if dhm is None or dhmr is None:
+            return False
+        if len(dhm) == 0:
+            return False
+        return bool(dhmr.uses_assignment_replay())
 
     def _apply_dhm_loss_weighting(
         self,
@@ -325,6 +376,119 @@ class DHMFCOS(FCOS):
             dtype=result.dtype,
         )
         return result
+
+    def _apply_dhmr_hlrt_iou_weights(
+        self,
+        *,
+        base_weights: torch.Tensor,
+        dhmr: DHMRepairModule,
+        records: list[DHMRecord | None],
+        assignments: torch.Tensor,
+    ) -> torch.Tensor:
+        if not dhmr.uses_native_loss_hooks():
+            return base_weights
+        if not bool(dhmr.config.hlrt.iou_loss_weighting.enabled):
+            return base_weights
+        result = base_weights.clone()
+        pos_mask = assignments >= 0
+        if not bool(pos_mask.any().item()):
+            return result
+        for gt_index, record in enumerate(records):
+            if record is None:
+                continue
+            weight = float(dhmr.hlrt_iou_weight_for_record(record))
+            if weight == 1.0:
+                continue
+            indices = torch.where(pos_mask & (assignments == int(gt_index)))[0]
+            if indices.numel() == 0:
+                continue
+            result[indices] = result[indices] * weight
+        return result
+
+    def _apply_dhmr_hlrt_quality_gate(
+        self,
+        *,
+        raw: dict[str, torch.Tensor],
+        dhmr: DHMRepairModule,
+        records: list[DHMRecord | None],
+        assignments: torch.Tensor,
+    ) -> torch.Tensor:
+        if not dhmr.uses_native_loss_hooks():
+            return raw["ctr_losses"]
+        if not bool(dhmr.config.hlrt.quality_gate.enabled):
+            return raw["ctr_losses"]
+        ctr_targets = raw["ctr_targets"].clone()
+        pos_mask = assignments >= 0
+        if not bool(pos_mask.any().item()):
+            return raw["ctr_losses"]
+        changed = False
+        for gt_index, record in enumerate(records):
+            if record is None or not dhmr.is_hlrt_record_active(record):
+                continue
+            indices = torch.where(pos_mask & (assignments == int(gt_index)))[0]
+            if indices.numel() == 0:
+                continue
+            updated = dhmr.hlrt_quality_targets(
+                record=record,
+                base_targets=ctr_targets[indices],
+            )
+            if updated.data_ptr() != ctr_targets[indices].data_ptr():
+                ctr_targets[indices] = updated
+                changed = True
+        if not changed:
+            return raw["ctr_losses"]
+        result = raw["ctr_losses"].clone()
+        result[pos_mask] = F.binary_cross_entropy_with_logits(
+            raw["bbox_ctrness"][pos_mask],
+            ctr_targets[pos_mask],
+            reduction="none",
+        )
+        return result
+
+    def _compute_dhmr_hlrt_side_loss(
+        self,
+        *,
+        raw: dict[str, torch.Tensor],
+        dhmr: DHMRepairModule,
+        records: list[DHMRecord | None],
+        assignments: torch.Tensor,
+    ) -> tuple[torch.Tensor, int] | None:
+        if not dhmr.uses_native_loss_hooks():
+            return None
+        side_weight = float(dhmr.hlrt_side_loss_weight())
+        if side_weight <= 0.0:
+            return None
+        side_losses = raw["side_losses_by_edge"]
+        edge_deltas = raw["edge_deltas"]
+        pos_mask = assignments >= 0
+        if not bool(pos_mask.any().item()):
+            return None
+        total = side_losses.new_zeros(())
+        selected_points = 0
+        for gt_index, record in enumerate(records):
+            if record is None or not dhmr.is_hlrt_record_active(record):
+                continue
+            indices = torch.where(pos_mask & (assignments == int(gt_index)))[0]
+            if indices.numel() == 0:
+                continue
+            point_side_losses = F.smooth_l1_loss(
+                raw["bbox_regression"][indices],
+                raw["target_regression"][indices],
+                beta=float(dhmr.config.hlrt.side_aware_loss.smooth_l1_beta),
+                reduction="none",
+            )
+            edge_weights = dhmr.hlrt_side_weights_for_record(
+                record=record,
+                current_delta=edge_deltas[indices],
+            ).to(device=side_losses.device, dtype=side_losses.dtype)
+            weighted = (point_side_losses * edge_weights.reshape(1, 4)).sum(dim=1)
+            weighted = weighted / edge_weights.sum().clamp_min(1.0e-6)
+            sample_weight = side_losses.new_tensor(float(dhmr.hlrt_side_sample_weight(record)))
+            total = total + (weighted * sample_weight).sum()
+            selected_points += int(indices.numel())
+        if selected_points <= 0:
+            return None
+        return total * side_losses.new_tensor(side_weight), selected_points
 
     def _lookup_dhm_gt_records(
         self,
@@ -441,6 +605,10 @@ class DHMFCOS(FCOS):
 
         raw_reg = cls_logits.new_zeros((cls_logits.shape[0],))
         raw_ctr = cls_logits.new_zeros((cls_logits.shape[0],))
+        ctr_targets_all = cls_logits.new_zeros((cls_logits.shape[0],))
+        target_regression = cls_logits.new_zeros((cls_logits.shape[0], 4))
+        edge_deltas = cls_logits.new_zeros((cls_logits.shape[0], 4))
+        side_losses_by_edge = cls_logits.new_zeros((cls_logits.shape[0], 4))
 
         pos_mask = matched_idxs_per_image >= 0
         if bool(pos_mask.any().item()):
@@ -456,17 +624,33 @@ class DHMFCOS(FCOS):
             gt_classes_targets[pos_mask, matched_gt_labels] = 1.0
 
             matched_gt_boxes = gt_boxes[matched_gt_indices]
+            target_regression[pos_mask] = self._encode_boxes(
+                gt_boxes=matched_gt_boxes,
+                anchors=anchors_per_image[pos_mask],
+            )
             pred_boxes = self._decode_boxes(
                 box_regression=bbox_regression[pos_mask],
                 anchors=anchors_per_image[pos_mask],
             )
             giou = box_ops.generalized_box_iou(pred_boxes, matched_gt_boxes)
             raw_reg[pos_mask] = 1.0 - torch.diagonal(giou)
+            edge_deltas[pos_mask] = self._normalized_edge_delta(
+                pred_boxes=pred_boxes,
+                gt_boxes=matched_gt_boxes,
+                clip=0.0,
+            )
+            side_losses_by_edge[pos_mask] = F.smooth_l1_loss(
+                bbox_regression[pos_mask],
+                target_regression[pos_mask],
+                beta=0.1,
+                reduction="none",
+            )
 
             ctr_targets = self._compute_centerness_targets(
                 anchors=anchors_per_image[pos_mask],
                 gt_boxes=matched_gt_boxes,
             )
+            ctr_targets_all[pos_mask] = ctr_targets
             raw_ctr[pos_mask] = F.binary_cross_entropy_with_logits(
                 bbox_ctrness[pos_mask],
                 ctr_targets,
@@ -480,6 +664,12 @@ class DHMFCOS(FCOS):
             "cls_losses": raw_cls,
             "reg_losses": raw_reg,
             "ctr_losses": raw_ctr,
+            "ctr_targets": ctr_targets_all,
+            "bbox_ctrness": bbox_ctrness,
+            "bbox_regression": bbox_regression,
+            "target_regression": target_regression,
+            "side_losses_by_edge": side_losses_by_edge,
+            "edge_deltas": edge_deltas,
             "assignments": matched_idxs_per_image,
             "point_boxes": anchors_per_image,
             "gt_boxes": gt_boxes,
@@ -505,22 +695,6 @@ class DHMFCOS(FCOS):
         lr = torch.minimum(left, right).clamp(min=0.0) / torch.maximum(left, right).clamp(min=eps)
         tb = torch.minimum(top, bottom).clamp(min=0.0) / torch.maximum(top, bottom).clamp(min=eps)
         return torch.sqrt((lr * tb).clamp(min=0.0))
-
-    def _flatten_feature_levels(
-        self,
-        *,
-        features: OrderedDict[str, torch.Tensor],
-        num_anchors_per_level: list[int],
-    ) -> torch.Tensor | None:
-        flattened = []
-        for feature, expected_points in zip(features.values(), num_anchors_per_level, strict=True):
-            level_features = feature.permute(0, 2, 3, 1).reshape(feature.shape[0], -1, feature.shape[1])
-            if int(level_features.shape[1]) != int(expected_points):
-                return None
-            flattened.append(level_features)
-        if not flattened:
-            return None
-        return torch.cat(flattened, dim=1)
 
     def _decode_boxes(
         self,
@@ -566,6 +740,58 @@ class DHMFCOS(FCOS):
             dim=-1,
         )
 
+    def _encode_boxes(
+        self,
+        *,
+        gt_boxes: torch.Tensor,
+        anchors: torch.Tensor,
+    ) -> torch.Tensor:
+        box_coder = getattr(self, "box_coder", None)
+        if box_coder is not None:
+            encode_single = getattr(box_coder, "encode_single", None)
+            if callable(encode_single):
+                try:
+                    encoded = encode_single(gt_boxes, anchors)
+                    if isinstance(encoded, torch.Tensor):
+                        return encoded
+                except TypeError:
+                    pass
+            encode = getattr(box_coder, "encode", None)
+            if callable(encode):
+                try:
+                    encoded = encode([gt_boxes], [anchors])
+                    if isinstance(encoded, list) and encoded and isinstance(encoded[0], torch.Tensor):
+                        return encoded[0]
+                    if isinstance(encoded, torch.Tensor):
+                        if encoded.ndim == 3 and encoded.shape[0] == 1:
+                            return encoded[0]
+                        return encoded
+                except TypeError:
+                    pass
+
+        centers = (anchors[:, :2] + anchors[:, 2:]) * 0.5
+        sizes = (anchors[:, 2:] - anchors[:, :2]).clamp(min=1e-6)
+        left = (centers[:, 0] - gt_boxes[:, 0]) / sizes[:, 0]
+        top = (centers[:, 1] - gt_boxes[:, 1]) / sizes[:, 1]
+        right = (gt_boxes[:, 2] - centers[:, 0]) / sizes[:, 0]
+        bottom = (gt_boxes[:, 3] - centers[:, 1]) / sizes[:, 1]
+        return torch.stack((left, top, right, bottom), dim=-1).clamp(min=0.0)
+
+    def _normalized_edge_delta(
+        self,
+        *,
+        pred_boxes: torch.Tensor,
+        gt_boxes: torch.Tensor,
+        clip: float,
+    ) -> torch.Tensor:
+        width = (gt_boxes[:, 2] - gt_boxes[:, 0]).clamp_min(1.0)
+        height = (gt_boxes[:, 3] - gt_boxes[:, 1]).clamp_min(1.0)
+        scale = torch.stack((width, height, width, height), dim=1)
+        delta = (gt_boxes - pred_boxes.to(device=gt_boxes.device, dtype=gt_boxes.dtype)) / scale
+        if clip > 0.0:
+            delta = delta.clamp(min=-float(clip), max=float(clip))
+        return delta.detach()
+
     def _match_anchors_to_targets(
         self,
         targets: list[dict[str, torch.Tensor]],
@@ -574,7 +800,9 @@ class DHMFCOS(FCOS):
     ) -> list[torch.Tensor]:
         matched_idxs: list[torch.Tensor] = []
         dhm = self._get_dhm()
+        dhmr = self._get_dhmr()
         use_dhm_expansion = self._should_apply_dhm_assignment_expansion(dhm)
+        use_hlrt_replay = self._should_apply_hlrt_assignment_replay(dhm=dhm, dhmr=dhmr)
         for image_index, (anchors_per_image, targets_per_image) in enumerate(
             zip(anchors, targets, strict=True)
         ):
@@ -623,6 +851,21 @@ class DHMFCOS(FCOS):
                     anchor_sizes=anchor_sizes,
                     num_anchors_per_level=num_anchors_per_level,
                     image_index=image_index,
+                )
+            if use_hlrt_replay and dhm is not None and dhmr is not None:
+                records = self._lookup_dhm_gt_records(
+                    dhm=dhm,
+                    target=targets_per_image,
+                    image_shape=(0, 0),
+                    image_index=image_index,
+                )
+                matched_idx = dhmr.apply_hlrt_assignment_replay(
+                    target=targets_per_image,
+                    matched_idx=matched_idx,
+                    anchor_centers=anchor_centers,
+                    anchor_sizes=anchor_sizes,
+                    num_anchors_per_level=num_anchors_per_level,
+                    dhm_records=records,
                 )
             matched_idxs.append(matched_idx)
         return matched_idxs

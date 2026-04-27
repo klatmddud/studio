@@ -19,6 +19,12 @@ uv run scripts/train.py \
   --dhmr-config modules/cfg/dhmr.yaml
 ```
 
+Baseline seed-mean training script:
+
+```bash
+bash scripts/bash/baseline/train.bash
+```
+
 ## Runtime Flow
 
 `scripts/train.py`:
@@ -75,7 +81,9 @@ Training behavior:
 
 DHM-R depends on DHM. If DHM-R is enabled while DHM is disabled, registry construction raises an error.
 
-When enabled, FCOS adds a `dhmr_edge` auxiliary loss for eligible previous DHM `FN_LOC` records. This is training-only and does not change evaluation postprocessing.
+When enabled, DHM-R uses HLRT for eligible previous DHM `FN_LOC` records. HLRT adds independently configurable hooks under `dhmr.hlrt`: residual memory, residual replay, IoU loss weighting, side-aware loss, and a centerness quality gate.
+
+HLRT residual replay changes only the FCOS training assignment by adding capped extra positive points. It does not duplicate images, change the dataset, or alter evaluation postprocessing. HLRT side-aware supervision is logged as `dhmr_hlrt_side`.
 
 ## Checkpointing
 

@@ -27,15 +27,18 @@ Key concepts:
 
 ## DHM-R - Detection Hysteresis Memory Repair (`modules/nn/dhmr.py`)
 
-DHM-R currently implements Temporal Edge Repair for localization false negatives.
+DHM-R implements HLRT (Hysteretic Localization Residual Transport) for DHM
+`FN_LOC` records in FCOS.
 
 Key concepts:
 
 - Depends on DHM because it needs previous per-GT DHM records.
 - Selects DHM records whose recent state matches `FN_LOC`.
-- Adds a training-only `dhmr_edge` auxiliary loss in FCOS.
-- Uses current FPN point features, FCOS logits, anchor points, matched GT indices, and DHM records.
-- Maintains compact temporal edge records for state synchronization and summary logging.
+- HLRT can independently enable residual memory, residual replay, native IoU loss weighting, side-aware boundary loss, and a centerness quality gate through `modules/cfg/dhmr.yaml`.
+- HLRT residual replay adds extra FCOS positive points for eligible `FN_LOC` GTs without changing the image batch or dataset annotations.
+- HLRT side-aware loss is logged as `dhmr_hlrt_side`.
+- Uses FCOS logits, anchor points, matched GT indices, and DHM records.
+- Maintains compact residual records for state synchronization and summary logging.
 - Summary: `dhmr.summary()` is logged under the `dhmr` key in `history.json`.
 - Config: `modules/cfg/dhmr.yaml`.
 
@@ -45,9 +48,11 @@ Key concepts:
 2. FCOS forward computes the base detection loss.
 3. If DHM loss weighting is enabled and DHM has records, FCOS reweights raw per-point losses.
 4. If DHM assignment expansion is enabled and DHM has eligible records, FCOS adds extra positive points before loss computation.
-5. If DHM-R is enabled, FCOS adds `dhmr_edge` for eligible DHM `FN_LOC` records.
-6. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
-7. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
+5. If DHM-R HLRT residual replay is enabled, FCOS adds replay positive points from temporal residual memory.
+6. If DHM-R HLRT native hooks are enabled, FCOS applies IoU loss weighting, optional centerness target gating, and optional `dhmr_hlrt_side`.
+7. DHM-R updates HLRT residual memory from eligible `FN_LOC` positive points.
+8. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
+9. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
 
 ## Support Matrix
 
