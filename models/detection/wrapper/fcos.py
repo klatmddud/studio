@@ -110,7 +110,7 @@ class DHMFCOS(FCOS):
 
             if dhmr is not None and dhm is not None:
                 losses.update(
-                    self._compute_dhmr_border_refinement_losses(
+                    self._compute_dhmr_localization_repair_losses(
                         dhmr=dhmr,
                         dhm=dhm,
                         targets=targets,
@@ -141,7 +141,7 @@ class DHMFCOS(FCOS):
             return losses, detections
         return self.eager_outputs(losses, detections)
 
-    def _compute_dhmr_border_refinement_losses(
+    def _compute_dhmr_localization_repair_losses(
         self,
         *,
         dhmr: DHMRepairModule,
@@ -156,7 +156,7 @@ class DHMFCOS(FCOS):
         num_anchors_per_level: list[int],
     ) -> dict[str, torch.Tensor]:
         del image_shapes
-        if len(dhm) == 0 or not dhmr.uses_border_refinement():
+        if len(dhm) == 0 or not dhmr.uses_localization_repair():
             return {}
         records_by_image = [
             (
@@ -171,7 +171,7 @@ class DHMFCOS(FCOS):
             )
             for image_index, target in enumerate(targets)
         ]
-        return dhmr.compute_border_refinement_loss(
+        return dhmr.compute_localization_repair_losses(
             targets=targets,
             feature_maps=feature_maps,
             head_outputs=head_outputs,

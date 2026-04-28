@@ -77,6 +77,7 @@ Training behavior:
 
 - When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
 - If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
+- If `dhmr.counterfactual_repair.enabled` is true, FCOS adds training-only DCLR losses: `dhmr_dclr_giou`, `dhmr_dclr_residual`, `dhmr_dclr_crossing`, and `dhmr_dclr_quality`. The DCLR path selects DHM-targeted dense positive points whose initial IoU is below `tau_iou + tau_margin`; inference-time repair and NMS changes are not applied yet.
 - If `train.hard_replay.enabled` is true and DHM records exist, the train DataLoader uses a mixed batch sampler. Replay can add DHM-hard full-image samples and, for `FN_LOC`, DHM-guided localization repair crops while keeping each emitted batch at the configured batch size when enough base samples remain.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
@@ -84,10 +85,10 @@ Training behavior:
 driven by missing positive assignment, poor localization/centerness quality, or ambiguous GT
 competition before enabling a repair intervention.
 
-`history.json` also stores DHM-R border-refinement aggregates under
-`dhmr.border_refinement` when the module is enabled. These include selected point counts,
-selected GT counts, and mean raw GIoU, residual, quality, and refined-IoU values for the
-training-only auxiliary head.
+`history.json` also stores DHM-R localization-repair aggregates under `dhmr.border_refinement`
+and `dhmr.counterfactual_repair` when those paths are configured. The DCLR summary includes selected
+point/GT counts, mean initial IoU, mean refined IoU, and mean raw GIoU, residual, crossing, and
+quality losses.
 
 ## Hard Replay
 
@@ -158,6 +159,8 @@ The trainer logs replay statistics under the top-level `hard_replay` key in `his
 DHM-R depends on DHM. If DHM-R is enabled while DHM is disabled, registry construction raises an error.
 
 When `dhmr.border_refinement.enabled` is true, DHM-R uses previous DHM transition records to select dense FCOS positive points for localization repair. Phase 1 is training-only: it adds `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` auxiliary losses, but does not change image sampling, inference postprocessing, or evaluation behavior.
+
+When `dhmr.counterfactual_repair.enabled` is true, DHM-R enables the DCLR Phase 1 path inside the same module. It selects `FN_LOC->FN_LOC` and `TP->FN_LOC` dense positive points below the configured crossing target and adds `dhmr_dclr_giou`, `dhmr_dclr_residual`, `dhmr_dclr_crossing`, and `dhmr_dclr_quality` losses. This is also training-only; validation still uses the base detector outputs.
 
 ## Checkpointing
 

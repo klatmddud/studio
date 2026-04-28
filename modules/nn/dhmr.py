@@ -17,6 +17,7 @@ from .dhm import DHMRecord
 
 
 _BORDER_REFINEMENT_TRANSITIONS = ("FN_LOC->FN_LOC", "TP->FN_LOC")
+_COUNTERFACTUAL_REPAIR_TRANSITIONS = ("FN_LOC->FN_LOC", "TP->FN_LOC")
 _BORDER_GEOMETRY_DIM = 9
 
 
@@ -132,9 +133,137 @@ class BorderRefinementConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CounterfactualRepairConfig:
+    enabled: bool = False
+    feature_dim: int = 256
+    hidden_dim: int = 256
+    num_layers: int = 2
+    border_points_per_side: int = 5
+    max_delta: float = 0.25
+    max_gt_per_image: int = 16
+    max_points_per_gt: int = 2
+    max_points_per_batch: int = 128
+    min_observations: int = 2
+    min_instability: float = 0.0
+    target_transitions: tuple[str, ...] = _COUNTERFACTUAL_REPAIR_TRANSITIONS
+    start_epoch: int = 1
+    warmup_epochs: int = 0
+    detach_boxes: bool = True
+    tau_iou: float = 0.5
+    tau_margin: float = 0.05
+    giou_loss_weight: float = 0.2
+    residual_loss_weight: float = 0.1
+    crossing_loss_weight: float = 0.2
+    quality_loss_weight: float = 0.1
+    smooth_l1_beta: float = 0.1
+    target_delta_clip: float = 1.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "CounterfactualRepairConfig":
+        data = dict(raw or {})
+        raw_transitions = data.get("target_transitions", _COUNTERFACTUAL_REPAIR_TRANSITIONS)
+        if isinstance(raw_transitions, str):
+            target_transitions = (raw_transitions,)
+        elif isinstance(raw_transitions, Sequence):
+            target_transitions = tuple(str(item) for item in raw_transitions)
+        else:
+            raise TypeError("DHM-R counterfactual_repair.target_transitions must be a string or sequence.")
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            feature_dim=int(data.get("feature_dim", 256)),
+            hidden_dim=int(data.get("hidden_dim", 256)),
+            num_layers=int(data.get("num_layers", 2)),
+            border_points_per_side=int(data.get("border_points_per_side", 5)),
+            max_delta=float(data.get("max_delta", 0.25)),
+            max_gt_per_image=int(data.get("max_gt_per_image", 16)),
+            max_points_per_gt=int(data.get("max_points_per_gt", 2)),
+            max_points_per_batch=int(data.get("max_points_per_batch", 128)),
+            min_observations=int(data.get("min_observations", 2)),
+            min_instability=float(data.get("min_instability", 0.0)),
+            target_transitions=target_transitions,
+            start_epoch=int(data.get("start_epoch", 1)),
+            warmup_epochs=int(data.get("warmup_epochs", 0)),
+            detach_boxes=bool(data.get("detach_boxes", True)),
+            tau_iou=float(data.get("tau_iou", 0.5)),
+            tau_margin=float(data.get("tau_margin", 0.05)),
+            giou_loss_weight=float(data.get("giou_loss_weight", 0.2)),
+            residual_loss_weight=float(data.get("residual_loss_weight", 0.1)),
+            crossing_loss_weight=float(data.get("crossing_loss_weight", 0.2)),
+            quality_loss_weight=float(data.get("quality_loss_weight", 0.1)),
+            smooth_l1_beta=float(data.get("smooth_l1_beta", 0.1)),
+            target_delta_clip=float(data.get("target_delta_clip", 1.0)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for field_name in ("feature_dim", "hidden_dim", "num_layers", "border_points_per_side"):
+            if int(getattr(self, field_name)) < 1:
+                raise ValueError(f"DHM-R counterfactual_repair.{field_name} must be >= 1.")
+        for field_name in ("max_gt_per_image", "max_points_per_gt", "max_points_per_batch"):
+            if int(getattr(self, field_name)) < 0:
+                raise ValueError(f"DHM-R counterfactual_repair.{field_name} must be >= 0.")
+        if int(self.min_observations) < 1:
+            raise ValueError("DHM-R counterfactual_repair.min_observations must be >= 1.")
+        if not 0.0 <= float(self.min_instability) <= 1.0:
+            raise ValueError("DHM-R counterfactual_repair.min_instability must satisfy 0 <= value <= 1.")
+        if int(self.start_epoch) < 0:
+            raise ValueError("DHM-R counterfactual_repair.start_epoch must be >= 0.")
+        if int(self.warmup_epochs) < 0:
+            raise ValueError("DHM-R counterfactual_repair.warmup_epochs must be >= 0.")
+        if not 0.0 <= float(self.tau_iou) <= 1.0:
+            raise ValueError("DHM-R counterfactual_repair.tau_iou must satisfy 0 <= value <= 1.")
+        if float(self.tau_margin) < 0.0:
+            raise ValueError("DHM-R counterfactual_repair.tau_margin must be >= 0.")
+        if float(self.tau_iou) + float(self.tau_margin) > 1.0:
+            raise ValueError("DHM-R counterfactual_repair.tau_iou + tau_margin must be <= 1.")
+        for field_name in (
+            "max_delta",
+            "giou_loss_weight",
+            "residual_loss_weight",
+            "crossing_loss_weight",
+            "quality_loss_weight",
+            "smooth_l1_beta",
+            "target_delta_clip",
+        ):
+            if float(getattr(self, field_name)) < 0.0:
+                raise ValueError(f"DHM-R counterfactual_repair.{field_name} must be >= 0.")
+        if not self.target_transitions:
+            raise ValueError("DHM-R counterfactual_repair.target_transitions must not be empty.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "feature_dim": self.feature_dim,
+            "hidden_dim": self.hidden_dim,
+            "num_layers": self.num_layers,
+            "border_points_per_side": self.border_points_per_side,
+            "max_delta": self.max_delta,
+            "max_gt_per_image": self.max_gt_per_image,
+            "max_points_per_gt": self.max_points_per_gt,
+            "max_points_per_batch": self.max_points_per_batch,
+            "min_observations": self.min_observations,
+            "min_instability": self.min_instability,
+            "target_transitions": list(self.target_transitions),
+            "start_epoch": self.start_epoch,
+            "warmup_epochs": self.warmup_epochs,
+            "detach_boxes": self.detach_boxes,
+            "tau_iou": self.tau_iou,
+            "tau_margin": self.tau_margin,
+            "giou_loss_weight": self.giou_loss_weight,
+            "residual_loss_weight": self.residual_loss_weight,
+            "crossing_loss_weight": self.crossing_loss_weight,
+            "quality_loss_weight": self.quality_loss_weight,
+            "smooth_l1_beta": self.smooth_l1_beta,
+            "target_delta_clip": self.target_delta_clip,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DHMRConfig:
     enabled: bool = False
     border_refinement: BorderRefinementConfig = field(default_factory=BorderRefinementConfig)
+    counterfactual_repair: CounterfactualRepairConfig = field(default_factory=CounterfactualRepairConfig)
     arch: str | None = None
 
     @classmethod
@@ -166,6 +295,9 @@ class DHMRConfig:
         return cls(
             enabled=bool(merged.get("enabled", False)),
             border_refinement=BorderRefinementConfig.from_mapping(merged.get("border_refinement")),
+            counterfactual_repair=CounterfactualRepairConfig.from_mapping(
+                merged.get("counterfactual_repair")
+            ),
             arch=normalized_arch,
         )
 
@@ -173,6 +305,7 @@ class DHMRConfig:
         return {
             "enabled": self.enabled,
             "border_refinement": self.border_refinement.to_dict(),
+            "counterfactual_repair": self.counterfactual_repair.to_dict(),
             "arch": self.arch,
         }
 
@@ -184,6 +317,7 @@ class DHMRepairModule(nn.Module):
         self.current_epoch = 0
         self._stats: Counter[str] = Counter()
         self._border_loss_sums: Counter[str] = Counter()
+        self._dclr_loss_sums: Counter[str] = Counter()
         if bool(config.border_refinement.enabled):
             border = config.border_refinement
             input_dim = int(border.feature_dim) * 5 + _BORDER_GEOMETRY_DIM
@@ -201,11 +335,29 @@ class DHMRepairModule(nn.Module):
                 nn.init.zeros_(final.bias)
         else:
             self.border_refine_head = None
+        if bool(config.counterfactual_repair.enabled):
+            dclr = config.counterfactual_repair
+            input_dim = int(dclr.feature_dim) * 5 + _BORDER_GEOMETRY_DIM
+            hidden_dim = int(dclr.hidden_dim)
+            layers = []
+            for layer_index in range(int(dclr.num_layers)):
+                in_dim = input_dim if layer_index == 0 else hidden_dim
+                layers.append(nn.Linear(in_dim, hidden_dim))
+                layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.Linear(hidden_dim, 5))
+            self.counterfactual_repair_head = nn.Sequential(*layers)
+            final = self.counterfactual_repair_head[-1]
+            if isinstance(final, nn.Linear):
+                nn.init.zeros_(final.weight)
+                nn.init.zeros_(final.bias)
+        else:
+            self.counterfactual_repair_head = None
 
     def start_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
         self._stats.clear()
         self._border_loss_sums.clear()
+        self._dclr_loss_sums.clear()
 
     def end_epoch(self, epoch: int | None = None) -> None:
         if epoch is not None:
@@ -236,6 +388,78 @@ class DHMRepairModule(nn.Module):
                 or float(border.quality_loss_weight) > 0.0
             )
         )
+
+    def counterfactual_repair_warmup_factor(self) -> float:
+        dclr = self.config.counterfactual_repair
+        if not self.config.enabled or not dclr.enabled:
+            return 0.0
+        if self.current_epoch < int(dclr.start_epoch):
+            return 0.0
+        warmup = int(dclr.warmup_epochs)
+        if warmup <= 0:
+            return 1.0
+        progress = max(0, self.current_epoch - int(dclr.start_epoch) + 1)
+        return min(1.0, float(progress) / float(warmup))
+
+    def uses_counterfactual_repair(self) -> bool:
+        dclr = self.config.counterfactual_repair
+        return bool(
+            self.counterfactual_repair_head is not None
+            and self.counterfactual_repair_warmup_factor() > 0.0
+            and int(dclr.max_points_per_gt) > 0
+            and int(dclr.max_points_per_batch) > 0
+            and (
+                float(dclr.giou_loss_weight) > 0.0
+                or float(dclr.residual_loss_weight) > 0.0
+                or float(dclr.crossing_loss_weight) > 0.0
+                or float(dclr.quality_loss_weight) > 0.0
+            )
+        )
+
+    def uses_localization_repair(self) -> bool:
+        return self.uses_border_refinement() or self.uses_counterfactual_repair()
+
+    def compute_localization_repair_losses(
+        self,
+        *,
+        targets: Sequence[Mapping[str, torch.Tensor]],
+        feature_maps: Sequence[torch.Tensor],
+        head_outputs: Mapping[str, torch.Tensor],
+        anchors: Sequence[torch.Tensor],
+        matched_idxs: Sequence[torch.Tensor],
+        dhm_records: Sequence[Sequence[DHMRecord | None]],
+        num_anchors_per_level: Sequence[int],
+        padded_shape: tuple[int, int],
+        decode_boxes: Callable[..., torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        losses: dict[str, torch.Tensor] = {}
+        losses.update(
+            self.compute_border_refinement_loss(
+                targets=targets,
+                feature_maps=feature_maps,
+                head_outputs=head_outputs,
+                anchors=anchors,
+                matched_idxs=matched_idxs,
+                dhm_records=dhm_records,
+                num_anchors_per_level=num_anchors_per_level,
+                padded_shape=padded_shape,
+                decode_boxes=decode_boxes,
+            )
+        )
+        losses.update(
+            self.compute_counterfactual_repair_loss(
+                targets=targets,
+                feature_maps=feature_maps,
+                head_outputs=head_outputs,
+                anchors=anchors,
+                matched_idxs=matched_idxs,
+                dhm_records=dhm_records,
+                num_anchors_per_level=num_anchors_per_level,
+                padded_shape=padded_shape,
+                decode_boxes=decode_boxes,
+            )
+        )
+        return losses
 
     def compute_border_refinement_loss(
         self,
@@ -418,8 +642,207 @@ class DHMRepairModule(nn.Module):
             if float(value.detach().abs().item()) > 0.0
         }
 
+    def compute_counterfactual_repair_loss(
+        self,
+        *,
+        targets: Sequence[Mapping[str, torch.Tensor]],
+        feature_maps: Sequence[torch.Tensor],
+        head_outputs: Mapping[str, torch.Tensor],
+        anchors: Sequence[torch.Tensor],
+        matched_idxs: Sequence[torch.Tensor],
+        dhm_records: Sequence[Sequence[DHMRecord | None]],
+        num_anchors_per_level: Sequence[int],
+        padded_shape: tuple[int, int],
+        decode_boxes: Callable[..., torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        if not self.uses_counterfactual_repair():
+            return {}
+        if self.counterfactual_repair_head is None or not feature_maps:
+            return {}
+        dclr = self.config.counterfactual_repair
+        first_feature = feature_maps[0]
+        if first_feature.ndim != 4:
+            self._stats["dclr_skipped_bad_feature_shape"] += 1
+            return {}
+        if int(first_feature.shape[1]) != int(dclr.feature_dim):
+            self._stats["dclr_skipped_feature_dim"] += 1
+            return {}
+
+        selected: list[dict[str, torch.Tensor | int]] = []
+        selected_gt = 0
+        selected_points = 0
+        max_points = int(dclr.max_points_per_batch)
+        level_ids = _level_ids(num_anchors_per_level, device=first_feature.device)
+        crossing_target = float(dclr.tau_iou) + float(dclr.tau_margin)
+        for image_index, target in enumerate(targets):
+            if selected_points >= max_points:
+                break
+            records = dhm_records[image_index] if image_index < len(dhm_records) else []
+            eligible = self._eligible_counterfactual_repair_records(records)
+            if not eligible:
+                continue
+            assignments = matched_idxs[image_index]
+            if assignments.numel() == 0:
+                continue
+            anchors_per_image = anchors[image_index]
+            bbox_regression = head_outputs["bbox_regression"][image_index]
+            cls_logits = head_outputs["cls_logits"][image_index]
+            bbox_ctrness = head_outputs["bbox_ctrness"][image_index].flatten()
+            gt_boxes = target["boxes"].to(device=first_feature.device, dtype=first_feature.dtype)
+            gt_labels = target["labels"].to(device=first_feature.device, dtype=torch.long)
+            for gt_index, _record in eligible:
+                if selected_points >= max_points:
+                    break
+                pos_indices = torch.where(assignments == int(gt_index))[0]
+                if pos_indices.numel() == 0:
+                    self._stats["dclr_skipped_no_positive_points"] += 1
+                    continue
+                pred_boxes = decode_boxes(
+                    box_regression=bbox_regression[pos_indices],
+                    anchors=anchors_per_image[pos_indices],
+                )
+                pred_boxes = _clip_boxes(_sanitize_boxes(pred_boxes), padded_shape=padded_shape)
+                gt_box = gt_boxes[int(gt_index)].reshape(1, 4).expand_as(pred_boxes)
+                with torch.no_grad():
+                    initial_iou = _aligned_box_iou(
+                        pred_boxes.detach().to(dtype=torch.float32),
+                        gt_box.detach().to(dtype=torch.float32),
+                    ).to(device=pred_boxes.device, dtype=pred_boxes.dtype)
+                    crossing_gap = (crossing_target - initial_iou).clamp_min(0.0)
+                    candidate_mask = crossing_gap > 0.0
+                    if not bool(candidate_mask.any().item()):
+                        self._stats["dclr_skipped_already_crossing"] += 1
+                        continue
+                    candidate_positions = torch.where(candidate_mask)[0]
+                    order = torch.argsort(crossing_gap[candidate_positions], descending=True)
+                    ordered_positions = candidate_positions[order]
+                remaining = max_points - selected_points
+                take = min(int(dclr.max_points_per_gt), remaining, int(ordered_positions.numel()))
+                if take <= 0:
+                    continue
+                keep = ordered_positions[:take]
+                point_indices = pos_indices[keep]
+                labels = gt_labels[int(gt_index)].reshape(1).expand(take)
+                class_scores = cls_logits[point_indices, labels].sigmoid().detach()
+                ctr_scores = bbox_ctrness[point_indices].sigmoid().detach()
+                selected_boxes = pred_boxes[keep]
+                if bool(dclr.detach_boxes):
+                    selected_boxes = selected_boxes.detach()
+                selected.append(
+                    {
+                        "image_index": int(image_index),
+                        "point_indices": point_indices,
+                        "level_indices": level_ids[point_indices].to(device=first_feature.device),
+                        "boxes": selected_boxes.to(device=first_feature.device, dtype=first_feature.dtype),
+                        "gt_boxes": gt_box[keep].to(device=first_feature.device, dtype=first_feature.dtype),
+                        "initial_iou": initial_iou[keep].to(
+                            device=first_feature.device,
+                            dtype=first_feature.dtype,
+                        ),
+                        "class_scores": class_scores.to(device=first_feature.device, dtype=first_feature.dtype),
+                        "ctr_scores": ctr_scores.to(device=first_feature.device, dtype=first_feature.dtype),
+                    }
+                )
+                selected_points += int(take)
+                selected_gt += 1
+
+        if not selected:
+            return {}
+
+        image_indices = torch.cat(
+            [
+                torch.full(
+                    (int(item["point_indices"].numel()),),
+                    int(item["image_index"]),
+                    dtype=torch.long,
+                    device=first_feature.device,
+                )
+                for item in selected
+            ],
+            dim=0,
+        )
+        level_indices = torch.cat(
+            [item["level_indices"].to(dtype=torch.long) for item in selected],
+            dim=0,
+        )
+        boxes = torch.cat([item["boxes"] for item in selected], dim=0)
+        gt_boxes = torch.cat([item["gt_boxes"] for item in selected], dim=0)
+        initial_iou = torch.cat([item["initial_iou"] for item in selected], dim=0)
+        class_scores = torch.cat([item["class_scores"] for item in selected], dim=0)
+        ctr_scores = torch.cat([item["ctr_scores"] for item in selected], dim=0)
+        repair_features = self._sample_counterfactual_repair_features(
+            feature_maps=feature_maps,
+            boxes=boxes,
+            image_indices=image_indices,
+            level_indices=level_indices,
+            class_scores=class_scores,
+            ctr_scores=ctr_scores,
+            padded_shape=padded_shape,
+        )
+        if repair_features.numel() == 0:
+            return {}
+
+        outputs = self.counterfactual_repair_head(repair_features)
+        raw_delta = outputs[:, :4]
+        iou_logits = outputs[:, 4]
+        delta = torch.tanh(raw_delta) * float(dclr.max_delta)
+        refined_boxes = _apply_box_delta(boxes=boxes, delta=delta, padded_shape=padded_shape)
+        giou = torch.diagonal(
+            box_ops.generalized_box_iou(
+                refined_boxes.to(dtype=torch.float32),
+                gt_boxes.to(dtype=torch.float32),
+            )
+        ).to(dtype=refined_boxes.dtype)
+        giou_loss = (1.0 - giou).clamp_min(0.0).mean()
+        target_delta = _normalized_box_delta(
+            boxes=boxes.detach() if bool(dclr.detach_boxes) else boxes,
+            gt_boxes=gt_boxes,
+            clip=float(dclr.target_delta_clip),
+        )
+        residual_loss = F.smooth_l1_loss(
+            delta,
+            target_delta,
+            beta=float(dclr.smooth_l1_beta),
+            reduction="none",
+        ).mean(dim=1).mean()
+        refined_iou = _aligned_box_iou(
+            refined_boxes.to(dtype=torch.float32),
+            gt_boxes.to(dtype=torch.float32),
+        ).to(dtype=refined_boxes.dtype)
+        crossing_target_tensor = refined_iou.new_tensor(crossing_target)
+        crossing_loss = (crossing_target_tensor - refined_iou).clamp_min(0.0).mean()
+        iou_targets = refined_iou.detach().to(dtype=iou_logits.dtype)
+        quality_loss = F.binary_cross_entropy_with_logits(
+            iou_logits,
+            iou_targets,
+            reduction="mean",
+        )
+        factor = repair_features.new_tensor(float(self.counterfactual_repair_warmup_factor()))
+        losses = {
+            "dhmr_dclr_giou": giou_loss * float(dclr.giou_loss_weight) * factor,
+            "dhmr_dclr_residual": residual_loss * float(dclr.residual_loss_weight) * factor,
+            "dhmr_dclr_crossing": crossing_loss * float(dclr.crossing_loss_weight) * factor,
+            "dhmr_dclr_quality": quality_loss * float(dclr.quality_loss_weight) * factor,
+        }
+        self._record_counterfactual_repair_loss(
+            selected_points=int(boxes.shape[0]),
+            selected_gt=int(selected_gt),
+            giou_loss=giou_loss,
+            residual_loss=residual_loss,
+            crossing_loss=crossing_loss,
+            quality_loss=quality_loss,
+            initial_iou=initial_iou.mean(),
+            refined_iou=refined_iou.detach().mean(),
+        )
+        return {
+            key: value
+            for key, value in losses.items()
+            if float(value.detach().abs().item()) > 0.0
+        }
+
     def summary(self) -> dict[str, Any]:
         border_losses = int(self._stats.get("border_refine_losses", 0))
+        dclr_losses = int(self._stats.get("dclr_losses", 0))
         return {
             "enabled": self.config.enabled,
             "arch": self.config.arch,
@@ -439,6 +862,25 @@ class DHMRepairModule(nn.Module):
                     key: int(value)
                     for key, value in self._stats.items()
                     if str(key).startswith("border_refine_skipped_")
+                },
+            },
+            "counterfactual_repair": {
+                "enabled": bool(self.config.counterfactual_repair.enabled),
+                "warmup_factor": self.counterfactual_repair_warmup_factor(),
+                "active": self.uses_counterfactual_repair(),
+                "losses": dclr_losses,
+                "selected_points": int(self._stats.get("dclr_selected_points", 0)),
+                "selected_gt": int(self._stats.get("dclr_selected_gt", 0)),
+                "mean_giou_loss": self._dclr_loss_sums["giou"] / float(max(dclr_losses, 1)),
+                "mean_residual_loss": self._dclr_loss_sums["residual"] / float(max(dclr_losses, 1)),
+                "mean_crossing_loss": self._dclr_loss_sums["crossing"] / float(max(dclr_losses, 1)),
+                "mean_quality_loss": self._dclr_loss_sums["quality"] / float(max(dclr_losses, 1)),
+                "mean_initial_iou": self._dclr_loss_sums["initial_iou"] / float(max(dclr_losses, 1)),
+                "mean_refined_iou": self._dclr_loss_sums["refined_iou"] / float(max(dclr_losses, 1)),
+                **{
+                    key: int(value)
+                    for key, value in self._stats.items()
+                    if str(key).startswith("dclr_skipped_")
                 },
             },
         }
@@ -495,6 +937,47 @@ class DHMRepairModule(nn.Module):
         )
         return torch.cat((result, geometry.to(dtype=result.dtype)), dim=1)
 
+    def _sample_counterfactual_repair_features(
+        self,
+        *,
+        feature_maps: Sequence[torch.Tensor],
+        boxes: torch.Tensor,
+        image_indices: torch.Tensor,
+        level_indices: torch.Tensor,
+        class_scores: torch.Tensor,
+        ctr_scores: torch.Tensor,
+        padded_shape: tuple[int, int],
+    ) -> torch.Tensor:
+        dclr = self.config.counterfactual_repair
+        if boxes.numel() == 0:
+            return boxes.new_zeros((0, int(dclr.feature_dim) * 5 + _BORDER_GEOMETRY_DIM))
+        feature_dim = int(dclr.feature_dim)
+        result = boxes.new_zeros((boxes.shape[0], feature_dim * 5))
+        for level_index, feature_map in enumerate(feature_maps):
+            if feature_map.ndim != 4 or int(feature_map.shape[1]) != feature_dim:
+                self._stats["dclr_skipped_feature_dim"] += 1
+                return boxes.new_zeros((0, feature_dim * 5 + _BORDER_GEOMETRY_DIM))
+            selected = torch.where(level_indices == int(level_index))[0]
+            if selected.numel() == 0:
+                continue
+            selected_images = image_indices[selected].to(device=feature_map.device, dtype=torch.long)
+            sampled = _sample_box_border_features(
+                feature_map=feature_map[selected_images],
+                boxes=boxes[selected].to(device=feature_map.device, dtype=feature_map.dtype),
+                padded_shape=padded_shape,
+                points_per_side=int(dclr.border_points_per_side),
+            )
+            result[selected] = sampled.to(device=result.device, dtype=result.dtype)
+        geometry = _border_geometry_features(
+            boxes=boxes,
+            level_indices=level_indices,
+            num_levels=len(feature_maps),
+            class_scores=class_scores,
+            ctr_scores=ctr_scores,
+            padded_shape=padded_shape,
+        )
+        return torch.cat((result, geometry.to(dtype=result.dtype)), dim=1)
+
     def _eligible_border_refinement_records(
         self,
         records: Sequence[DHMRecord | None],
@@ -539,6 +1022,50 @@ class DHMRepairModule(nn.Module):
             return False
         return True
 
+    def _eligible_counterfactual_repair_records(
+        self,
+        records: Sequence[DHMRecord | None],
+    ) -> list[tuple[int, DHMRecord]]:
+        eligible: list[tuple[int, DHMRecord]] = []
+        for gt_index, record in enumerate(records):
+            if record is None:
+                continue
+            if self._is_counterfactual_repair_record_active(record, count_stats=False):
+                eligible.append((gt_index, record))
+        eligible.sort(
+            key=lambda item: (
+                float(item[1].instability_score),
+                float(item[1].state_counts.get("FN_LOC", 0)),
+                float(item[1].consecutive_fn),
+            ),
+            reverse=True,
+        )
+        max_gt = int(self.config.counterfactual_repair.max_gt_per_image)
+        if max_gt > 0:
+            eligible = eligible[:max_gt]
+        return eligible
+
+    def _is_counterfactual_repair_record_active(
+        self,
+        record: DHMRecord,
+        *,
+        count_stats: bool = True,
+    ) -> bool:
+        dclr = self.config.counterfactual_repair
+        if record.last_transition is None or str(record.last_transition) not in set(dclr.target_transitions):
+            if count_stats:
+                self._stats["dclr_skipped_transition"] += 1
+            return False
+        if int(record.total_seen) < int(dclr.min_observations):
+            if count_stats:
+                self._stats["dclr_skipped_low_observations"] += 1
+            return False
+        if float(record.instability_score) < float(dclr.min_instability):
+            if count_stats:
+                self._stats["dclr_skipped_low_instability"] += 1
+            return False
+        return True
+
     def _record_border_refinement_loss(
         self,
         *,
@@ -556,6 +1083,28 @@ class DHMRepairModule(nn.Module):
         self._border_loss_sums["residual"] += float(residual_loss.detach().item())
         self._border_loss_sums["quality"] += float(quality_loss.detach().item())
         self._border_loss_sums["refined_iou"] += float(refined_iou.detach().item())
+
+    def _record_counterfactual_repair_loss(
+        self,
+        *,
+        selected_points: int,
+        selected_gt: int,
+        giou_loss: torch.Tensor,
+        residual_loss: torch.Tensor,
+        crossing_loss: torch.Tensor,
+        quality_loss: torch.Tensor,
+        initial_iou: torch.Tensor,
+        refined_iou: torch.Tensor,
+    ) -> None:
+        self._stats["dclr_losses"] += 1
+        self._stats["dclr_selected_points"] += int(selected_points)
+        self._stats["dclr_selected_gt"] += int(selected_gt)
+        self._dclr_loss_sums["giou"] += float(giou_loss.detach().item())
+        self._dclr_loss_sums["residual"] += float(residual_loss.detach().item())
+        self._dclr_loss_sums["crossing"] += float(crossing_loss.detach().item())
+        self._dclr_loss_sums["quality"] += float(quality_loss.detach().item())
+        self._dclr_loss_sums["initial_iou"] += float(initial_iou.detach().item())
+        self._dclr_loss_sums["refined_iou"] += float(refined_iou.detach().item())
 
 
 def load_dhmr_config(path: str | Path, *, arch: str | None = None) -> DHMRConfig:
