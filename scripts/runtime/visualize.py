@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-_LOSS_SKIP = frozenset({"lr", "epoch_time_sec"})
+_LOSS_SKIP = frozenset({"lr", "epoch_time_sec", "second_view_images", "second_view_targets"})
 
 _MAP_KEYS = [
     ("bbox_mAP_50_95", "mAP50:95"),

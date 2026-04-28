@@ -22,6 +22,12 @@ from modules.nn import (
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
 
 
+def _is_second_view_batch(targets: list[dict[str, torch.Tensor]] | None) -> bool:
+    if not targets:
+        return False
+    return all(bool(target.get("_second_view", False)) for target in targets)
+
+
 class DHMFCOS(FCOS):
     """FCOS variant with DHM mining/weighting and optional DHM-R border refinement."""
 
@@ -93,8 +99,9 @@ class DHMFCOS(FCOS):
             if targets is None:
                 torch._assert(False, "targets should not be none when in training mode")
             matched_idxs = self._match_anchors_to_targets(targets, anchors, num_anchors_per_level)
-            dhm = self._get_dhm()
-            dhmr = self._get_dhmr()
+            skip_research_modules = _is_second_view_batch(targets)
+            dhm = None if skip_research_modules else self._get_dhm()
+            dhmr = None if skip_research_modules else self._get_dhmr()
             head_outputs = self.head(feature_list)
             use_custom_loss = self._should_use_custom_loss(dhm=dhm)
             if use_custom_loss:

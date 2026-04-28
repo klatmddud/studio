@@ -78,6 +78,7 @@ Training behavior:
 - If `dhm.loss_weighting.enabled` is true and DHM has records, FCOS reweights raw classification, box, and centerness losses by GT state.
 - If `dhm.assignment_expansion.enabled` is true and DHM has eligible records, FCOS adds backup positive points before loss computation.
 - If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
+- If `train.hard_crop_second_view.enabled` is true and DHM records exist, the trainer adds GT-centered crop second views for hard DHM records. The second-view forward uses the normal detector losses with a configurable weight, but marks crop targets as `_second_view` so FCOS skips DHM and DHM-R logging/losses for those crop-coordinate targets.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
 `dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
@@ -88,6 +89,37 @@ competition before enabling a repair intervention.
 `dhmr.border_refinement` when the module is enabled. These include selected point counts,
 selected GT counts, and mean raw GIoU, residual, quality, and refined-IoU values for the
 training-only auxiliary head.
+
+## Hard-Crop Second View
+
+`train.hard_crop_second_view` is a training-only hard-view augmentation driven by DHM state. It selects GTs from the current batch whose DHM record is either persistent `FN_LOC` or has a target transition such as `FN_LOC->FN_LOC` or `TP->FN_LOC`, then creates an enlarged crop around that GT and runs a second detector forward on the crop.
+
+Default disabled configuration:
+
+```yaml
+train:
+  hard_crop_second_view:
+    enabled: false
+    start_epoch: 3
+    loss_weight: 0.25
+    max_views_per_image: 1
+    max_views_per_batch: 8
+    crop_scale_min: 1.6
+    crop_scale_max: 2.4
+    jitter: 0.15
+    min_crop_size: 96
+    include_other_gt: true
+    min_box_size: 2.0
+    target_transitions:
+      - FN_LOC->FN_LOC
+      - TP->FN_LOC
+    persistent_states:
+      - FN_LOC
+    min_observations: 2
+    min_fn_streak: 2
+```
+
+When enabled, the crop target keeps all valid GT boxes inside the crop by default (`include_other_gt: true`) to avoid teaching false negatives. The second-view loss components are logged with the `second_view_` prefix, and `second_view_images` / `second_view_targets` report the average crop views and crop GTs per training batch.
 
 ## DHM-R Interaction
 

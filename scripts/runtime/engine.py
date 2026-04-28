@@ -137,6 +137,7 @@ def fit(
             epoch_index=epoch,
             total_epochs=total_epochs,
             distributed=distributed,
+            hard_crop_config=runtime_config["train"].get("hard_crop_second_view", {}),
         )
         _run_dhm_epoch_mining(
             model=model,
@@ -317,6 +318,7 @@ def train_one_epoch(
     epoch_index: int,
     total_epochs: int,
     distributed: DistributedContext | None = None,
+    hard_crop_config: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
     model.train()
     loss_sums: defaultdict[str, float] = defaultdict(float)
@@ -327,6 +329,14 @@ def train_one_epoch(
     for step, (images, targets) in enumerate(data_loader, start=1):
         images = [image.to(device) for image in images]
         targets = [_move_target_to_device(target, device) for target in targets]
+        second_view_images, second_view_targets, second_view_stats = _build_hard_crop_second_views(
+            model=model,
+            images=images,
+            targets=targets,
+            config=hard_crop_config or {},
+            epoch=epoch_index + 1,
+            device=device,
+        )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -335,6 +345,11 @@ def train_one_epoch(
             enabled=amp and device.type == "cuda",
         ):
             loss_dict = model(images, targets)
+            if second_view_images:
+                second_view_loss_dict = model(second_view_images, second_view_targets)
+                second_view_weight = float((hard_crop_config or {}).get("loss_weight", 0.25))
+                for name, value in second_view_loss_dict.items():
+                    loss_dict[f"second_view_{name}"] = value * second_view_weight
             if not loss_dict:
                 raise RuntimeError("Model returned an empty loss dict during training.")
             total_loss = sum(loss_dict.values())
@@ -359,6 +374,9 @@ def train_one_epoch(
         loss_sums["loss"] += float(total_loss.detach().item())
         for name, value in loss_dict.items():
             loss_sums[name] += float(value.detach().item())
+        if second_view_stats:
+            loss_sums["second_view_images"] += float(second_view_stats.get("images", 0))
+            loss_sums["second_view_targets"] += float(second_view_stats.get("targets", 0))
 
         should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
         if should_log:
@@ -397,6 +415,239 @@ def train_one_epoch(
     metrics["lr"] = float(optimizer.param_groups[0]["lr"])
     metrics["epoch_time_sec"] = duration
     return metrics
+
+
+def _build_hard_crop_second_views(
+    *,
+    model: torch.nn.Module,
+    images: Sequence[torch.Tensor],
+    targets: Sequence[dict[str, torch.Tensor]],
+    config: Mapping[str, Any],
+    epoch: int,
+    device: torch.device,
+) -> tuple[list[torch.Tensor], list[dict[str, Any]], dict[str, int]]:
+    if not bool(config.get("enabled", False)):
+        return [], [], {}
+    if int(epoch) < int(config.get("start_epoch", 1)):
+        return [], [], {}
+
+    base_model = unwrap_model(model)
+    dhm = getattr(base_model, "dhm", None)
+    if dhm is None or len(dhm) == 0:
+        return [], [], {}
+
+    max_views_per_batch = int(config.get("max_views_per_batch", 8))
+    if max_views_per_batch <= 0:
+        return [], [], {}
+
+    max_views_per_image = int(config.get("max_views_per_image", 1))
+    crop_images: list[torch.Tensor] = []
+    crop_targets: list[dict[str, Any]] = []
+    selected_targets = 0
+
+    for image, target in zip(images, targets):
+        if len(crop_images) >= max_views_per_batch:
+            break
+        hard_indices = _select_hard_crop_gt_indices(dhm=dhm, target=target, config=config)
+        if not hard_indices:
+            continue
+        views_for_image = 0
+        for gt_index in hard_indices:
+            if views_for_image >= max_views_per_image or len(crop_images) >= max_views_per_batch:
+                break
+            crop = _make_hard_crop_second_view(
+                image=image,
+                target=target,
+                gt_index=gt_index,
+                config=config,
+            )
+            if crop is None:
+                continue
+            crop_image, crop_target, num_crop_targets = crop
+            crop_target["_second_view"] = True
+            crop_images.append(crop_image.to(device))
+            crop_targets.append(_move_target_to_device(crop_target, device))
+            selected_targets += int(num_crop_targets)
+            views_for_image += 1
+
+    if not crop_images:
+        return [], [], {}
+    return crop_images, crop_targets, {"images": len(crop_images), "targets": selected_targets}
+
+
+def _select_hard_crop_gt_indices(
+    *,
+    dhm: Any,
+    target: Mapping[str, torch.Tensor],
+    config: Mapping[str, Any],
+) -> list[int]:
+    boxes = target.get("boxes")
+    labels = target.get("labels")
+    if not isinstance(boxes, torch.Tensor) or not isinstance(labels, torch.Tensor):
+        return []
+    num_gt = int(boxes.shape[0])
+    if num_gt == 0:
+        return []
+
+    image_id = target.get("image_id")
+    if image_id is None:
+        return []
+    image_records = dhm.get_image_records(image_id)
+    if not image_records:
+        return []
+
+    records_by_ann_id = {
+        str(record.ann_id): record
+        for record in image_records
+        if getattr(record, "ann_id", None) is not None
+    }
+    gt_ids = target.get("gt_ids", target.get("annotation_ids"))
+    if not isinstance(gt_ids, torch.Tensor) or int(gt_ids.numel()) != num_gt:
+        return []
+
+    target_transitions = _coerce_string_set(
+        config.get("target_transitions", ("FN_LOC->FN_LOC", "TP->FN_LOC"))
+    )
+    persistent_states = _coerce_string_set(config.get("persistent_states", ("FN_LOC",)))
+    min_observations = int(config.get("min_observations", 2))
+    min_fn_streak = int(config.get("min_fn_streak", 2))
+
+    candidates: list[tuple[float, int]] = []
+    for gt_index, raw_gt_id in enumerate(gt_ids.detach().cpu().flatten().tolist()):
+        record = records_by_ann_id.get(str(int(raw_gt_id)))
+        if record is None:
+            continue
+        if int(getattr(record, "total_seen", 0)) < min_observations:
+            continue
+
+        transition_hit = str(getattr(record, "last_transition", "")) in target_transitions
+        persistent_hit = (
+            str(getattr(record, "last_state", "")) in persistent_states
+            and int(getattr(record, "consecutive_fn", 0)) >= min_fn_streak
+        )
+        if not transition_hit and not persistent_hit:
+            continue
+
+        priority = (
+            float(getattr(record, "consecutive_fn", 0))
+            + 2.0 * float(getattr(record, "forgetting_count", 0))
+            + float(getattr(record, "instability_score", 0.0))
+        )
+        candidates.append((priority, int(gt_index)))
+
+    candidates.sort(reverse=True)
+    return [gt_index for _priority, gt_index in candidates]
+
+
+def _make_hard_crop_second_view(
+    *,
+    image: torch.Tensor,
+    target: Mapping[str, Any],
+    gt_index: int,
+    config: Mapping[str, Any],
+) -> tuple[torch.Tensor, dict[str, Any], int] | None:
+    boxes = target.get("boxes")
+    if not isinstance(boxes, torch.Tensor) or int(boxes.shape[0]) <= int(gt_index):
+        return None
+    if image.ndim != 3:
+        return None
+
+    crop_box = _sample_hard_crop_box(
+        box=boxes[int(gt_index)],
+        image_height=int(image.shape[-2]),
+        image_width=int(image.shape[-1]),
+        config=config,
+    )
+    if crop_box is None:
+        return None
+
+    x1, y1, x2, y2 = crop_box
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop_image = image[:, y1:y2, x1:x2].contiguous()
+    if crop_image.numel() == 0:
+        return None
+
+    shifted_boxes = boxes.clone()
+    shifted_boxes[:, [0, 2]] -= float(x1)
+    shifted_boxes[:, [1, 3]] -= float(y1)
+    shifted_boxes[:, [0, 2]] = shifted_boxes[:, [0, 2]].clamp(0.0, float(x2 - x1))
+    shifted_boxes[:, [1, 3]] = shifted_boxes[:, [1, 3]].clamp(0.0, float(y2 - y1))
+    box_sizes = shifted_boxes[:, 2:] - shifted_boxes[:, :2]
+    min_box_size = float(config.get("min_box_size", 2.0))
+    valid = (box_sizes[:, 0] >= min_box_size) & (box_sizes[:, 1] >= min_box_size)
+
+    if bool(config.get("include_other_gt", True)):
+        keep = valid
+    else:
+        keep = torch.zeros_like(valid)
+        keep[int(gt_index)] = True
+        keep &= valid
+
+    if not bool(keep.any().item()):
+        return None
+
+    crop_target: dict[str, Any] = {}
+    num_gt = int(boxes.shape[0])
+    for key, value in target.items():
+        if isinstance(value, torch.Tensor):
+            if value.ndim > 0 and int(value.shape[0]) == num_gt:
+                crop_target[key] = value[keep].clone()
+            else:
+                crop_target[key] = value.clone()
+        else:
+            crop_target[key] = value
+
+    crop_target["boxes"] = shifted_boxes[keep].clone()
+    crop_sizes = box_sizes[keep]
+    crop_target["area"] = (crop_sizes[:, 0] * crop_sizes[:, 1]).to(dtype=torch.float32)
+    crop_target["_second_view"] = True
+    return crop_image, crop_target, int(keep.sum().item())
+
+
+def _sample_hard_crop_box(
+    *,
+    box: torch.Tensor,
+    image_height: int,
+    image_width: int,
+    config: Mapping[str, Any],
+) -> tuple[int, int, int, int] | None:
+    if image_height <= 1 or image_width <= 1:
+        return None
+
+    x1, y1, x2, y2 = [float(value) for value in box.detach().cpu().tolist()]
+    box_width = max(x2 - x1, 1.0)
+    box_height = max(y2 - y1, 1.0)
+    scale = random.uniform(
+        float(config.get("crop_scale_min", 1.6)),
+        float(config.get("crop_scale_max", 2.4)),
+    )
+    min_crop_size = float(config.get("min_crop_size", 96.0))
+
+    crop_width = min(float(image_width), max(box_width * scale, min_crop_size))
+    crop_height = min(float(image_height), max(box_height * scale, min_crop_size))
+    jitter = float(config.get("jitter", 0.15))
+    center_x = 0.5 * (x1 + x2) + random.uniform(-jitter, jitter) * crop_width
+    center_y = 0.5 * (y1 + y2) + random.uniform(-jitter, jitter) * crop_height
+
+    left = min(max(center_x - 0.5 * crop_width, 0.0), float(image_width) - crop_width)
+    top = min(max(center_y - 0.5 * crop_height, 0.0), float(image_height) - crop_height)
+    right = left + crop_width
+    bottom = top + crop_height
+
+    left_i = max(0, min(int(left), image_width - 1))
+    top_i = max(0, min(int(top), image_height - 1))
+    right_i = max(left_i + 1, min(int(round(right)), image_width))
+    bottom_i = max(top_i + 1, min(int(round(bottom)), image_height))
+    return left_i, top_i, right_i, bottom_i
+
+
+def _coerce_string_set(raw: Any) -> set[str]:
+    if isinstance(raw, str):
+        return {raw}
+    if isinstance(raw, Sequence):
+        return {str(item) for item in raw}
+    return set()
 
 
 def build_optimizer(model: torch.nn.Module, config: dict[str, Any]) -> optim.Optimizer:

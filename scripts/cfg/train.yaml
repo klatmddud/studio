@@ -32,6 +32,25 @@ train:
   grad_clip_norm: 1.0
   log_interval: 20
   eval_every_epochs: 1
+  hard_crop_second_view:
+    enabled: false
+    start_epoch: 3
+    loss_weight: 0.25
+    max_views_per_image: 1
+    max_views_per_batch: 8
+    crop_scale_min: 1.6
+    crop_scale_max: 2.4
+    jitter: 0.15
+    min_crop_size: 96
+    include_other_gt: true
+    min_box_size: 2.0
+    target_transitions:
+      - FN_LOC->FN_LOC
+      - TP->FN_LOC
+    persistent_states:
+      - FN_LOC
+    min_observations: 2
+    min_fn_streak: 2
 
 checkpoint:
   dir: checkpoints
