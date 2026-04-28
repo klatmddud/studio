@@ -11,8 +11,9 @@ scripts/
     eval.yaml               # Runtime config template (eval)
   runtime/
     config.py               # Config loading, env-var substitution, validation
-    data.py                 # COCO dataset + DataLoader builders
+    data.py                 # COCO dataset + DataLoader builders, Hard Replay sampler wiring
     engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, DHM mining/replay
+    hard_replay.py          # DHM-driven mixed replay batch sampler
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON

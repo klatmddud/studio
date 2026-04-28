@@ -73,6 +73,13 @@ TRAIN_DEFAULTS: dict[str, Any] = {
             "warmup_epochs": 0,
             "max_ratio": 0.25,
             "max_replays_per_batch": 0,
+            "beta": 1.0,
+            "temperature": 1.0,
+            "max_image_weight": 5.0,
+            "min_replay_weight": 1.0,
+            "replacement": True,
+            "max_replays_per_gt_per_epoch": 4,
+            "replay_recency_window": 3,
             "target_transitions": [
                 "FN_BG->FN_BG",
                 "FN_CLS->FN_CLS",
@@ -330,6 +337,8 @@ def _validate_hard_replay_config(config: Any) -> None:
         "start_epoch",
         "warmup_epochs",
         "max_replays_per_batch",
+        "max_replays_per_gt_per_epoch",
+        "replay_recency_window",
         "min_observations",
         "min_fn_streak",
     ):
@@ -338,8 +347,19 @@ def _validate_hard_replay_config(config: Any) -> None:
     if int(config.get("start_epoch", 0)) < 1:
         raise ValueError("train.hard_replay.start_epoch must be >= 1 when enabled.")
     max_ratio = float(config.get("max_ratio", 0.0))
-    if not 0.0 <= max_ratio <= 1.0:
-        raise ValueError("train.hard_replay.max_ratio must satisfy 0 <= value <= 1.")
+    if not 0.0 <= max_ratio < 1.0:
+        raise ValueError("train.hard_replay.max_ratio must satisfy 0 <= value < 1.")
+    for key in ("beta", "temperature", "max_image_weight", "min_replay_weight"):
+        if float(config.get(key, 0.0)) < 0.0:
+            raise ValueError(f"train.hard_replay.{key} must be >= 0.")
+    if float(config.get("temperature", 0.0)) <= 0.0:
+        raise ValueError("train.hard_replay.temperature must be > 0.")
+    if float(config.get("max_image_weight", 0.0)) <= 0.0:
+        raise ValueError("train.hard_replay.max_image_weight must be > 0.")
+    if float(config.get("min_replay_weight", 0.0)) <= 0.0:
+        raise ValueError("train.hard_replay.min_replay_weight must be > 0.")
+    if int(config.get("max_replays_per_gt_per_epoch", 0)) < 1:
+        raise ValueError("train.hard_replay.max_replays_per_gt_per_epoch must be >= 1.")
     _validate_string_sequence(
         config.get("target_transitions", []),
         "train.hard_replay.target_transitions",

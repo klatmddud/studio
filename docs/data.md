@@ -27,6 +27,11 @@ Required runtime config fields:
 - `build_eval_dataloader()`: evaluation loader.
 - `collate_fn()`: returns `list[Tensor]` images and `list[dict]` targets for TorchVision detection models.
 
+When `train.hard_replay.enabled` is true, `build_train_dataloaders()` attaches a
+DHM-driven mixed replay batch sampler. The sampler keeps the configured batch size fixed but
+replaces some base slots with replay slots, so active replay can increase the number of training
+iterations per epoch.
+
 ## Target Fields
 
 Each target dict contains:

@@ -123,6 +123,7 @@ def fit(
     for epoch in range(start_epoch, total_epochs):
         _call_model_hook(model, "dhm", "start_epoch", epoch + 1)
         _call_model_hook(model, "dhmr", "start_epoch", epoch + 1)
+        _refresh_hard_replay(train_loader, model, epoch + 1)
         _set_data_loader_epoch(train_loader, epoch + 1)
 
         train_metrics = train_one_epoch(
@@ -137,7 +138,6 @@ def fit(
             epoch_index=epoch,
             total_epochs=total_epochs,
             distributed=distributed,
-            hard_replay_config=runtime_config["train"].get("hard_replay", {}),
         )
         _run_dhm_epoch_mining(
             model=model,
@@ -161,6 +161,7 @@ def fit(
         _synchronize_research_memory(model, distributed)
         dhm_summary = merged_epoch_summaries.get("dhm")
         dhmr_summary = merged_epoch_summaries.get("dhmr")
+        hard_replay_summary = _get_hard_replay_summary(train_loader)
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -170,6 +171,8 @@ def fit(
             record["dhm"] = dhm_summary
         if dhmr_summary is not None:
             record["dhmr"] = dhmr_summary
+        if hard_replay_summary is not None:
+            record["hard_replay"] = hard_replay_summary
 
         should_eval = (
             val_loader is not None
@@ -318,7 +321,6 @@ def train_one_epoch(
     epoch_index: int,
     total_epochs: int,
     distributed: DistributedContext | None = None,
-    hard_replay_config: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
     model.train()
     loss_sums: defaultdict[str, float] = defaultdict(float)
@@ -329,16 +331,6 @@ def train_one_epoch(
     for step, (images, targets) in enumerate(data_loader, start=1):
         images = [image.to(device) for image in images]
         targets = [_move_target_to_device(target, device) for target in targets]
-        replay_images, replay_targets, replay_stats = _build_hard_replay_samples(
-            model=model,
-            images=images,
-            targets=targets,
-            config=hard_replay_config or {},
-            epoch=epoch_index + 1,
-        )
-        if replay_images:
-            images = [*images, *replay_images]
-            targets = [*targets, *replay_targets]
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -371,10 +363,6 @@ def train_one_epoch(
         loss_sums["loss"] += float(total_loss.detach().item())
         for name, value in loss_dict.items():
             loss_sums[name] += float(value.detach().item())
-        if replay_stats:
-            loss_sums["hard_replay_images"] += float(replay_stats.get("images", 0))
-            loss_sums["hard_replay_gt"] += float(replay_stats.get("gt", 0))
-            loss_sums["hard_replay_ratio"] += float(replay_stats.get("ratio", 0.0))
 
         should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
         if should_log:
@@ -413,183 +401,6 @@ def train_one_epoch(
     metrics["lr"] = float(optimizer.param_groups[0]["lr"])
     metrics["epoch_time_sec"] = duration
     return metrics
-
-
-def _build_hard_replay_samples(
-    *,
-    model: torch.nn.Module,
-    images: Sequence[torch.Tensor],
-    targets: Sequence[dict[str, torch.Tensor]],
-    config: Mapping[str, Any],
-    epoch: int,
-) -> tuple[list[torch.Tensor], list[dict[str, Any]], dict[str, float]]:
-    if not bool(config.get("enabled", False)):
-        return [], [], {}
-    if int(epoch) < int(config.get("start_epoch", 1)):
-        return [], [], {}
-
-    base_model = unwrap_model(model)
-    dhm = getattr(base_model, "dhm", None)
-    if dhm is None or len(dhm) == 0:
-        return [], [], {}
-
-    base_batch_size = len(images)
-    if base_batch_size <= 0:
-        return [], [], {}
-
-    ratio = _scheduled_hard_replay_ratio(config=config, epoch=epoch)
-    max_replays = int(base_batch_size * ratio)
-    batch_cap = int(config.get("max_replays_per_batch", 0))
-    if batch_cap > 0:
-        max_replays = min(max_replays, batch_cap)
-    if max_replays <= 0:
-        return [], [], {}
-
-    candidates: list[tuple[float, int, int]] = []
-    for image_index, target in enumerate(targets):
-        priority, hard_gt_count = _hard_replay_target_priority(
-            dhm=dhm,
-            target=target,
-            config=config,
-        )
-        if hard_gt_count <= 0:
-            continue
-        candidates.append((priority, hard_gt_count, image_index))
-
-    if not candidates:
-        return [], [], {}
-
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = candidates[:max_replays]
-    replay_images = [images[image_index].clone() for _priority, _count, image_index in selected]
-    replay_targets = [
-        _clone_target_for_replay(targets[image_index])
-        for _priority, _count, image_index in selected
-    ]
-    replay_gt = sum(int(target["boxes"].shape[0]) for target in replay_targets)
-    return replay_images, replay_targets, {
-        "images": len(replay_images),
-        "gt": replay_gt,
-        "ratio": float(len(replay_images)) / float(base_batch_size),
-    }
-
-
-def _scheduled_hard_replay_ratio(
-    *,
-    config: Mapping[str, Any],
-    epoch: int,
-) -> float:
-    max_ratio = min(1.0, max(0.0, float(config.get("max_ratio", 0.0))))
-    if max_ratio <= 0.0:
-        return 0.0
-    warmup_epochs = int(config.get("warmup_epochs", 0))
-    if warmup_epochs <= 1:
-        return max_ratio
-    start_epoch = int(config.get("start_epoch", 1))
-    progress = float(int(epoch) - start_epoch + 1) / float(warmup_epochs)
-    return max_ratio * min(max(progress, 0.0), 1.0)
-
-
-def _hard_replay_target_priority(
-    *,
-    dhm: Any,
-    target: Mapping[str, torch.Tensor],
-    config: Mapping[str, Any],
-) -> tuple[float, int]:
-    boxes = target.get("boxes")
-    labels = target.get("labels")
-    if not isinstance(boxes, torch.Tensor) or not isinstance(labels, torch.Tensor):
-        return 0.0, 0
-    num_gt = int(boxes.shape[0])
-    if num_gt == 0:
-        return 0.0, 0
-
-    image_id = target.get("image_id")
-    if image_id is None:
-        return 0.0, 0
-    image_records = dhm.get_image_records(image_id)
-    if not image_records:
-        return 0.0, 0
-
-    records_by_ann_id = {
-        str(record.ann_id): record
-        for record in image_records
-        if getattr(record, "ann_id", None) is not None
-    }
-    gt_ids = target.get("gt_ids", target.get("annotation_ids"))
-    if not isinstance(gt_ids, torch.Tensor) or int(gt_ids.numel()) != num_gt:
-        return 0.0, 0
-
-    target_transitions = _coerce_string_set(
-        config.get(
-            "target_transitions",
-            (
-                "FN_BG->FN_BG",
-                "FN_CLS->FN_CLS",
-                "FN_LOC->FN_LOC",
-                "FN_MISS->FN_MISS",
-                "TP->FN_BG",
-                "TP->FN_CLS",
-                "TP->FN_LOC",
-                "TP->FN_MISS",
-            ),
-        )
-    )
-    persistent_states = _coerce_string_set(
-        config.get("persistent_states", ("FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"))
-    )
-    min_observations = int(config.get("min_observations", 2))
-    min_fn_streak = int(config.get("min_fn_streak", 2))
-
-    best_priority = 0.0
-    hard_gt_count = 0
-    for raw_gt_id in gt_ids.detach().cpu().flatten().tolist():
-        record = records_by_ann_id.get(_gt_id_key(raw_gt_id))
-        if record is None:
-            continue
-        if int(getattr(record, "total_seen", 0)) < min_observations:
-            continue
-
-        transition_hit = str(getattr(record, "last_transition", "")) in target_transitions
-        persistent_hit = (
-            str(getattr(record, "last_state", "")) in persistent_states
-            and int(getattr(record, "consecutive_fn", 0)) >= min_fn_streak
-        )
-        if not transition_hit and not persistent_hit:
-            continue
-
-        priority = (
-            float(getattr(record, "consecutive_fn", 0))
-            + 2.0 * float(getattr(record, "forgetting_count", 0))
-            + 0.25 * float(getattr(record, "fn_count", 0))
-            + float(getattr(record, "instability_score", 0.0))
-        )
-        hard_gt_count += 1
-        best_priority = max(best_priority, priority)
-
-    return best_priority, hard_gt_count
-
-
-def _gt_id_key(value: Any) -> str:
-    try:
-        return str(int(value))
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _clone_target_for_replay(target: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: value.clone() if isinstance(value, torch.Tensor) else value
-        for key, value in target.items()
-    }
-
-
-def _coerce_string_set(raw: Any) -> set[str]:
-    if isinstance(raw, str):
-        return {raw}
-    if isinstance(raw, Sequence):
-        return {str(item) for item in raw}
-    return set()
 
 
 def build_optimizer(model: torch.nn.Module, config: dict[str, Any]) -> optim.Optimizer:
@@ -767,6 +578,13 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         border_refinement = dhmr_summary.get("border_refinement", {})
         if isinstance(border_refinement, Mapping) and bool(border_refinement.get("enabled", False)):
             parts.append(f"border_refine_points={int(border_refinement.get('selected_points', 0))}")
+
+    hard_replay_summary = record.get("hard_replay")
+    if isinstance(hard_replay_summary, dict) and bool(hard_replay_summary.get("enabled", False)):
+        parts.append(f"replay_images={int(hard_replay_summary.get('replay_num_images', 0))}")
+        parts.append(
+            f"replay_ratio={float(hard_replay_summary.get('replay_ratio_effective', 0.0)):.3f}"
+        )
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
@@ -1259,6 +1077,32 @@ def _get_module_summary(
     if not callable(summary):
         return None
     return summary()
+
+
+def _refresh_hard_replay(
+    train_loader,
+    model: torch.nn.Module,
+    epoch: int,
+) -> None:
+    controller = getattr(train_loader, "hard_replay", None)
+    if controller is None:
+        return
+    start_epoch = getattr(controller, "start_epoch", None)
+    if not callable(start_epoch):
+        return
+    base_model = unwrap_model(model)
+    start_epoch(dhm=getattr(base_model, "dhm", None), epoch=epoch)
+
+
+def _get_hard_replay_summary(train_loader) -> dict[str, Any] | None:
+    controller = getattr(train_loader, "hard_replay", None)
+    if controller is None:
+        return None
+    summary = getattr(controller, "summary", None)
+    if not callable(summary):
+        return None
+    value = summary()
+    return dict(value) if isinstance(value, Mapping) else None
 
 
 def _run_dhm_epoch_mining(

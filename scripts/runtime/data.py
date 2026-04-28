@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
+from .hard_replay import HardReplayController, build_hard_replay_controller
+
 
 class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
     def __init__(self, images_dir: str | Path, annotations_path: str | Path) -> None:
@@ -52,8 +54,15 @@ def build_train_dataloaders(
         config["data"]["train_images"],
         config["data"]["train_annotations"],
     )
+    hard_replay = _build_hard_replay_controller(
+        config,
+        dataset=train_dataset,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+    )
     sampler = None
-    if distributed:
+    if distributed and hard_replay is None:
         sampler = DistributedSampler(
             train_dataset,
             num_replicas=int(world_size),
@@ -70,7 +79,10 @@ def build_train_dataloaders(
         pin_memory=config["loader"]["pin_memory"],
         shuffle=config["loader"]["shuffle"] if sampler is None else False,
         sampler=sampler,
+        batch_sampler=None if hard_replay is None else hard_replay.batch_sampler,
     )
+    if hard_replay is not None:
+        train_loader.hard_replay = hard_replay
 
     val_images = config["data"].get("val_images")
     val_annotations = config["data"].get("val_annotations")
@@ -132,16 +144,45 @@ def _build_loader(
     pin_memory: bool,
     shuffle: bool,
     sampler=None,
+    batch_sampler=None,
 ) -> DataLoader[Any]:
+    loader_kwargs = {
+        "dataset": dataset,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_fn,
+        "persistent_workers": num_workers > 0,
+    }
+    if batch_sampler is not None:
+        loader_kwargs["batch_sampler"] = batch_sampler
+    else:
+        loader_kwargs["batch_size"] = batch_size
+        loader_kwargs["shuffle"] = shuffle if sampler is None else False
+        loader_kwargs["sampler"] = sampler
     return DataLoader(
+        **loader_kwargs,
+    )
+
+
+def _build_hard_replay_controller(
+    config: dict[str, Any],
+    *,
+    dataset: Dataset[Any],
+    distributed: bool,
+    rank: int,
+    world_size: int,
+) -> HardReplayController | None:
+    replay_config = config.get("train", {}).get("hard_replay", {})
+    if not isinstance(replay_config, dict) or not bool(replay_config.get("enabled", False)):
+        return None
+    return build_hard_replay_controller(
+        replay_config,
         dataset=dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        shuffle=shuffle if sampler is None else False,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        persistent_workers=num_workers > 0,
+        batch_size=int(config["loader"]["batch_size"]),
+        shuffle=bool(config["loader"]["shuffle"]),
+        seed=int(config["seed"]),
+        rank=int(rank) if distributed else 0,
+        world_size=int(world_size) if distributed else 1,
     )
 
 

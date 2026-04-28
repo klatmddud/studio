@@ -43,6 +43,7 @@ bash scripts/bash/baseline/train.bash
 4. Resumes checkpoint state when `checkpoint.resume` is set.
 5. For each epoch:
    - Calls `start_epoch()` on enabled `dhm` and `dhmr` modules.
+   - Refreshes the Hard Replay index from DHM when `train.hard_replay.enabled` is true.
    - Runs `train_one_epoch()`.
    - Runs DHM epoch-end mining when DHM config conditions allow it.
    - Calls `end_epoch()` on enabled `dhm` and `dhmr` modules.
@@ -76,7 +77,7 @@ Training behavior:
 
 - When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
 - If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
-- If `train.hard_replay.enabled` is true and DHM records exist, the trainer duplicates current-batch images that contain persistent FN or relapse GTs. Replayed images are appended to the normal batch before the detector forward, so they use the same detection and DHM-R losses as the original view.
+- If `train.hard_replay.enabled` is true and DHM records exist, the train DataLoader uses a mixed batch sampler. Each batch reserves base slots for normal samples and replay slots for DHM-hard images, so hard replay can increase the number of iterations per epoch while keeping the configured batch size fixed.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
 `dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
@@ -90,9 +91,9 @@ training-only auxiliary head.
 
 ## Hard Replay
 
-`train.hard_replay` is a training-only replay policy driven by DHM state. It scans the current batch for GTs whose DHM record is a persistent FN or relapse transition, ranks matching images by DHM priority, and duplicates the top images into the same training batch.
+`train.hard_replay` is a training-only replay policy driven by DHM state. At epoch start, the trainer builds a replay index from DHM records, ranks images by the severity of persistent FN or relapse GTs, and lets the DataLoader yield mixed batches with normal base samples plus replay samples.
 
-`max_ratio` is the maximum replayed-image ratio relative to the original batch size. For example, `max_ratio: 0.25` allows at most 8 replay images for a 32-image batch. `warmup_epochs` can ramp the active ratio from zero to `max_ratio` after `start_epoch`.
+`max_ratio` is the maximum replay slot ratio inside each configured batch. For example, batch size 32 and `max_ratio: 0.25` gives 24 base slots and 8 replay slots. The epoch length becomes approximately `ceil(num_images / 24)` when replay is active, rather than `ceil(num_images / 32)`. `warmup_epochs` can ramp the active ratio from zero to `max_ratio` after `start_epoch`.
 
 Default disabled configuration:
 
@@ -104,6 +105,13 @@ train:
     warmup_epochs: 0
     max_ratio: 0.25
     max_replays_per_batch: 0
+    beta: 1.0
+    temperature: 1.0
+    max_image_weight: 5.0
+    min_replay_weight: 1.0
+    replacement: true
+    max_replays_per_gt_per_epoch: 4
+    replay_recency_window: 3
     target_transitions:
       - FN_BG->FN_BG
       - FN_CLS->FN_CLS
@@ -122,7 +130,7 @@ train:
     min_fn_streak: 2
 ```
 
-`max_replays_per_batch: 0` means no explicit per-batch cap beyond `max_ratio`. The trainer logs `hard_replay_images`, `hard_replay_gt`, and `hard_replay_ratio` as non-loss training metrics in `history.json`.
+`max_replays_per_batch: 0` means no explicit per-batch cap beyond `max_ratio`. Replay candidates are filtered by `target_transitions`, `persistent_states`, `min_observations`, `min_fn_streak`, and `replay_recency_window`. The trainer logs replay statistics under the top-level `hard_replay` key in `history.json`, including `replay_num_images`, `replay_num_active_gt`, `replay_ratio_requested`, `replay_ratio_effective`, `replay_samples`, and `replay_unique_images`.
 
 ## DHM-R Interaction
 

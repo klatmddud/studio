@@ -21,7 +21,7 @@ Key concepts:
 - Mining: `DetectionHysteresisMemory.mine_batch(...)` compares detections against GT boxes and updates per-GT records.
 - Records: `DHMRecord` stores last state, FN streaks, recovery/forgetting counts, dominant failure type, transition counts, instability score, annotation ID, and compact FCOS assignment statistics.
 - Assignment statistics: FCOS logs per-GT positive counts, FPN level histograms, centerness/loss means, near-candidate/near-negative counts, and ambiguous points assigned to other GTs.
-- Hard replay: `train.hard_replay` can reuse DHM records to duplicate current-batch images containing persistent FN or relapse GTs, bounded by a configured replay ratio.
+- Hard replay: `train.hard_replay` can reuse DHM records to build a replay index for images containing persistent FN or relapse GTs, then mix those images into DataLoader batches through replay slots bounded by a configured ratio.
 - Summary: `dhm.summary()` is logged under the `dhm` key in `history.json` with `transition_matrix`, `assignment_by_state`, and `assignment_by_transition` aggregates.
 - Config: `modules/cfg/dhm.yaml`.
 
@@ -42,11 +42,12 @@ Key concepts:
 ## Runtime Flow
 
 1. `registry.py` builds enabled DHM/DHM-R modules for FCOS.
-2. `engine.train_one_epoch()` can append hard replay images selected from current-batch DHM records when `train.hard_replay.enabled` is true.
-3. FCOS forward computes the base detection loss and, when DHM records exist, logs compact per-GT assignment statistics.
-4. If DHM-R `border_refinement` is enabled, FCOS adds training-only border residual and IoU-quality losses for dense positive points matched to DHM transition targets.
-5. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
-6. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
+2. `engine.fit()` refreshes the Hard Replay index from DHM at epoch start when `train.hard_replay.enabled` is true.
+3. The train DataLoader's mixed replay batch sampler yields normal base samples plus DHM-hard replay samples.
+4. FCOS forward computes the base detection loss and, when DHM records exist, logs compact per-GT assignment statistics.
+5. If DHM-R `border_refinement` is enabled, FCOS adds training-only border residual and IoU-quality losses for dense positive points matched to DHM transition targets.
+6. `engine.fit()` runs DHM epoch-end mining when `dhm.mining.enabled` and interval/warmup conditions allow it.
+7. Under DDP, DHM and DHM-R `extra_state` payloads are merged and synchronized once per epoch.
 
 ## Support Matrix
 
