@@ -582,9 +582,13 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     hard_replay_summary = record.get("hard_replay")
     if isinstance(hard_replay_summary, dict) and bool(hard_replay_summary.get("enabled", False)):
         parts.append(f"replay_images={int(hard_replay_summary.get('replay_num_images', 0))}")
+        parts.append(f"replay_samples={int(hard_replay_summary.get('replay_samples', 0))}")
         parts.append(
             f"replay_ratio={float(hard_replay_summary.get('replay_ratio_effective', 0.0)):.3f}"
         )
+        loc_samples = int(hard_replay_summary.get("loc_repair_samples", 0))
+        if loc_samples > 0:
+            parts.append(f"loc_repair_samples={loc_samples}")
 
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):

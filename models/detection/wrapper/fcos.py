@@ -159,11 +159,15 @@ class DHMFCOS(FCOS):
         if len(dhm) == 0 or not dhmr.uses_border_refinement():
             return {}
         records_by_image = [
-            self._lookup_dhm_gt_records(
-                dhm=dhm,
-                target=target,
-                image_shape=(0, 0),
-                image_index=image_index,
+            (
+                [None for _ in range(int(target["boxes"].shape[0]))]
+                if self._is_replay_crop_target(target)
+                else self._lookup_dhm_gt_records(
+                    dhm=dhm,
+                    target=target,
+                    image_shape=(0, 0),
+                    image_index=image_index,
+                )
             )
             for image_index, target in enumerate(targets)
         ]
@@ -192,6 +196,8 @@ class DHMFCOS(FCOS):
         dhm: DetectionHysteresisMemory,
     ) -> None:
         for image_index, target in enumerate(targets):
+            if self._is_replay_crop_target(target):
+                continue
             raw = self._compute_raw_losses_for_image(
                 image_index=image_index,
                 target=target,
@@ -697,6 +703,13 @@ class DHMFCOS(FCOS):
             if isinstance(value, torch.Tensor):
                 return value
         return None
+
+    @staticmethod
+    def _is_replay_crop_target(target: dict[str, torch.Tensor]) -> bool:
+        value = target.get("is_replay_crop")
+        if isinstance(value, torch.Tensor) and value.numel() > 0:
+            return bool(value.detach().flatten()[0].item())
+        return bool(value)
 
     def _get_dhm(self) -> DetectionHysteresisMemory | None:
         if self._dhm_ref is None:

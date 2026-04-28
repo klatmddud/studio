@@ -61,6 +61,21 @@ train:
       - FN_MISS
     min_observations: 2
     min_fn_streak: 2
+    loc_repair:
+      enabled: true
+      replay_fraction: 0.6
+      context_scale: 2.0
+      context_scale_jitter: 0.25
+      center_jitter: 0.10
+      min_crop_size: 128
+      min_visible_ratio: 0.50
+      focus_min_visible_ratio: 0.90
+      include_other_gt: true
+      target_transitions:
+        - FN_LOC->FN_LOC
+        - TP->FN_LOC
+      persistent_states:
+        - FN_LOC
 
 checkpoint:
   dir: checkpoints

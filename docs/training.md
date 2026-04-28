@@ -77,7 +77,7 @@ Training behavior:
 
 - When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
 - If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
-- If `train.hard_replay.enabled` is true and DHM records exist, the train DataLoader uses a mixed batch sampler. Each batch reserves base slots for normal samples and replay slots for DHM-hard images, so hard replay can increase the number of iterations per epoch while keeping the configured batch size fixed.
+- If `train.hard_replay.enabled` is true and DHM records exist, the train DataLoader uses a mixed batch sampler. Replay can add DHM-hard full-image samples and, for `FN_LOC`, DHM-guided localization repair crops while keeping each emitted batch at the configured batch size when enough base samples remain.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
 `dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
@@ -94,6 +94,8 @@ training-only auxiliary head.
 `train.hard_replay` is a training-only replay policy driven by DHM state. At epoch start, the trainer builds a replay index from DHM records, ranks images by the severity of persistent FN or relapse GTs, and lets the DataLoader yield mixed batches with normal base samples plus replay samples.
 
 `max_ratio` is the maximum replay slot ratio inside each configured batch. For example, batch size 32 and `max_ratio: 0.25` gives 24 base slots and 8 replay slots. The epoch length becomes approximately `ceil(num_images / 24)` when replay is active, rather than `ceil(num_images / 32)`. `warmup_epochs` can ramp the active ratio from zero to `max_ratio` after `start_epoch`.
+
+When `loc_repair.enabled` is true, `FN_LOC` replay candidates can be emitted as GT-centered crops instead of full images. `loc_repair.replay_fraction` is applied to the per-batch replay slots with Python-style `round()`. For example, batch size 32, `max_ratio: 0.25`, and `replay_fraction: 0.6` gives 8 replay slots and `round(8 * 0.6) = 5` preferred localization-repair crop slots; remaining replay slots use full-image hard replay. If FN_LOC crop candidates are exhausted, full-image replay fills the remaining replay capacity.
 
 Default disabled configuration:
 
@@ -128,9 +130,28 @@ train:
       - FN_MISS
     min_observations: 2
     min_fn_streak: 2
+    loc_repair:
+      enabled: true
+      replay_fraction: 0.6
+      context_scale: 2.0
+      context_scale_jitter: 0.25
+      center_jitter: 0.10
+      min_crop_size: 128
+      min_visible_ratio: 0.50
+      focus_min_visible_ratio: 0.90
+      include_other_gt: true
+      target_transitions:
+        - FN_LOC->FN_LOC
+        - TP->FN_LOC
+      persistent_states:
+        - FN_LOC
 ```
 
-`max_replays_per_batch: 0` means no explicit per-batch cap beyond `max_ratio`. Replay candidates are filtered by `target_transitions`, `persistent_states`, `min_observations`, `min_fn_streak`, and `replay_recency_window`. The trainer logs replay statistics under the top-level `hard_replay` key in `history.json`, including `replay_num_images`, `replay_num_active_gt`, `replay_ratio_requested`, `replay_ratio_effective`, `replay_samples`, and `replay_unique_images`.
+`max_replays_per_batch: 0` means no explicit per-batch cap beyond `max_ratio`. Replay candidates are filtered by `target_transitions`, `persistent_states`, `min_observations`, `min_fn_streak`, and `replay_recency_window`. `loc_repair` uses the same DHM recency/observation gates, then narrows candidates to localization failures through `FN_LOC->FN_LOC`, `TP->FN_LOC`, and persistent `FN_LOC` records.
+
+Localization repair crops preserve the original image ID and annotation IDs, shift boxes into crop-local coordinates, and include other GTs whose visible area exceeds `min_visible_ratio`. Crop replay targets are excluded from DHM assignment-stat logging and DHM-R auxiliary selection so DHM memory remains anchored to full-image mining.
+
+The trainer logs replay statistics under the top-level `hard_replay` key in `history.json`, including `replay_num_images`, `replay_num_active_gt`, `replay_ratio_requested`, `replay_ratio_effective`, `replay_sample_budget`, `replay_samples`, `replay_unique_images`, `image_replay_samples`, `loc_repair_samples`, `loc_repair_unique_images`, and `loc_repair_unique_gt`.
 
 ## DHM-R Interaction
 

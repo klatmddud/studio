@@ -93,6 +93,19 @@ TRAIN_DEFAULTS: dict[str, Any] = {
             "persistent_states": ["FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"],
             "min_observations": 2,
             "min_fn_streak": 2,
+            "loc_repair": {
+                "enabled": True,
+                "replay_fraction": 0.6,
+                "context_scale": 2.0,
+                "context_scale_jitter": 0.25,
+                "center_jitter": 0.10,
+                "min_crop_size": 128,
+                "min_visible_ratio": 0.50,
+                "focus_min_visible_ratio": 0.90,
+                "include_other_gt": True,
+                "target_transitions": ["FN_LOC->FN_LOC", "TP->FN_LOC"],
+                "persistent_states": ["FN_LOC"],
+            },
         },
     },
     "checkpoint": {
@@ -367,6 +380,39 @@ def _validate_hard_replay_config(config: Any) -> None:
     _validate_string_sequence(
         config.get("persistent_states", []),
         "train.hard_replay.persistent_states",
+    )
+    loc_repair = config.get("loc_repair", {})
+    if loc_repair is None:
+        return
+    if not isinstance(loc_repair, dict):
+        raise ValueError("train.hard_replay.loc_repair must be a mapping.")
+    if not bool(loc_repair.get("enabled", True)):
+        return
+    replay_fraction = float(loc_repair.get("replay_fraction", 0.0))
+    if not 0.0 <= replay_fraction <= 1.0:
+        raise ValueError(
+            "train.hard_replay.loc_repair.replay_fraction must satisfy 0 <= value <= 1."
+        )
+    if float(loc_repair.get("context_scale", 0.0)) <= 0.0:
+        raise ValueError("train.hard_replay.loc_repair.context_scale must be > 0.")
+    for key in ("context_scale_jitter", "center_jitter"):
+        if float(loc_repair.get(key, 0.0)) < 0.0:
+            raise ValueError(f"train.hard_replay.loc_repair.{key} must be >= 0.")
+    if int(loc_repair.get("min_crop_size", 0)) < 1:
+        raise ValueError("train.hard_replay.loc_repair.min_crop_size must be >= 1.")
+    for key in ("min_visible_ratio", "focus_min_visible_ratio"):
+        value = float(loc_repair.get(key, 0.0))
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"train.hard_replay.loc_repair.{key} must satisfy 0 <= value <= 1."
+            )
+    _validate_string_sequence(
+        loc_repair.get("target_transitions", []),
+        "train.hard_replay.loc_repair.target_transitions",
+    )
+    _validate_string_sequence(
+        loc_repair.get("persistent_states", []),
+        "train.hard_replay.loc_repair.persistent_states",
     )
 
 

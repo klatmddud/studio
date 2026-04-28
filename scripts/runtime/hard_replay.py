@@ -21,6 +21,73 @@ _DEFAULT_TRANSITIONS = (
     "TP->FN_MISS",
 )
 _DEFAULT_STATES = ("FN_BG", "FN_CLS", "FN_LOC", "FN_MISS")
+_DEFAULT_LOC_TRANSITIONS = ("FN_LOC->FN_LOC", "TP->FN_LOC")
+_DEFAULT_LOC_STATES = ("FN_LOC",)
+_IMAGE_POLICY = "image"
+_LOC_CROP_POLICY = "loc_crop"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalizationRepairConfig:
+    enabled: bool = True
+    replay_fraction: float = 0.6
+    context_scale: float = 2.0
+    context_scale_jitter: float = 0.25
+    center_jitter: float = 0.10
+    min_crop_size: int = 128
+    min_visible_ratio: float = 0.50
+    focus_min_visible_ratio: float = 0.90
+    include_other_gt: bool = True
+    target_transitions: tuple[str, ...] = _DEFAULT_LOC_TRANSITIONS
+    persistent_states: tuple[str, ...] = _DEFAULT_LOC_STATES
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None = None,
+    ) -> "LocalizationRepairConfig":
+        data = dict(raw or {})
+        config = cls(
+            enabled=bool(data.get("enabled", True)),
+            replay_fraction=float(data.get("replay_fraction", 0.6)),
+            context_scale=float(data.get("context_scale", 2.0)),
+            context_scale_jitter=float(data.get("context_scale_jitter", 0.25)),
+            center_jitter=float(data.get("center_jitter", 0.10)),
+            min_crop_size=int(data.get("min_crop_size", 128)),
+            min_visible_ratio=float(data.get("min_visible_ratio", 0.50)),
+            focus_min_visible_ratio=float(data.get("focus_min_visible_ratio", 0.90)),
+            include_other_gt=bool(data.get("include_other_gt", True)),
+            target_transitions=_coerce_string_tuple(
+                data.get("target_transitions", _DEFAULT_LOC_TRANSITIONS)
+            ),
+            persistent_states=_coerce_string_tuple(
+                data.get("persistent_states", _DEFAULT_LOC_STATES)
+            ),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not 0.0 <= self.replay_fraction <= 1.0:
+            raise ValueError("Hard Replay loc_repair.replay_fraction must satisfy 0 <= value <= 1.")
+        if self.context_scale <= 0.0:
+            raise ValueError("Hard Replay loc_repair.context_scale must be > 0.")
+        if self.context_scale_jitter < 0.0:
+            raise ValueError("Hard Replay loc_repair.context_scale_jitter must be >= 0.")
+        if self.center_jitter < 0.0:
+            raise ValueError("Hard Replay loc_repair.center_jitter must be >= 0.")
+        if self.min_crop_size < 1:
+            raise ValueError("Hard Replay loc_repair.min_crop_size must be >= 1.")
+        for field_name in ("min_visible_ratio", "focus_min_visible_ratio"):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Hard Replay loc_repair.{field_name} must satisfy 0 <= value <= 1."
+                )
+        if not self.target_transitions:
+            raise ValueError("Hard Replay loc_repair.target_transitions must not be empty.")
+        if not self.persistent_states:
+            raise ValueError("Hard Replay loc_repair.persistent_states must not be empty.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +108,7 @@ class HardReplayConfig:
     persistent_states: tuple[str, ...] = _DEFAULT_STATES
     min_observations: int = 2
     min_fn_streak: int = 2
+    loc_repair: LocalizationRepairConfig = field(default_factory=LocalizationRepairConfig)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "HardReplayConfig":
@@ -64,6 +132,7 @@ class HardReplayConfig:
             persistent_states=_coerce_string_tuple(data.get("persistent_states", _DEFAULT_STATES)),
             min_observations=int(data.get("min_observations", 2)),
             min_fn_streak=int(data.get("min_fn_streak", 2)),
+            loc_repair=LocalizationRepairConfig.from_mapping(data.get("loc_repair")),
         )
         config.validate()
         return config
@@ -97,6 +166,7 @@ class HardReplayConfig:
             raise ValueError("Hard Replay target_transitions must not be empty.")
         if not self.persistent_states:
             raise ValueError("Hard Replay persistent_states must not be empty.")
+        self.loc_repair.validate()
 
     def scheduled_ratio(self, *, epoch: int) -> float:
         if not self.enabled or int(epoch) < self.start_epoch:
@@ -110,6 +180,68 @@ class HardReplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplaySampleRef:
+    dataset_index: int
+    policy: str = _LOC_CROP_POLICY
+    gt_uid: str = ""
+    ann_id: str | None = None
+    class_id: int = 0
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    state: str = ""
+    transition: str = ""
+    priority: float = 0.0
+    seed: int = 0
+    context_scale: float = 2.0
+    context_scale_jitter: float = 0.25
+    center_jitter: float = 0.10
+    min_crop_size: int = 128
+    min_visible_ratio: float = 0.50
+    focus_min_visible_ratio: float = 0.90
+    include_other_gt: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayCandidate:
+    dataset_index: int
+    policy: str
+    weight: float
+    cap: int
+    active_gt_count: int
+    priority: float
+    gt_uid: str = ""
+    ann_id: str | None = None
+    class_id: int = 0
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    state: str = ""
+    transition: str = ""
+    loc_repair: LocalizationRepairConfig | None = None
+
+    def to_sample(self, *, seed: int) -> int | ReplaySampleRef:
+        if self.policy != _LOC_CROP_POLICY:
+            return int(self.dataset_index)
+        loc_repair = self.loc_repair or LocalizationRepairConfig()
+        return ReplaySampleRef(
+            dataset_index=int(self.dataset_index),
+            policy=_LOC_CROP_POLICY,
+            gt_uid=self.gt_uid,
+            ann_id=self.ann_id,
+            class_id=int(self.class_id),
+            bbox=self.bbox,
+            state=self.state,
+            transition=self.transition,
+            priority=float(self.priority),
+            seed=int(seed),
+            context_scale=float(loc_repair.context_scale),
+            context_scale_jitter=float(loc_repair.context_scale_jitter),
+            center_jitter=float(loc_repair.center_jitter),
+            min_crop_size=int(loc_repair.min_crop_size),
+            min_visible_ratio=float(loc_repair.min_visible_ratio),
+            focus_min_visible_ratio=float(loc_repair.focus_min_visible_ratio),
+            include_other_gt=bool(loc_repair.include_other_gt),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayIndex:
     enabled: bool
     image_weights: dict[str, float] = field(default_factory=dict)
@@ -120,6 +252,8 @@ class ReplayIndex:
     )
     active_gt_counts: dict[int, int] = field(default_factory=dict)
     replay_caps: dict[int, int] = field(default_factory=dict)
+    image_candidates: list[ReplayCandidate] = field(default_factory=list)
+    loc_candidates: list[ReplayCandidate] = field(default_factory=list)
     summary: dict[str, float | int | bool] = field(default_factory=dict)
 
     @classmethod
@@ -145,8 +279,19 @@ class ReplayIndex:
                 "replay_ratio_requested": float(requested_ratio),
                 "replay_ratio_effective": 0.0,
                 "replay_exposure_per_gt": 0.0,
+                "replay_sample_budget": 0,
                 "replay_samples": 0,
                 "replay_unique_images": 0,
+                "loc_repair_enabled": False,
+                "loc_repair_candidates": 0,
+                "loc_repair_num_images": 0,
+                "loc_repair_num_active_gt": 0,
+                "loc_repair_mean_priority": 0.0,
+                "loc_repair_samples": 0,
+                "loc_repair_unique_images": 0,
+                "loc_repair_unique_gt": 0,
+                "loc_repair_slots_per_batch": 0,
+                "image_replay_samples": 0,
             },
         )
 
@@ -154,6 +299,10 @@ class ReplayIndex:
 class HardReplayPlanner:
     def __init__(self, config: HardReplayConfig) -> None:
         self.config = config
+        self._target_transitions = set(config.target_transitions)
+        self._persistent_states = set(config.persistent_states)
+        self._loc_target_transitions = set(config.loc_repair.target_transitions)
+        self._loc_persistent_states = set(config.loc_repair.persistent_states)
 
     def build_epoch_index(
         self,
@@ -184,37 +333,71 @@ class HardReplayPlanner:
             raise TypeError("Hard Replay requires a dataset exposing a sequence-like image_ids field.")
 
         image_weights: dict[str, float] = {}
-        replay_dataset_indices: list[int] = []
-        replay_sampling_weights: list[float] = []
         replay_gt_ids: set[str] = set()
+        image_candidates: list[ReplayCandidate] = []
+        loc_candidates: list[ReplayCandidate] = []
         active_gt_counts: dict[int, int] = {}
         replay_caps: dict[int, int] = {}
         severity_sum = 0.0
 
+        tau_iou = _dhm_tau_iou(dhm)
         for dataset_index, image_id in enumerate(image_ids):
             records = self._select_replay_records(dhm=dhm, image_id=image_id, epoch=epoch)
-            if not records:
+            loc_records = self._select_loc_repair_records(
+                dhm=dhm,
+                image_id=image_id,
+                epoch=epoch,
+            )
+            if not records and not loc_records:
                 continue
 
-            image_severity = sum(_record_priority(record) for record in records)
-            raw_weight = 1.0 + self.config.beta * image_severity
-            clipped_weight = min(self.config.max_image_weight, raw_weight)
-            clipped_weight = max(self.config.min_replay_weight, clipped_weight)
-            sampling_weight = clipped_weight**self.config.temperature
+            if records:
+                image_priority = sum(_record_priority(record) for record in records)
+                sampling_weight = self._sampling_weight(image_priority)
+                clipped_weight = self._clipped_weight(image_priority)
+                image_key = str(image_id)
+                image_weights[image_key] = clipped_weight
+                cap = self.config.max_replays_per_gt_per_epoch * len(records)
+                image_candidates.append(
+                    ReplayCandidate(
+                        dataset_index=int(dataset_index),
+                        policy=_IMAGE_POLICY,
+                        weight=float(sampling_weight),
+                        cap=int(cap),
+                        active_gt_count=len(records),
+                        priority=float(image_priority),
+                    )
+                )
+                active_gt_counts[int(dataset_index)] = len(records)
+                replay_caps[int(dataset_index)] = int(cap)
+                severity_sum += image_priority
+                for record in records:
+                    replay_gt_ids.add(str(getattr(record, "gt_uid", "")))
 
-            image_key = str(image_id)
-            image_weights[image_key] = clipped_weight
-            replay_dataset_indices.append(int(dataset_index))
-            replay_sampling_weights.append(float(sampling_weight))
-            active_gt_counts[int(dataset_index)] = len(records)
-            replay_caps[int(dataset_index)] = (
-                self.config.max_replays_per_gt_per_epoch * len(records)
-            )
-            severity_sum += image_severity
-            for record in records:
-                replay_gt_ids.add(str(getattr(record, "gt_uid", "")))
+            if self.config.loc_repair.enabled:
+                for record in loc_records:
+                    loc_priority = _loc_record_priority(record, tau_iou=tau_iou)
+                    loc_candidates.append(
+                        ReplayCandidate(
+                            dataset_index=int(dataset_index),
+                            policy=_LOC_CROP_POLICY,
+                            weight=float(self._sampling_weight(loc_priority)),
+                            cap=int(self.config.max_replays_per_gt_per_epoch),
+                            active_gt_count=1,
+                            priority=float(loc_priority),
+                            gt_uid=str(getattr(record, "gt_uid", "")),
+                            ann_id=_record_ann_id(record),
+                            class_id=int(getattr(record, "class_id", 0)),
+                            bbox=_record_bbox_tuple(record),
+                            state=str(getattr(record, "last_state", "")),
+                            transition=str(getattr(record, "last_transition", "") or ""),
+                            loc_repair=self.config.loc_repair,
+                        )
+                    )
+                    replay_gt_ids.add(str(getattr(record, "gt_uid", "")))
 
-        if not replay_dataset_indices:
+        all_candidates = [*image_candidates, *loc_candidates]
+        if not all_candidates:
             return ReplayIndex.empty(
                 enabled=True,
                 epoch=epoch,
@@ -222,16 +405,29 @@ class HardReplayPlanner:
                 warmup_active=False,
             )
 
-        mean_image_weight = sum(image_weights.values()) / float(len(image_weights))
+        replay_dataset_indices = sorted({candidate.dataset_index for candidate in all_candidates})
+        replay_sampling_weights = torch.tensor(
+            [candidate.weight for candidate in image_candidates],
+            dtype=torch.float32,
+        )
+        mean_image_weight = (
+            sum(image_weights.values()) / float(len(image_weights)) if image_weights else 0.0
+        )
         mean_gt_severity = severity_sum / float(max(len(replay_gt_ids), 1))
+        loc_priorities = [candidate.priority for candidate in loc_candidates]
+        loc_images = {candidate.dataset_index for candidate in loc_candidates}
+        loc_gt_ids = {candidate.gt_uid for candidate in loc_candidates if candidate.gt_uid}
+
         return ReplayIndex(
             enabled=True,
             image_weights=image_weights,
             replay_gt_ids=replay_gt_ids,
             replay_dataset_indices=replay_dataset_indices,
-            replay_sampling_weights=torch.tensor(replay_sampling_weights, dtype=torch.float32),
+            replay_sampling_weights=replay_sampling_weights,
             active_gt_counts=active_gt_counts,
             replay_caps=replay_caps,
+            image_candidates=image_candidates,
+            loc_candidates=loc_candidates,
             summary={
                 "enabled": True,
                 "active": True,
@@ -244,10 +440,31 @@ class HardReplayPlanner:
                 "replay_ratio_requested": requested_ratio,
                 "replay_ratio_effective": 0.0,
                 "replay_exposure_per_gt": 0.0,
+                "replay_sample_budget": 0,
                 "replay_samples": 0,
                 "replay_unique_images": 0,
+                "loc_repair_enabled": bool(self.config.loc_repair.enabled),
+                "loc_repair_candidates": len(loc_candidates),
+                "loc_repair_num_images": len(loc_images),
+                "loc_repair_num_active_gt": len(loc_gt_ids),
+                "loc_repair_mean_priority": (
+                    sum(loc_priorities) / float(len(loc_priorities)) if loc_priorities else 0.0
+                ),
+                "loc_repair_samples": 0,
+                "loc_repair_unique_images": 0,
+                "loc_repair_unique_gt": 0,
+                "loc_repair_slots_per_batch": 0,
+                "image_replay_samples": 0,
             },
         )
+
+    def _sampling_weight(self, priority: float) -> float:
+        return self._clipped_weight(priority) ** self.config.temperature
+
+    def _clipped_weight(self, priority: float) -> float:
+        raw_weight = 1.0 + self.config.beta * float(priority)
+        clipped_weight = min(self.config.max_image_weight, raw_weight)
+        return max(self.config.min_replay_weight, clipped_weight)
 
     def _select_replay_records(
         self,
@@ -256,23 +473,13 @@ class HardReplayPlanner:
         image_id: int | str,
         epoch: int,
     ) -> list[Any]:
-        records = dhm.get_image_records(image_id)
         selected: list[Any] = []
-        for record in records:
-            if int(getattr(record, "total_seen", 0)) < self.config.min_observations:
+        for record in dhm.get_image_records(image_id):
+            if not self._record_is_eligible(record, epoch=epoch):
                 continue
-            if self.config.replay_recency_window > 0:
-                last_fn_epoch = getattr(record, "last_fn_epoch", None)
-                if last_fn_epoch is None:
-                    continue
-                if int(epoch) - int(last_fn_epoch) > self.config.replay_recency_window:
-                    continue
-
-            transition_hit = str(getattr(record, "last_transition", "")) in set(
-                self.config.target_transitions
-            )
+            transition_hit = str(getattr(record, "last_transition", "")) in self._target_transitions
             persistent_hit = (
-                str(getattr(record, "last_state", "")) in set(self.config.persistent_states)
+                str(getattr(record, "last_state", "")) in self._persistent_states
                 and int(getattr(record, "consecutive_fn", 0)) >= self.config.min_fn_streak
             )
             if transition_hit or persistent_hit:
@@ -280,8 +487,43 @@ class HardReplayPlanner:
         selected.sort(key=_record_priority, reverse=True)
         return selected
 
+    def _select_loc_repair_records(
+        self,
+        *,
+        dhm: Any,
+        image_id: int | str,
+        epoch: int,
+    ) -> list[Any]:
+        if not self.config.loc_repair.enabled:
+            return []
+        selected: list[Any] = []
+        for record in dhm.get_image_records(image_id):
+            if not self._record_is_eligible(record, epoch=epoch):
+                continue
+            transition_hit = (
+                str(getattr(record, "last_transition", "")) in self._loc_target_transitions
+            )
+            persistent_hit = (
+                str(getattr(record, "last_state", "")) in self._loc_persistent_states
+                and int(getattr(record, "consecutive_fn", 0)) >= self.config.min_fn_streak
+            )
+            if transition_hit or persistent_hit:
+                selected.append(record)
+        selected.sort(key=lambda record: _loc_record_priority(record), reverse=True)
+        return selected
 
-class MixedReplayBatchSampler(Sampler[list[int]]):
+    def _record_is_eligible(self, record: Any, *, epoch: int) -> bool:
+        if int(getattr(record, "total_seen", 0)) < self.config.min_observations:
+            return False
+        if self.config.replay_recency_window <= 0:
+            return True
+        last_fn_epoch = getattr(record, "last_fn_epoch", None)
+        if last_fn_epoch is None:
+            return False
+        return int(epoch) - int(last_fn_epoch) <= self.config.replay_recency_window
+
+
+class MixedReplayBatchSampler(Sampler[list[Any]]):
     def __init__(
         self,
         *,
@@ -306,7 +548,9 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         self._replay_index = ReplayIndex.empty(enabled=False)
         self._last_summary: dict[str, float | int | bool] = dict(self._replay_index.summary)
         self._active_replay_count = 0
+        self._active_loc_replay_count = 0
         self._active_base_count = self.batch_size
+        self._planned_replay_samples = 0
 
         if self.dataset_size < 0:
             raise ValueError("Hard Replay dataset_size must be >= 0.")
@@ -330,23 +574,45 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         replay_count = int(math.floor(self.batch_size * requested_ratio))
         if self.max_replays_per_batch > 0:
             replay_count = min(replay_count, self.max_replays_per_batch)
-        replay_is_active = replay_count > 0 and bool(replay_index.replay_dataset_indices)
+
+        candidate_capacity = self._candidate_capacity(replay_index.image_candidates)
+        candidate_capacity += self._candidate_capacity(replay_index.loc_candidates)
+        replay_is_active = replay_count > 0 and candidate_capacity > 0
 
         self._active_replay_count = replay_count if replay_is_active else 0
-        self._active_base_count = self.batch_size - self._active_replay_count
+        self._active_base_count = (
+            self.batch_size - self._active_replay_count if replay_is_active else self.batch_size
+        )
         if self._active_base_count < 1:
             raise ValueError(
                 "Hard Replay max_ratio is too large for the configured batch size. "
-                "At least one base sample must remain in each batch."
+                "At least one base sample must remain in each replay-active batch."
             )
+
+        loc_repair_enabled = bool(replay_index.summary.get("loc_repair_enabled", False))
+        loc_fraction = 0.0
+        if loc_repair_enabled and replay_index.loc_candidates and self._active_replay_count > 0:
+            first_candidate = replay_index.loc_candidates[0]
+            if first_candidate.loc_repair is not None:
+                loc_fraction = float(first_candidate.loc_repair.replay_fraction)
+        self._active_loc_replay_count = (
+            min(self._active_replay_count, int(round(self._active_replay_count * loc_fraction)))
+            if replay_is_active
+            else 0
+        )
+        self._planned_replay_samples = (
+            int(len(self) * self._active_replay_count) if replay_is_active else 0
+        )
 
         self._last_summary = {
             **dict(replay_index.summary),
             "epoch": int(epoch),
             "active": bool(replay_is_active),
             "replay_ratio_requested": requested_ratio if replay_is_active else 0.0,
+            "replay_sample_budget": self._planned_replay_samples,
             "base_slots_per_batch": self._active_base_count,
             "replay_slots_per_batch": self._active_replay_count,
+            "loc_repair_slots_per_batch": self._active_loc_replay_count,
             "batch_size": self.batch_size,
         }
 
@@ -360,37 +626,117 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
 
     def __iter__(self):
         if self.dataset_size <= 0:
-            self._finalize_summary(Counter(), total_replay_samples=0)
+            self._finalize_summary(
+                Counter(),
+                Counter(),
+                Counter(),
+                set(),
+                set(),
+                total_replay_samples=0,
+                gt_exposure_count=0,
+            )
             return
 
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch + self.rank * 100_003)
 
         base_indices = self._build_base_indices(generator)
-        num_batches = len(self)
-        replay_schedule = self._build_replay_schedule(
-            total_replay_samples=num_batches * self._active_replay_count,
+        planned_replay_samples = len(self) * self._active_replay_count
+        self._planned_replay_samples = int(planned_replay_samples)
+        loc_schedule = self._build_candidate_schedule(
+            self._replay_index.loc_candidates,
+            total_replay_samples=planned_replay_samples,
             generator=generator,
         )
-        replay_cursor = 0
+        image_schedule = self._build_candidate_schedule(
+            self._replay_index.image_candidates,
+            total_replay_samples=planned_replay_samples,
+            generator=generator,
+        )
+
+        base_cursor = 0
+        loc_cursor = 0
+        image_cursor = 0
+        replay_used = 0
         replay_counts: Counter[int] = Counter()
+        policy_counts: Counter[str] = Counter()
+        state_counts: Counter[str] = Counter()
+        loc_gt_ids: set[str] = set()
+        loc_image_ids: set[int] = set()
+        gt_exposure_count = 0
 
-        for batch_start in range(0, len(base_indices), self._active_base_count):
-            batch = list(base_indices[batch_start : batch_start + self._active_base_count])
-            if self._active_replay_count > 0 and replay_cursor < len(replay_schedule):
-                replay_slice = replay_schedule[
-                    replay_cursor : replay_cursor + self._active_replay_count
-                ]
-                replay_cursor += len(replay_slice)
-                batch.extend(replay_slice)
-                replay_counts.update(replay_slice)
+        while base_cursor < len(base_indices):
+            desired_replay = 0
+            if self._active_replay_count > 0:
+                desired_replay = min(
+                    self._active_replay_count,
+                    planned_replay_samples - replay_used,
+                )
+            loc_desired = min(self._active_loc_replay_count, desired_replay)
+            image_desired = desired_replay - loc_desired
 
+            loc_slice, loc_cursor = _take(loc_schedule, loc_cursor, loc_desired)
+            image_slice, image_cursor = _take(image_schedule, image_cursor, image_desired)
+
+            if len(loc_slice) < loc_desired:
+                fill, image_cursor = _take(
+                    image_schedule,
+                    image_cursor,
+                    loc_desired - len(loc_slice),
+                )
+                image_slice.extend(fill)
+            if len(image_slice) < image_desired:
+                fill, loc_cursor = _take(
+                    loc_schedule,
+                    loc_cursor,
+                    image_desired - len(image_slice),
+                )
+                loc_slice.extend(fill)
+
+            replay_slice: list[int | ReplaySampleRef] = [*loc_slice, *image_slice]
+            if desired_replay > len(replay_slice):
+                replay_slice = replay_slice[:desired_replay]
+            replay_used += len(replay_slice)
+
+            base_take = (
+                self._active_base_count if self._active_replay_count > 0 else self.batch_size
+            )
+            batch: list[Any] = list(base_indices[base_cursor : base_cursor + base_take])
+            base_cursor += len(batch)
+            batch.extend(replay_slice)
+
+            if not batch:
+                break
             if self.shuffle and len(batch) > 1:
                 order = torch.randperm(len(batch), generator=generator).tolist()
                 batch = [batch[index] for index in order]
+
+            for sample in replay_slice:
+                dataset_index = _sample_dataset_index(sample)
+                replay_counts[dataset_index] += 1
+                policy = _sample_policy(sample)
+                policy_counts[policy] += 1
+                state = _sample_state(sample)
+                if state:
+                    state_counts[state] += 1
+                gt_exposure_count += _sample_active_gt_count(
+                    sample,
+                    active_gt_counts=self._replay_index.active_gt_counts,
+                )
+                if isinstance(sample, ReplaySampleRef) and sample.gt_uid:
+                    loc_gt_ids.add(sample.gt_uid)
+                    loc_image_ids.add(int(sample.dataset_index))
             yield batch
 
-        self._finalize_summary(replay_counts, total_replay_samples=len(replay_schedule))
+        self._finalize_summary(
+            replay_counts,
+            policy_counts,
+            state_counts,
+            loc_gt_ids,
+            loc_image_ids,
+            total_replay_samples=replay_used,
+            gt_exposure_count=gt_exposure_count,
+        )
 
     def _num_base_samples(self) -> int:
         if self.world_size <= 1:
@@ -411,41 +757,48 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             indices = [*indices, *padding]
         return indices[self.rank : total_size : self.world_size]
 
-    def _build_replay_schedule(
+    def _candidate_capacity(self, candidates: Sequence[ReplayCandidate]) -> int:
+        if not candidates:
+            return 0
+        if not self.replacement:
+            return len(candidates)
+        return sum(max(int(candidate.cap), 0) for candidate in candidates)
+
+    def _build_candidate_schedule(
         self,
+        candidates: Sequence[ReplayCandidate],
         *,
         total_replay_samples: int,
         generator: torch.Generator,
-    ) -> list[int]:
-        if total_replay_samples <= 0:
+    ) -> list[int | ReplaySampleRef]:
+        if total_replay_samples <= 0 or not candidates:
             return []
 
-        candidate_indices = list(self._replay_index.replay_dataset_indices)
-        if not candidate_indices:
-            return []
-
-        weights = self._replay_index.replay_sampling_weights
-        if weights.numel() != len(candidate_indices):
+        weights = torch.tensor([candidate.weight for candidate in candidates], dtype=torch.float32)
+        if weights.numel() != len(candidates):
             return []
 
         if not self.replacement:
-            sample_count = min(total_replay_samples, len(candidate_indices))
+            sample_count = min(total_replay_samples, len(candidates))
             chosen = torch.multinomial(weights, sample_count, replacement=False, generator=generator)
-            return [candidate_indices[index] for index in chosen.tolist()]
+            return [
+                candidates[index].to_sample(seed=_next_seed(generator))
+                for index in chosen.tolist()
+            ]
 
-        expanded_indices: list[int] = []
+        expanded_positions: list[int] = []
         expanded_weights: list[float] = []
-        for position, dataset_index in enumerate(candidate_indices):
-            cap = int(self._replay_index.replay_caps.get(dataset_index, 0))
+        for position, candidate in enumerate(candidates):
+            cap = max(int(candidate.cap), 0)
             if cap <= 0:
                 continue
-            expanded_indices.extend([dataset_index] * cap)
-            expanded_weights.extend([float(weights[position].item())] * cap)
+            expanded_positions.extend([position] * cap)
+            expanded_weights.extend([float(candidate.weight)] * cap)
 
-        if not expanded_indices:
+        if not expanded_positions:
             return []
 
-        sample_count = min(total_replay_samples, len(expanded_indices))
+        sample_count = min(total_replay_samples, len(expanded_positions))
         expanded_tensor = torch.tensor(expanded_weights, dtype=torch.float32)
         chosen = torch.multinomial(
             expanded_tensor,
@@ -453,13 +806,21 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             replacement=False,
             generator=generator,
         )
-        return [expanded_indices[index] for index in chosen.tolist()]
+        return [
+            candidates[expanded_positions[index]].to_sample(seed=_next_seed(generator))
+            for index in chosen.tolist()
+        ]
 
     def _finalize_summary(
         self,
         replay_counts: Counter[int],
+        policy_counts: Counter[str],
+        state_counts: Counter[str],
+        loc_gt_ids: set[str],
+        loc_image_ids: set[int],
         *,
         total_replay_samples: int,
+        gt_exposure_count: int,
     ) -> None:
         total_base_samples = self._num_base_samples()
         total_samples = total_base_samples + total_replay_samples
@@ -467,10 +828,7 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
         replay_exposure_per_gt = 0.0
         num_active_gt = int(self._replay_index.summary.get("replay_num_active_gt", 0))
         if num_active_gt > 0:
-            gt_exposures = 0
-            for dataset_index, count in replay_counts.items():
-                gt_exposures += count * int(self._replay_index.active_gt_counts.get(dataset_index, 0))
-            replay_exposure_per_gt = gt_exposures / float(num_active_gt)
+            replay_exposure_per_gt = float(gt_exposure_count) / float(num_active_gt)
 
         effective_ratio = 0.0
         if total_samples > 0:
@@ -486,11 +844,19 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             ),
             "replay_ratio_effective": effective_ratio,
             "replay_exposure_per_gt": replay_exposure_per_gt,
+            "replay_sample_budget": int(self._planned_replay_samples),
             "replay_samples": int(total_replay_samples),
             "replay_unique_images": int(len(replay_counts)),
             "base_slots_per_batch": self._active_base_count,
             "replay_slots_per_batch": self._active_replay_count,
+            "loc_repair_slots_per_batch": self._active_loc_replay_count,
             "batch_size": self.batch_size,
+            "image_replay_samples": int(policy_counts.get(_IMAGE_POLICY, 0)),
+            "loc_repair_samples": int(policy_counts.get(_LOC_CROP_POLICY, 0)),
+            "loc_repair_unique_images": int(len(loc_image_ids)),
+            "loc_repair_unique_gt": int(len(loc_gt_ids)),
+            "replay_samples_by_policy": dict(policy_counts),
+            "replay_samples_by_state": dict(state_counts),
         }
 
 
@@ -564,9 +930,92 @@ def _record_priority(record: Any) -> float:
     )
 
 
+def _loc_record_priority(record: Any, *, tau_iou: float = 0.5) -> float:
+    iou_gap = max(0.0, float(tau_iou) - float(getattr(record, "last_iou", 0.0)))
+    return (
+        2.0 * float(getattr(record, "ema_box_loss", 0.0))
+        + iou_gap
+        + 0.8 * float(getattr(record, "ema_center_dist", 0.0))
+        + 0.5 * max(0.0, 1.0 - float(getattr(record, "ema_centerness_target", 0.0)))
+        + 0.5 * float(getattr(record, "consecutive_fn", 0))
+        + float(getattr(record, "forgetting_count", 0))
+        + 0.3 * float(getattr(record, "zero_pos_count", 0))
+    )
+
+
+def _record_bbox_tuple(record: Any) -> tuple[float, float, float, float]:
+    bbox = getattr(record, "bbox", None)
+    if isinstance(bbox, torch.Tensor):
+        values = bbox.detach().cpu().to(dtype=torch.float32).flatten().tolist()
+    elif isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes)):
+        values = [float(value) for value in bbox]
+    else:
+        values = [0.0, 0.0, 0.0, 0.0]
+    padded = [*values[:4], 0.0, 0.0, 0.0, 0.0]
+    return tuple(float(value) for value in padded[:4])  # type: ignore[return-value]
+
+
+def _record_ann_id(record: Any) -> str | None:
+    ann_id = getattr(record, "ann_id", None)
+    if ann_id is None:
+        return None
+    text = str(ann_id)
+    return text if text else None
+
+
+def _dhm_tau_iou(dhm: Any) -> float:
+    config = getattr(dhm, "config", None)
+    mining = getattr(config, "mining", None)
+    matching = getattr(mining, "matching", None)
+    return float(getattr(matching, "tau_iou", 0.5))
+
+
 def _coerce_string_tuple(raw: Any) -> tuple[str, ...]:
     if isinstance(raw, str):
         return (raw,)
     if isinstance(raw, Sequence):
         return tuple(str(item) for item in raw if str(item))
     return ()
+
+
+def _take(
+    values: Sequence[int | ReplaySampleRef],
+    cursor: int,
+    count: int,
+) -> tuple[list[int | ReplaySampleRef], int]:
+    if count <= 0 or cursor >= len(values):
+        return [], cursor
+    end = min(cursor + count, len(values))
+    return list(values[cursor:end]), end
+
+
+def _next_seed(generator: torch.Generator) -> int:
+    return int(torch.randint(0, 2**31 - 1, (1,), generator=generator).item())
+
+
+def _sample_dataset_index(sample: int | ReplaySampleRef) -> int:
+    if isinstance(sample, ReplaySampleRef):
+        return int(sample.dataset_index)
+    return int(sample)
+
+
+def _sample_policy(sample: int | ReplaySampleRef) -> str:
+    if isinstance(sample, ReplaySampleRef):
+        return str(sample.policy)
+    return _IMAGE_POLICY
+
+
+def _sample_state(sample: int | ReplaySampleRef) -> str:
+    if isinstance(sample, ReplaySampleRef):
+        return str(sample.state)
+    return ""
+
+
+def _sample_active_gt_count(
+    sample: int | ReplaySampleRef,
+    *,
+    active_gt_counts: Mapping[int, int],
+) -> int:
+    if isinstance(sample, ReplaySampleRef):
+        return 1
+    return int(active_gt_counts.get(int(sample), 1))

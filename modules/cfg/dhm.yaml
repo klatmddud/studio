@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 record_match_threshold: 0.95
 max_records: null
 
