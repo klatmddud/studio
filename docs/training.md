@@ -93,11 +93,7 @@ training-only auxiliary head.
 
 DHM-R depends on DHM. If DHM-R is enabled while DHM is disabled, registry construction raises an error.
 
-When enabled, DHM-R uses HLRT for eligible previous DHM `FN_LOC` records. HLRT adds independently configurable hooks under `dhmr.hlrt`: residual memory, residual replay, IoU loss weighting, side-aware loss, and a centerness quality gate.
-
-HLRT residual replay changes only the FCOS training assignment by adding capped extra positive points. It does not duplicate images, change the dataset, or alter evaluation postprocessing. HLRT side-aware supervision is logged as `dhmr_hlrt_side`.
-
-DHM-R can also enable `typed_film`, a training-only feature conditioning path for DHM `FN_LOC`, `FN_CLS`, and `FN_BG` records. It applies trainable FiLM embeddings to matched positive feature locations before the FCOS head, but it does not add an auxiliary loss or change evaluation postprocessing.
+When `dhmr.border_refinement.enabled` is true, DHM-R uses previous DHM transition records to select dense FCOS positive points for localization repair. Phase 1 is training-only: it adds `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` auxiliary losses, but does not change image sampling, inference postprocessing, or evaluation behavior.
 
 ## Checkpointing
 

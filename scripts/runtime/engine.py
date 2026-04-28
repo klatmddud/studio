@@ -571,15 +571,7 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
 
     dhmr_summary = record.get("dhmr")
     if isinstance(dhmr_summary, dict):
-        hlrt = dhmr_summary.get("hlrt", {})
-        typed_film = dhmr_summary.get("typed_film", {})
         border_refinement = dhmr_summary.get("border_refinement", {})
-        parts.append(f"dhmr_residual_records={int(dhmr_summary.get('num_residual_records', 0))}")
-        if isinstance(hlrt, Mapping) and bool(hlrt.get("enabled", False)):
-            parts.append(f"hlrt_replay_points={int(hlrt.get('hlrt_replay_points', 0))}")
-            parts.append(f"hlrt_side_points={int(hlrt.get('hlrt_side_points', 0))}")
-        if isinstance(typed_film, Mapping) and bool(typed_film.get("enabled", False)):
-            parts.append(f"typed_film_points={int(typed_film.get('selected_points', 0))}")
         if isinstance(border_refinement, Mapping) and bool(border_refinement.get("enabled", False)):
             parts.append(f"border_refine_points={int(border_refinement.get('selected_points', 0))}")
 
@@ -710,49 +702,25 @@ def _merge_summary_group(
         result["mining"] = dict(mining_counts)
         return result
     if name == "dhmr":
-        hlrt_counts: defaultdict[str, int] = defaultdict(int)
-        typed_counts: defaultdict[str, int] = defaultdict(int)
-        typed_state_counts: defaultdict[str, int] = defaultdict(int)
         border_counts: defaultdict[str, int] = defaultdict(int)
+        border_mean_keys: set[str] = set()
         border_mean_sums: defaultdict[str, float] = defaultdict(float)
         border_mean_count = 0
-        side_loss_weighted = 0.0
-        side_loss_count = 0
-        result["num_residual_records"] = max(
-            int(summary.get("num_residual_records", 0))
-            for summary in summaries
+        result["enabled"] = any(bool(summary.get("enabled", False)) for summary in summaries)
+        result["arch"] = next(
+            (summary.get("arch") for summary in summaries if summary.get("arch") is not None),
+            result.get("arch"),
         )
-        result["hlrt_warmup_factor"] = max(
-            float(summary.get("hlrt_warmup_factor", 0.0))
-            for summary in summaries
-        )
+        result["current_epoch"] = max(int(summary.get("current_epoch", 0)) for summary in summaries)
         for summary in summaries:
-            hlrt = summary.get("hlrt", {})
-            if not isinstance(hlrt, Mapping):
-                continue
-            for key, value in hlrt.items():
-                if isinstance(value, (int, float)) and not str(key).startswith("mean_"):
-                    hlrt_counts[str(key)] += int(value)
-            losses = int(hlrt.get("hlrt_side_losses", 0))
-            side_loss_weighted += float(hlrt.get("mean_side_loss", 0.0)) * float(losses)
-            side_loss_count += losses
-            typed_film = summary.get("typed_film", {})
-            if isinstance(typed_film, Mapping):
-                for key, value in typed_film.items():
-                    if str(key) in {"enabled", "warmup_factor", "state_counts"}:
-                        continue
-                    if isinstance(value, (int, float)):
-                        typed_counts[str(key)] += int(value)
-                raw_state_counts = typed_film.get("state_counts", {})
-                if isinstance(raw_state_counts, Mapping):
-                    for state, count in raw_state_counts.items():
-                        typed_state_counts[str(state)] += int(count)
             border_refinement = summary.get("border_refinement", {})
             if isinstance(border_refinement, Mapping):
                 losses = int(border_refinement.get("losses", 0))
                 for key, value in border_refinement.items():
                     key = str(key)
                     if key in {"enabled", "active", "warmup_factor"} or key.startswith("mean_"):
+                        if key.startswith("mean_"):
+                            border_mean_keys.add(key)
                         continue
                     if isinstance(value, (int, float)):
                         border_counts[key] += int(value)
@@ -761,42 +729,6 @@ def _merge_summary_group(
                     for key, value in border_refinement.items():
                         if str(key).startswith("mean_") and isinstance(value, (int, float)):
                             border_mean_sums[str(key)] += float(value) * float(losses)
-        hlrt_result = dict(hlrt_counts)
-        hlrt_result["enabled"] = any(
-            bool(summary.get("hlrt", {}).get("enabled", False))
-            for summary in summaries
-            if isinstance(summary.get("hlrt"), Mapping)
-        )
-        hlrt_result["native_loss_hooks"] = any(
-            bool(summary.get("hlrt", {}).get("native_loss_hooks", False))
-            for summary in summaries
-            if isinstance(summary.get("hlrt"), Mapping)
-        )
-        hlrt_result["assignment_replay"] = any(
-            bool(summary.get("hlrt", {}).get("assignment_replay", False))
-            for summary in summaries
-            if isinstance(summary.get("hlrt"), Mapping)
-        )
-        hlrt_result["residual_memory"] = any(
-            bool(summary.get("hlrt", {}).get("residual_memory", False))
-            for summary in summaries
-            if isinstance(summary.get("hlrt"), Mapping)
-        )
-        hlrt_result["mean_side_loss"] = side_loss_weighted / float(max(side_loss_count, 1))
-        result["hlrt"] = hlrt_result
-        typed_result = dict(typed_counts)
-        typed_result["enabled"] = any(
-            bool(summary.get("typed_film", {}).get("enabled", False))
-            for summary in summaries
-            if isinstance(summary.get("typed_film"), Mapping)
-        )
-        typed_result["warmup_factor"] = max(
-            float(summary.get("typed_film", {}).get("warmup_factor", 0.0))
-            for summary in summaries
-            if isinstance(summary.get("typed_film"), Mapping)
-        ) if any(isinstance(summary.get("typed_film"), Mapping) for summary in summaries) else 0.0
-        typed_result["state_counts"] = dict(typed_state_counts)
-        result["typed_film"] = typed_result
         border_result = dict(border_counts)
         border_result["enabled"] = any(
             bool(summary.get("border_refinement", {}).get("enabled", False))
@@ -813,8 +745,12 @@ def _merge_summary_group(
             for summary in summaries
             if isinstance(summary.get("border_refinement"), Mapping)
         ) if any(isinstance(summary.get("border_refinement"), Mapping) for summary in summaries) else 0.0
-        for key, value in border_mean_sums.items():
-            border_result[key] = float(value) / float(max(border_mean_count, 1))
+        if border_mean_count > 0:
+            for key, value in border_mean_sums.items():
+                border_result[key] = float(value) / float(border_mean_count)
+        else:
+            for key in border_mean_keys:
+                border_result[key] = 0.0
         result["border_refinement"] = border_result
         return result
     return result
@@ -967,22 +903,6 @@ def _merge_dhmr_states(states: list[Any]) -> dict[str, Any] | None:
         return None
     merged = dict(valid[0])
     merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
-    records: dict[str, Mapping[str, Any]] = {}
-    for state in valid:
-        raw_records = state.get("residual_records", {})
-        if not isinstance(raw_records, Mapping):
-            continue
-        for gt_uid, raw_record in raw_records.items():
-            if not isinstance(raw_record, Mapping):
-                continue
-            key = str(gt_uid)
-            candidate = dict(raw_record)
-            current = records.get(key)
-            if current is None:
-                records[key] = candidate
-                continue
-            records[key] = _select_dhmr_residual_record(current, candidate)
-    merged["residual_records"] = records
     return merged
 
 
@@ -1043,22 +963,6 @@ def _dhm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
         float(record.get("fn_count", 0)),
         float(record.get("max_fn_streak", 0)),
         float(record.get("state_change_count", 0)),
-    )
-
-
-def _select_dhmr_residual_record(
-    left: Mapping[str, Any],
-    right: Mapping[str, Any],
-) -> dict[str, Any]:
-    left_priority = _dhmr_residual_record_priority(left)
-    right_priority = _dhmr_residual_record_priority(right)
-    return dict(left if left_priority >= right_priority else right)
-
-
-def _dhmr_residual_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
-    return (
-        float(record.get("last_epoch") or 0),
-        float(record.get("observations", 0)),
     )
 
 

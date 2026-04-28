@@ -401,7 +401,7 @@ ema_residual_ltrb
 ema_edge_error_ltrb
 ```
 
-이 정보는 persistent FN_LOC의 systematic edge bias를 분석하고, 이후 residual memory prior로 확장하는 데 사용할 수 있다.
+이 정보는 persistent FN_LOC의 systematic edge bias를 분석하고, 이후 temporal localization prior로 확장하는 데 사용할 수 있다.
 
 ### 9.4 Runtime and Checkpoint
 
