@@ -12,7 +12,7 @@ scripts/
   runtime/
     config.py               # Config loading, env-var substitution, validation
     data.py                 # COCO dataset + DataLoader builders
-    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, DHM mining
+    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, DHM mining/replay
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
@@ -51,7 +51,7 @@ train.py
   -> load_runtime_config()       # merge YAML + env vars
   -> build_model_from_path()     # registry.py -> wrapper
   -> build_train_dataloaders()   # data.py -> CocoDetectionDataset
-  -> fit()                       # engine.py -> training loop + optional DHM mining
+  -> fit()                       # engine.py -> training loop + optional DHM mining/replay
 ```
 
 ## Supported Architectures

@@ -1,8 +1,6 @@
 from .common import normalize_arch
 from .dhm import (
-    DHMAssignmentExpansionConfig,
     DHMConfig,
-    DHMLossWeightingConfig,
     DHMMatchingConfig,
     DHMMiningConfig,
     DHMRecord,
@@ -24,9 +22,7 @@ from .dhmr import (
 )
 
 __all__ = [
-    "DHMAssignmentExpansionConfig",
     "DHMConfig",
-    "DHMLossWeightingConfig",
     "DHMMatchingConfig",
     "DHMMiningConfig",
     "DHMRecord",

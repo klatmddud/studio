@@ -67,20 +67,23 @@ TRAIN_DEFAULTS: dict[str, Any] = {
         "grad_clip_norm": None,
         "log_interval": 20,
         "eval_every_epochs": 1,
-        "hard_crop_second_view": {
+        "hard_replay": {
             "enabled": False,
             "start_epoch": 3,
-            "loss_weight": 0.25,
-            "max_views_per_image": 1,
-            "max_views_per_batch": 8,
-            "crop_scale_min": 1.6,
-            "crop_scale_max": 2.4,
-            "jitter": 0.15,
-            "min_crop_size": 96,
-            "include_other_gt": True,
-            "min_box_size": 2.0,
-            "target_transitions": ["FN_LOC->FN_LOC", "TP->FN_LOC"],
-            "persistent_states": ["FN_LOC"],
+            "warmup_epochs": 0,
+            "max_ratio": 0.25,
+            "max_replays_per_batch": 0,
+            "target_transitions": [
+                "FN_BG->FN_BG",
+                "FN_CLS->FN_CLS",
+                "FN_LOC->FN_LOC",
+                "FN_MISS->FN_MISS",
+                "TP->FN_BG",
+                "TP->FN_CLS",
+                "TP->FN_LOC",
+                "TP->FN_MISS",
+            ],
+            "persistent_states": ["FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"],
             "min_observations": 2,
             "min_fn_streak": 2,
         },
@@ -295,7 +298,7 @@ def _validate_train_config(config: dict[str, Any]) -> None:
         raise ValueError("train.epochs must be >= 1.")
     if config["train"]["eval_every_epochs"] < 1:
         raise ValueError("train.eval_every_epochs must be >= 1.")
-    _validate_hard_crop_second_view_config(config["train"].get("hard_crop_second_view", {}))
+    _validate_hard_replay_config(config["train"].get("hard_replay", {}))
 
     checkpoint = config["checkpoint"]
     metrics = config["metrics"]
@@ -317,46 +320,33 @@ def _validate_train_config(config: dict[str, Any]) -> None:
         raise ValueError("Validation data is required when checkpoint.save_best is true.")
 
 
-def _validate_hard_crop_second_view_config(config: Any) -> None:
+def _validate_hard_replay_config(config: Any) -> None:
     if not isinstance(config, dict):
-        raise ValueError("train.hard_crop_second_view must be a mapping.")
+        raise ValueError("train.hard_replay must be a mapping.")
     if not bool(config.get("enabled", False)):
         return
 
     for key in (
         "start_epoch",
-        "max_views_per_image",
-        "max_views_per_batch",
+        "warmup_epochs",
+        "max_replays_per_batch",
         "min_observations",
         "min_fn_streak",
     ):
         if int(config.get(key, 0)) < 0:
-            raise ValueError(f"train.hard_crop_second_view.{key} must be >= 0.")
-    for key in (
-        "loss_weight",
-        "crop_scale_min",
-        "crop_scale_max",
-        "jitter",
-        "min_crop_size",
-        "min_box_size",
-    ):
-        if float(config.get(key, 0.0)) < 0.0:
-            raise ValueError(f"train.hard_crop_second_view.{key} must be >= 0.")
-    if int(config.get("max_views_per_image", 0)) < 1:
-        raise ValueError("train.hard_crop_second_view.max_views_per_image must be >= 1 when enabled.")
-    if int(config.get("max_views_per_batch", 0)) < 1:
-        raise ValueError("train.hard_crop_second_view.max_views_per_batch must be >= 1 when enabled.")
-    if float(config.get("loss_weight", 0.0)) <= 0.0:
-        raise ValueError("train.hard_crop_second_view.loss_weight must be > 0 when enabled.")
-    if float(config.get("crop_scale_max", 0.0)) < float(config.get("crop_scale_min", 0.0)):
-        raise ValueError("train.hard_crop_second_view.crop_scale_max must be >= crop_scale_min.")
+            raise ValueError(f"train.hard_replay.{key} must be >= 0.")
+    if int(config.get("start_epoch", 0)) < 1:
+        raise ValueError("train.hard_replay.start_epoch must be >= 1 when enabled.")
+    max_ratio = float(config.get("max_ratio", 0.0))
+    if not 0.0 <= max_ratio <= 1.0:
+        raise ValueError("train.hard_replay.max_ratio must satisfy 0 <= value <= 1.")
     _validate_string_sequence(
         config.get("target_transitions", []),
-        "train.hard_crop_second_view.target_transitions",
+        "train.hard_replay.target_transitions",
     )
     _validate_string_sequence(
         config.get("persistent_states", []),
-        "train.hard_crop_second_view.persistent_states",
+        "train.hard_replay.persistent_states",
     )
 
 

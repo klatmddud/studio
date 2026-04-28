@@ -9,8 +9,6 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Single-stage anchor-free detector.
 - Integrates DHM and DHM-R when enabled in `modules/cfg/`.
 - DHM mines per-GT detection-state hysteresis at epoch end.
-- DHM can reweight existing FCOS classification, box, and centerness losses.
-- DHM can apply HLAE training-only positive assignment expansion for eligible hard GTs.
 - DHM-R reads previous DHM records and can add training-only border refinement losses for localization repair.
 - `mine_dhm_batch()` supports epoch-end full train-set hysteresis mining when DHM is enabled.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.

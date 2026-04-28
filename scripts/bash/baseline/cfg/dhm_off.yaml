@@ -33,42 +33,6 @@ scoring:
   oscillator_switches: 2
   late_learner_min_epoch_gap: 3
 
-loss_weighting:
-  enabled: false
-  min_instability: 0.5
-  cls_weight: 1.0
-  box_weight: 1.0
-  ctr_weight: 1.0
-  max_weight: 2.0
-  use_failure_type_scales: true
-  failure_type_scales:
-    FN_BG:
-      cls: 1.0
-      box: 0.25
-      ctr: 0.5
-    FN_CLS:
-      cls: 1.0
-      box: 0.25
-      ctr: 0.25
-    FN_LOC:
-      cls: 0.25
-      box: 1.0
-      ctr: 1.0
-    FN_MISS:
-      cls: 1.0
-      box: 0.5
-      ctr: 0.5
-
-assignment_expansion:
-  enabled: false
-  target_failure_types: [FN_BG]
-  min_observations: 2
-  min_instability: 0.35
-  radius_multiplier: 1.75
-  radius_max: 3.0
-  backup_topk: 3
-  max_extra_positive_ratio: 0.2
-
 models:
   fcos: {}
   fasterrcnn:

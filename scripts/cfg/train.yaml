@@ -32,23 +32,26 @@ train:
   grad_clip_norm: 1.0
   log_interval: 20
   eval_every_epochs: 1
-  hard_crop_second_view:
+  hard_replay:
     enabled: false
     start_epoch: 3
-    loss_weight: 0.25
-    max_views_per_image: 1
-    max_views_per_batch: 8
-    crop_scale_min: 1.6
-    crop_scale_max: 2.4
-    jitter: 0.15
-    min_crop_size: 96
-    include_other_gt: true
-    min_box_size: 2.0
+    warmup_epochs: 0
+    max_ratio: 0.25
+    max_replays_per_batch: 0
     target_transitions:
+      - FN_BG->FN_BG
+      - FN_CLS->FN_CLS
       - FN_LOC->FN_LOC
+      - FN_MISS->FN_MISS
+      - TP->FN_BG
+      - TP->FN_CLS
       - TP->FN_LOC
+      - TP->FN_MISS
     persistent_states:
+      - FN_BG
+      - FN_CLS
       - FN_LOC
+      - FN_MISS
     min_observations: 2
     min_fn_streak: 2
 

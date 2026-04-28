@@ -75,10 +75,8 @@ Mining behavior:
 Training behavior:
 
 - When DHM records exist, FCOS logs compact per-GT assignment statistics from the current training forward: positive count, FPN level histogram, centerness/loss means, near-candidate/near-negative count, and ambiguous points assigned to another GT.
-- If `dhm.loss_weighting.enabled` is true and DHM has records, FCOS reweights raw classification, box, and centerness losses by GT state.
-- If `dhm.assignment_expansion.enabled` is true and DHM has eligible records, FCOS adds backup positive points before loss computation.
 - If `dhmr.border_refinement.enabled` is true and DHM-R has active DHM transition targets, FCOS adds training-only `dhmr_border_giou`, `dhmr_border_residual`, and `dhmr_border_quality` losses. Phase 1 uses dense positive points for `FN_LOC->FN_LOC` and `TP->FN_LOC` records only; inference-time refinement is not applied yet.
-- If `train.hard_crop_second_view.enabled` is true and DHM records exist, the trainer adds GT-centered crop second views for hard DHM records. The second-view forward uses the normal detector losses with a configurable weight, but marks crop targets as `_second_view` so FCOS skips DHM and DHM-R logging/losses for those crop-coordinate targets.
+- If `train.hard_replay.enabled` is true and DHM records exist, the trainer duplicates current-batch images that contain persistent FN or relapse GTs. Replayed images are appended to the normal batch before the detector forward, so they use the same detection and DHM-R losses as the original view.
 
 `history.json` stores DHM assignment aggregates under `dhm.assignment_by_state` and
 `dhm.assignment_by_transition`. These summaries are intended to diagnose whether an FN type is
@@ -90,36 +88,41 @@ competition before enabling a repair intervention.
 selected GT counts, and mean raw GIoU, residual, quality, and refined-IoU values for the
 training-only auxiliary head.
 
-## Hard-Crop Second View
+## Hard Replay
 
-`train.hard_crop_second_view` is a training-only hard-view augmentation driven by DHM state. It selects GTs from the current batch whose DHM record is either persistent `FN_LOC` or has a target transition such as `FN_LOC->FN_LOC` or `TP->FN_LOC`, then creates an enlarged crop around that GT and runs a second detector forward on the crop.
+`train.hard_replay` is a training-only replay policy driven by DHM state. It scans the current batch for GTs whose DHM record is a persistent FN or relapse transition, ranks matching images by DHM priority, and duplicates the top images into the same training batch.
+
+`max_ratio` is the maximum replayed-image ratio relative to the original batch size. For example, `max_ratio: 0.25` allows at most 8 replay images for a 32-image batch. `warmup_epochs` can ramp the active ratio from zero to `max_ratio` after `start_epoch`.
 
 Default disabled configuration:
 
 ```yaml
 train:
-  hard_crop_second_view:
+  hard_replay:
     enabled: false
     start_epoch: 3
-    loss_weight: 0.25
-    max_views_per_image: 1
-    max_views_per_batch: 8
-    crop_scale_min: 1.6
-    crop_scale_max: 2.4
-    jitter: 0.15
-    min_crop_size: 96
-    include_other_gt: true
-    min_box_size: 2.0
+    warmup_epochs: 0
+    max_ratio: 0.25
+    max_replays_per_batch: 0
     target_transitions:
+      - FN_BG->FN_BG
+      - FN_CLS->FN_CLS
       - FN_LOC->FN_LOC
+      - FN_MISS->FN_MISS
+      - TP->FN_BG
+      - TP->FN_CLS
       - TP->FN_LOC
+      - TP->FN_MISS
     persistent_states:
+      - FN_BG
+      - FN_CLS
       - FN_LOC
+      - FN_MISS
     min_observations: 2
     min_fn_streak: 2
 ```
 
-When enabled, the crop target keeps all valid GT boxes inside the crop by default (`include_other_gt: true`) to avoid teaching false negatives. The second-view loss components are logged with the `second_view_` prefix, and `second_view_images` / `second_view_targets` report the average crop views and crop GTs per training batch.
+`max_replays_per_batch: 0` means no explicit per-batch cap beyond `max_ratio`. The trainer logs `hard_replay_images`, `hard_replay_gt`, and `hard_replay_ratio` as non-loss training metrics in `history.json`.
 
 ## DHM-R Interaction
 

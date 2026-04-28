@@ -20,7 +20,6 @@ DHMState = Literal["TP", "FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"]
 _TP_STATE = "TP"
 _FN_STATES = ("FN_BG", "FN_CLS", "FN_LOC", "FN_MISS")
 _ALL_STATES = (_TP_STATE, *_FN_STATES)
-_COMPONENTS = ("cls", "box", "ctr")
 _ASSIGNMENT_MEAN_FIELDS = (
     "pos_count",
     "center_dist",
@@ -228,167 +227,11 @@ class DHMScoringConfig:
         }
 
 
-def _default_failure_type_scales() -> dict[str, dict[str, float]]:
-    return {
-        "FN_BG": {"cls": 1.0, "box": 0.25, "ctr": 0.5},
-        "FN_CLS": {"cls": 1.0, "box": 0.25, "ctr": 0.25},
-        "FN_LOC": {"cls": 0.25, "box": 1.0, "ctr": 1.0},
-        "FN_MISS": {"cls": 1.0, "box": 0.5, "ctr": 0.5},
-    }
-
-
-@dataclass(frozen=True, slots=True)
-class DHMLossWeightingConfig:
-    enabled: bool = False
-    min_instability: float = 0.5
-    cls_weight: float = 1.0
-    box_weight: float = 1.0
-    ctr_weight: float = 1.0
-    max_weight: float = 2.0
-    use_failure_type_scales: bool = True
-    failure_type_scales: dict[str, dict[str, float]] = field(default_factory=_default_failure_type_scales)
-
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMLossWeightingConfig":
-        data = dict(raw or {})
-        scales = _default_failure_type_scales()
-        raw_scales = data.get("failure_type_scales", {})
-        if isinstance(raw_scales, Mapping):
-            for state, raw_components in raw_scales.items():
-                if not isinstance(raw_components, Mapping):
-                    continue
-                state_key = str(state)
-                components = dict(scales.get(state_key, {}))
-                for component, value in raw_components.items():
-                    components[str(component)] = float(value)
-                scales[state_key] = components
-        config = cls(
-            enabled=bool(data.get("enabled", False)),
-            min_instability=float(data.get("min_instability", 0.5)),
-            cls_weight=float(data.get("cls_weight", 1.0)),
-            box_weight=float(data.get("box_weight", 1.0)),
-            ctr_weight=float(data.get("ctr_weight", 1.0)),
-            max_weight=float(data.get("max_weight", 2.0)),
-            use_failure_type_scales=bool(data.get("use_failure_type_scales", True)),
-            failure_type_scales=scales,
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        if not 0.0 <= self.min_instability <= 1.0:
-            raise ValueError("DHM loss_weighting.min_instability must satisfy 0 <= value <= 1.")
-        for field_name in ("cls_weight", "box_weight", "ctr_weight"):
-            if float(getattr(self, field_name)) < 0.0:
-                raise ValueError(f"DHM loss_weighting.{field_name} must be >= 0.")
-        if self.max_weight < 1.0:
-            raise ValueError("DHM loss_weighting.max_weight must be >= 1.")
-        unsupported_states = sorted(set(self.failure_type_scales) - set(_FN_STATES))
-        if unsupported_states:
-            raise ValueError(f"DHM loss_weighting.failure_type_scales has unsupported states: {unsupported_states}.")
-        for state, components in self.failure_type_scales.items():
-            unsupported_components = sorted(set(components) - set(_COMPONENTS))
-            if unsupported_components:
-                raise ValueError(
-                    "DHM loss_weighting.failure_type_scales."
-                    f"{state} has unsupported components: {unsupported_components}."
-                )
-            for component, value in components.items():
-                if float(value) < 0.0:
-                    raise ValueError(
-                        f"DHM loss_weighting.failure_type_scales.{state}.{component} must be >= 0."
-                    )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "min_instability": self.min_instability,
-            "cls_weight": self.cls_weight,
-            "box_weight": self.box_weight,
-            "ctr_weight": self.ctr_weight,
-            "max_weight": self.max_weight,
-            "use_failure_type_scales": self.use_failure_type_scales,
-            "failure_type_scales": {
-                state: dict(components)
-                for state, components in self.failure_type_scales.items()
-            },
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class DHMAssignmentExpansionConfig:
-    enabled: bool = False
-    target_failure_types: tuple[str, ...] = ("FN_BG",)
-    min_observations: int = 2
-    min_instability: float = 0.35
-    radius_multiplier: float = 1.75
-    radius_max: float = 3.0
-    backup_topk: int = 3
-    max_extra_positive_ratio: float = 0.2
-
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "DHMAssignmentExpansionConfig":
-        data = dict(raw or {})
-        raw_types = data.get("target_failure_types", ("FN_BG",))
-        if isinstance(raw_types, str):
-            target_failure_types = (raw_types,)
-        elif isinstance(raw_types, Sequence):
-            target_failure_types = tuple(str(item) for item in raw_types)
-        else:
-            target_failure_types = ("FN_BG",)
-        config = cls(
-            enabled=bool(data.get("enabled", False)),
-            target_failure_types=target_failure_types,
-            min_observations=int(data.get("min_observations", 2)),
-            min_instability=float(data.get("min_instability", 0.35)),
-            radius_multiplier=float(data.get("radius_multiplier", 1.75)),
-            radius_max=float(data.get("radius_max", 3.0)),
-            backup_topk=int(data.get("backup_topk", 3)),
-            max_extra_positive_ratio=float(data.get("max_extra_positive_ratio", 0.2)),
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        unsupported_states = sorted(set(self.target_failure_types) - set(_FN_STATES))
-        if unsupported_states:
-            raise ValueError(
-                "DHM assignment_expansion.target_failure_types has unsupported states: "
-                f"{unsupported_states}."
-            )
-        if self.min_observations < 1:
-            raise ValueError("DHM assignment_expansion.min_observations must be >= 1.")
-        if not 0.0 <= self.min_instability <= 1.0:
-            raise ValueError("DHM assignment_expansion.min_instability must satisfy 0 <= value <= 1.")
-        if self.radius_multiplier < 1.0:
-            raise ValueError("DHM assignment_expansion.radius_multiplier must be >= 1.")
-        if self.radius_max < 1.0:
-            raise ValueError("DHM assignment_expansion.radius_max must be >= 1.")
-        if self.backup_topk < 0:
-            raise ValueError("DHM assignment_expansion.backup_topk must be >= 0.")
-        if self.max_extra_positive_ratio < 0.0:
-            raise ValueError("DHM assignment_expansion.max_extra_positive_ratio must be >= 0.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "target_failure_types": list(self.target_failure_types),
-            "min_observations": self.min_observations,
-            "min_instability": self.min_instability,
-            "radius_multiplier": self.radius_multiplier,
-            "radius_max": self.radius_max,
-            "backup_topk": self.backup_topk,
-            "max_extra_positive_ratio": self.max_extra_positive_ratio,
-        }
-
-
 @dataclass(frozen=True, slots=True)
 class DHMConfig:
     enabled: bool = False
     mining: DHMMiningConfig = field(default_factory=DHMMiningConfig)
     scoring: DHMScoringConfig = field(default_factory=DHMScoringConfig)
-    loss_weighting: DHMLossWeightingConfig = field(default_factory=DHMLossWeightingConfig)
-    assignment_expansion: DHMAssignmentExpansionConfig = field(default_factory=DHMAssignmentExpansionConfig)
     record_match_threshold: float = 0.95
     max_records: int | None = None
     arch: str | None = None
@@ -423,10 +266,6 @@ class DHMConfig:
             enabled=bool(merged.get("enabled", False)),
             mining=DHMMiningConfig.from_mapping(merged.get("mining")),
             scoring=DHMScoringConfig.from_mapping(merged.get("scoring")),
-            loss_weighting=DHMLossWeightingConfig.from_mapping(merged.get("loss_weighting")),
-            assignment_expansion=DHMAssignmentExpansionConfig.from_mapping(
-                merged.get("assignment_expansion")
-            ),
             record_match_threshold=float(merged.get("record_match_threshold", 0.95)),
             max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
             arch=normalized_arch,
@@ -445,8 +284,6 @@ class DHMConfig:
             "enabled": self.enabled,
             "mining": self.mining.to_dict(),
             "scoring": self.scoring.to_dict(),
-            "loss_weighting": self.loss_weighting.to_dict(),
-            "assignment_expansion": self.assignment_expansion.to_dict(),
             "record_match_threshold": self.record_match_threshold,
             "max_records": self.max_records,
             "arch": self.arch,
@@ -913,51 +750,6 @@ class DetectionHysteresisMemory(nn.Module):
         self._stats.update(stats)
         return {key: int(value) for key, value in stats.items()}
 
-    def loss_weight_for_record(self, record: DHMRecord | None, *, component: str) -> float:
-        if record is None:
-            return 1.0
-        config = self.config.loss_weighting
-        if not bool(config.enabled):
-            return 1.0
-        if component not in _COMPONENTS:
-            raise ValueError(f"Unsupported DHM loss component: {component!r}")
-        if int(record.total_seen) < int(self.config.scoring.min_observations):
-            return 1.0
-        instability = float(record.instability_score)
-        min_instability = float(config.min_instability)
-        if instability < min_instability:
-            return 1.0
-        if min_instability >= 1.0:
-            normalized = 1.0
-        else:
-            normalized = min(1.0, max(0.0, (instability - min_instability) / max(1.0 - min_instability, 1.0e-6)))
-        base_scale = {
-            "cls": float(config.cls_weight),
-            "box": float(config.box_weight),
-            "ctr": float(config.ctr_weight),
-        }[component]
-        if bool(config.use_failure_type_scales):
-            failure_type = record.dominant_failure_type
-            type_scales = config.failure_type_scales.get(str(failure_type), {}) if failure_type else {}
-            base_scale *= float(type_scales.get(component, 1.0))
-        weight = 1.0 + base_scale * normalized
-        return float(min(float(config.max_weight), max(1.0, weight)))
-
-    def assignment_expansion_radius_for_record(self, record: DHMRecord | None) -> float:
-        if record is None:
-            return 1.0
-        config = self.config.assignment_expansion
-        if not bool(config.enabled):
-            return 1.0
-        if str(record.last_state) not in set(config.target_failure_types):
-            return 1.0
-        if int(record.total_seen) < int(config.min_observations):
-            return 1.0
-        if float(record.instability_score) < float(config.min_instability):
-            return 1.0
-        radius = float(config.radius_multiplier) * (1.0 + float(record.instability_score))
-        return float(min(float(config.radius_max), max(1.0, radius)))
-
     def summary(self) -> dict[str, Any]:
         status_counts = Counter(record.status(self.config.scoring) for record in self._records.values())
         last_state_counts = Counter(record.last_state for record in self._records.values())
@@ -999,17 +791,6 @@ class DetectionHysteresisMemory(nn.Module):
                 epoch=self.current_epoch,
             ),
             "mining": {key: int(value) for key, value in self._stats.items()},
-            "loss_weighting": {
-                "enabled": bool(self.config.loss_weighting.enabled),
-                "min_instability": float(self.config.loss_weighting.min_instability),
-                "max_weight": float(self.config.loss_weighting.max_weight),
-            },
-            "assignment_expansion": {
-                "enabled": bool(self.config.assignment_expansion.enabled),
-                "target_failure_types": list(self.config.assignment_expansion.target_failure_types),
-                "min_instability": float(self.config.assignment_expansion.min_instability),
-                "backup_topk": int(self.config.assignment_expansion.backup_topk),
-            },
         }
 
     def get_extra_state(self) -> dict[str, Any]:
