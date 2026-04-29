@@ -17,6 +17,7 @@ MissBank stores per-GT recurrent missed-detection state for the ReMiss method.
 Key concepts:
 
 - Matching: a GT is detected only when a final prediction has the same class, score above `matching.score_threshold`, and IoU above `matching.iou_threshold`.
+- Mining: `mining.type: online` updates MissBank after each optimization step, while `mining.type: offline` runs a separate no-grad training-set pass after each epoch.
 - Records: `MissBankRecord` stores image ID, GT ID, class, box, region ID, consecutive `miss_count`, current missed state, last match score/IoU, and aggregate seen/missed counts.
 - Regions: baseline `grid_size: 2` yields labels `0..4`, where `0` is none and `1..4` are row-major spatial cells. Larger `NxN` grids use labels `0..N^2`.
 - Targets: `get_image_targets()` and `get_batch_labels()` emit image-level hard labels. A GT contributes only when it is currently missed and `miss_count >= target.miss_threshold`.
@@ -41,7 +42,7 @@ Runtime behavior:
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS and updated during training from final post-processed detections. MissHead loss-only training is available for FCOS. Prototype injection is planned ReMiss work and is not yet attached.
+When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissHead loss-only training is available for FCOS. Prototype injection is planned ReMiss work and is not yet attached.
 
 ## Support Matrix
 

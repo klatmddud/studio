@@ -231,6 +231,21 @@ class MissBank:
 }
 ```
 
+## Mining Type
+
+MissBank는 `modules/cfg/remiss.yaml`의 `mining.type`으로 update 방식을 선택한다.
+
+| 값 | 동작 |
+|---|---|
+| `online` | 각 optimization step 이후 같은 batch에 대해 no-grad detection을 한 번 더 수행하고 MissBank를 즉시 갱신한다. |
+| `offline` | 학습 step 중에는 MissBank를 갱신하지 않고, epoch 학습이 끝난 뒤 training loader를 no-grad로 한 번 더 순회하면서 MissBank를 갱신한다. |
+
+`online`은 현재 batch의 detector 상태를 바로 반영하므로 구현이 단순하고 target이 빠르게 누적된다. 대신 학습 loop 안에서 매 step 추가 inference가 들어간다.
+
+`offline`은 epoch 종료 시점의 모델로 전체 training set을 동일한 기준으로 다시 평가하므로 MissBank snapshot과 stability metric이 더 일관적이다. 대신 epoch마다 training loader를 한 번 더 돌기 때문에 시간이 더 걸리고, MissHead 학습 target은 직전 epoch까지 누적된 MissBank 상태를 사용하게 된다.
+
+기본값은 `online`이다.
+
 ## Configuration
 
 MissBank 관련 주요 설정은 다음과 같다.

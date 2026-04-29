@@ -3,6 +3,9 @@ grid_size: 2
 start_epoch: 1
 max_records: null
 
+mining:
+  type: online
+
 matching:
   score_threshold: 0.05
   iou_threshold: 0.5

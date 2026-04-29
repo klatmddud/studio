@@ -79,10 +79,33 @@ class MissBankTargetConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MissBankMiningConfig:
+    type: str = "online"
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None = None,
+    ) -> "MissBankMiningConfig":
+        data = dict(raw or {})
+        config = cls(type=str(data.get("type", "online")).lower())
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.type not in {"online", "offline"}:
+            raise ValueError("MissBank mining.type must be either 'online' or 'offline'.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type}
+
+
+@dataclass(frozen=True, slots=True)
 class MissBankConfig:
     enabled: bool = False
     grid_size: int = 2
     start_epoch: int = 1
+    mining: MissBankMiningConfig = field(default_factory=MissBankMiningConfig)
     matching: MissBankMatchingConfig = field(default_factory=MissBankMatchingConfig)
     target: MissBankTargetConfig = field(default_factory=MissBankTargetConfig)
     max_records: int | None = None
@@ -118,6 +141,7 @@ class MissBankConfig:
             enabled=bool(merged.get("enabled", False)),
             grid_size=int(merged.get("grid_size", 2)),
             start_epoch=int(merged.get("start_epoch", 1)),
+            mining=MissBankMiningConfig.from_mapping(merged.get("mining")),
             matching=MissBankMatchingConfig.from_mapping(merged.get("matching")),
             target=MissBankTargetConfig.from_mapping(merged.get("target")),
             max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
@@ -147,6 +171,7 @@ class MissBankConfig:
             "enabled": self.enabled,
             "grid_size": self.grid_size,
             "start_epoch": self.start_epoch,
+            "mining": self.mining.to_dict(),
             "matching": self.matching.to_dict(),
             "target": self.target.to_dict(),
             "max_records": self.max_records,
@@ -384,6 +409,7 @@ class MissBank(nn.Module):
             "arch": self.config.arch,
             "current_epoch": self.current_epoch,
             "grid_size": self.config.grid_size,
+            "mining_type": self.config.mining.type,
             "num_regions": self.num_regions,
             "num_labels": self.num_labels,
             "num_records": len(self._records),
@@ -432,6 +458,7 @@ class MissBank(nn.Module):
         return {
             "epoch": epoch_value,
             "grid_size": self.config.grid_size,
+            "mining_type": self.config.mining.type,
             "num_regions": self.num_regions,
             "miss_threshold": threshold,
             "hotspot_top_k": int(hotspot_top_k),
@@ -770,6 +797,7 @@ def merge_missbank_epoch_snapshots(
     merged: dict[str, Any] = {
         "epoch": max(_optional_int(snapshot.get("epoch")) or 0 for snapshot in valid_snapshots),
         "grid_size": valid_snapshots[0].get("grid_size"),
+        "mining_type": valid_snapshots[0].get("mining_type"),
         "num_regions": valid_snapshots[0].get("num_regions"),
         "miss_threshold": valid_snapshots[0].get("miss_threshold"),
         "hotspot_top_k": int(hotspot_top_k),

@@ -148,6 +148,16 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
+        _run_missbank_offline_mining(
+            model=model,
+            data_loader=train_loader,
+            device=device,
+            amp=runtime_config["amp"],
+            epoch=epoch + 1,
+            total_epochs=total_epochs,
+            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
+            distributed=distributed,
+        )
         current_missbank_snapshot = _collect_missbank_epoch_snapshot(
             model=model,
             epoch=epoch + 1,
@@ -718,6 +728,8 @@ def _update_missbank_for_batch(
     missbank = _get_missbank(model)
     if not _missbank_enabled(missbank):
         return
+    if _missbank_mining_type(missbank) != "online":
+        return
 
     was_training = model.training
     model.eval()
@@ -731,6 +743,78 @@ def _update_missbank_for_batch(
         if was_training:
             model.train()
 
+    _update_missbank_from_detections(
+        missbank=missbank,
+        targets=targets,
+        detections=detections,
+        epoch=epoch,
+        step=step,
+    )
+
+
+def _run_missbank_offline_mining(
+    *,
+    model: torch.nn.Module,
+    data_loader,
+    device: torch.device,
+    amp: bool,
+    epoch: int,
+    total_epochs: int,
+    log_interval: int,
+    distributed: DistributedContext | None,
+) -> None:
+    missbank = _get_missbank(model)
+    if not _missbank_enabled(missbank):
+        return
+    if _missbank_mining_type(missbank) != "offline":
+        return
+
+    was_training = model.training
+    model.eval()
+    start_time = time.perf_counter()
+    total_steps = len(data_loader)
+    try:
+        for step, (images, targets) in enumerate(data_loader, start=1):
+            images = [image.to(device) for image in images]
+            targets = [_move_target_to_device(target, device) for target in targets]
+            with torch.no_grad(), torch.autocast(
+                device_type=device.type,
+                enabled=amp and device.type == "cuda",
+            ):
+                detections = model(images)
+
+            _update_missbank_from_detections(
+                missbank=missbank,
+                targets=targets,
+                detections=detections,
+                epoch=epoch,
+                step=step,
+            )
+
+            should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
+            if should_log:
+                elapsed = time.perf_counter() - start_time
+                avg_step_time = elapsed / max(step, 1)
+                remaining_steps = max(total_steps - step, 0)
+                epoch_eta = _format_eta(avg_step_time * remaining_steps)
+                print(
+                    f"[remiss-mining] epoch {epoch}/{total_epochs} "
+                    f"step {step}/{total_steps} epoch_eta={epoch_eta}"
+                )
+    finally:
+        if was_training:
+            model.train()
+    barrier(distributed)
+
+
+def _update_missbank_from_detections(
+    *,
+    missbank: Any,
+    targets: list[dict[str, torch.Tensor]],
+    detections: Any,
+    epoch: int,
+    step: int,
+) -> None:
     update = getattr(missbank, "update", None)
     if callable(update):
         update(
@@ -766,6 +850,12 @@ def _missbank_enabled(missbank: Any) -> bool:
         return False
     config = getattr(missbank, "config", None)
     return bool(getattr(config, "enabled", False))
+
+
+def _missbank_mining_type(missbank: Any) -> str:
+    config = getattr(missbank, "config", None)
+    mining = getattr(config, "mining", None)
+    return str(getattr(mining, "type", "online")).lower()
 
 
 def _write_missbank_stability_outputs(
