@@ -27,6 +27,7 @@ class MissHeadConfig:
     loss_weight: float = 0.1
     ignore_none_loss: bool = False
     none_loss_weight: float = 1.0
+    class_balanced_loss: bool = False
     arch: str | None = None
 
     @classmethod
@@ -56,6 +57,7 @@ class MissHeadConfig:
             loss_weight=float(head.get("loss_weight", 0.1)),
             ignore_none_loss=bool(head.get("ignore_none_loss", False)),
             none_loss_weight=float(head.get("none_loss_weight", 1.0)),
+            class_balanced_loss=bool(head.get("class_balanced_loss", False)),
             arch=normalize_arch(arch or merged.get("arch")),
         )
         config.validate()
@@ -105,6 +107,7 @@ class MissHeadConfig:
             "loss_weight": self.loss_weight,
             "ignore_none_loss": self.ignore_none_loss,
             "none_loss_weight": self.none_loss_weight,
+            "class_balanced_loss": self.class_balanced_loss,
             "arch": self.arch,
         }
 
@@ -164,22 +167,57 @@ class MissHead(nn.Module):
             valid = targets != 0
             if not bool(valid.any().item()):
                 return {"miss_head_ce": region_logits.sum() * 0.0}
-            ce = F.cross_entropy(region_logits[valid], targets[valid])
+            logits = region_logits[valid]
+            filtered_targets = targets[valid]
+            ce = self._cross_entropy(logits, filtered_targets)
         else:
-            weight = None
-            if float(self.config.none_loss_weight) != 1.0:
-                none_weight_is_zero = float(self.config.none_loss_weight) == 0.0
-                has_non_none_target = bool((targets != 0).any().item())
-                if none_weight_is_zero and not has_non_none_target:
-                    return {"miss_head_ce": region_logits.sum() * 0.0}
-                weight = torch.ones(
-                    (self.num_labels,),
-                    dtype=region_logits.dtype,
-                    device=region_logits.device,
-                )
-                weight[0] = float(self.config.none_loss_weight)
-            ce = F.cross_entropy(region_logits, targets, weight=weight)
+            ce = self._cross_entropy(region_logits, targets)
         return {"miss_head_ce": ce * float(self.config.loss_weight)}
+
+    def _cross_entropy(
+        self,
+        region_logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = self._loss_weight(
+            targets,
+            dtype=region_logits.dtype,
+            device=region_logits.device,
+        )
+        if weight is not None:
+            target_weights = weight.gather(0, targets)
+            if not bool((target_weights > 0).any().item()):
+                return region_logits.sum() * 0.0
+        return F.cross_entropy(region_logits, targets, weight=weight)
+
+    def _loss_weight(
+        self,
+        targets: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        use_class_balance = bool(self.config.class_balanced_loss)
+        use_none_weight = float(self.config.none_loss_weight) != 1.0
+        if not use_class_balance and not use_none_weight:
+            return None
+
+        if use_class_balance:
+            counts = torch.bincount(
+                targets.detach(),
+                minlength=self.num_labels,
+            ).to(device=device, dtype=dtype)
+            present = counts > 0
+            num_present = present.sum().to(dtype=dtype).clamp_min(1.0)
+            total = counts.sum().clamp_min(1.0)
+            weight = torch.zeros((self.num_labels,), dtype=dtype, device=device)
+            weight[present] = total / (num_present * counts[present].clamp_min(1.0))
+        else:
+            weight = torch.ones((self.num_labels,), dtype=dtype, device=device)
+
+        if use_none_weight:
+            weight[0] = weight[0] * float(self.config.none_loss_weight)
+        return weight
 
     @torch.no_grad()
     def compute_metrics(

@@ -203,7 +203,10 @@ miss_head:
   loss_weight: 0.1
   ignore_none_loss: false
   none_loss_weight: 1.0
+  class_balanced_loss: false
 ```
+
+`class_balanced_loss: true`를 켜면 batch 안의 `0..num_regions` target label 빈도를 기준으로 inverse-frequency CE weight를 만든다. 이때 현재 batch에 존재하는 각 class가 loss에서 같은 총 기여도를 갖는다. `none_loss_weight`는 class-balanced weight 위에 추가로 곱해지므로, 0 class까지 완전히 동일하게 맞추려면 `none_loss_weight: 1.0`을 사용한다.
 
 현재 구현은 FCOS에 대해 MissHead loss-only 학습을 지원한다. `miss_head.enabled: true`이고 `epoch >= miss_head.start_epoch`이면 FCOS training loss dict에 `miss_head_ce`가 추가된다. Prototype injection은 아직 연결하지 않는다.
 

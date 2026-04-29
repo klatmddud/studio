@@ -37,6 +37,7 @@ Runtime behavior:
 - Each FPN level is global-average-pooled and aggregated by mean.
 - The head predicts `grid_size * grid_size + 1` labels, where `0` is none.
 - When `miss_head.enabled` is true and `epoch >= miss_head.start_epoch`, FCOS training loss includes `miss_head_ce`.
+- `miss_head.class_balanced_loss: true` uses inverse-frequency CE weights from the current batch target distribution, so present labels contribute equally before any `none_loss_weight` multiplier.
 - MissHead training metrics are written separately under `remiss/miss_head_epoch.json` and `remiss/miss_head_epoch.csv`, not mixed into the main `results.csv`.
 - Prototype injection is not part of this implementation step.
 

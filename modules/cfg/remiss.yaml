@@ -27,6 +27,7 @@ miss_head:
   loss_weight: 0.1
   ignore_none_loss: false
   none_loss_weight: 1.0
+  class_balanced_loss: false
 
 models:
   fcos: {}
