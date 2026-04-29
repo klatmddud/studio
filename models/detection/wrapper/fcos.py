@@ -186,22 +186,32 @@ class FCOSWrapper(BaseDetectionWrapper):
         if callable(is_active) and not bool(is_active(epoch)):
             return {}
 
-        region_logits = miss_head(features)
+        miss_head_output = miss_head(features)
+        output_device = miss_head.output_device(miss_head_output)
         target_labels = missbank.get_batch_labels(
             targets=targets,
-            device=region_logits.device,
+            device=output_device,
         )
-        losses = miss_head.compute_loss(region_logits, target_labels)
-        metrics = miss_head.compute_metrics(region_logits.detach(), target_labels.detach())
+        losses = miss_head.compute_loss(miss_head_output, target_labels)
+        detached_output = _detach_miss_head_output(miss_head_output)
+        metrics = miss_head.compute_metrics(detached_output, target_labels.detach())
         metrics.update(
             _missed_object_region_metrics(
                 missbank=missbank,
                 targets=targets,
-                predicted_regions=miss_head.predict_region(region_logits.detach()),
+                predicted_regions=miss_head.predict_region(detached_output),
             )
         )
         self._train_metrics = metrics
         return losses
+
+
+def _detach_miss_head_output(output: Any) -> Any:
+    if isinstance(output, torch.Tensor):
+        return output.detach()
+    if isinstance(output, dict):
+        return {key: value.detach() for key, value in output.items()}
+    return output
 
 
 def _missed_object_region_metrics(

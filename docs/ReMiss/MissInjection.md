@@ -97,7 +97,7 @@ MissInjection의 기본 입력은 다음과 같다.
 
 ```python
 features: dict[str, Tensor] | list[Tensor] | Tensor
-region_logits: Tensor  # [B, num_regions + 1]
+miss_head_output: Tensor | dict[str, Tensor]
 ```
 
 출력은 입력과 같은 구조의 feature이다.
@@ -232,7 +232,7 @@ def inject_feature(
 detector loss -> injected feature -> prototype
 ```
 
-MissHead의 region 선택은 hard `argmax`이므로 선택 연산 자체는 미분 가능하지 않다. 따라서 초기 hard injection에서 MissHead는 `miss_head_ce`로 학습되고, prototype은 detector loss로 학습된다.
+MissHead의 region 선택은 hard `predict_region()`이므로 선택 연산 자체는 미분 가능하지 않다. 따라서 초기 hard injection에서 MissHead는 auxiliary CE 또는 split BCE/CE로 학습되고, prototype은 detector loss로 학습된다.
 
 권장 기본값은 다음과 같다.
 
@@ -320,4 +320,3 @@ MissHead logits -> MissInjection region 선택
 MissInjection -> feature 보정
 보정된 feature -> detector head
 ```
-

@@ -36,8 +36,11 @@ Runtime behavior:
 - Input feature is the FCOS FPN output.
 - Each FPN level is global-average-pooled and aggregated by mean.
 - The head predicts `grid_size * grid_size + 1` labels, where `0` is none.
-- When `miss_head.enabled` is true and `epoch >= miss_head.start_epoch`, FCOS training loss includes `miss_head_ce`.
+- `miss_head.has_miss_head: false` keeps the legacy 5-way classifier and predicts `0: none` plus `1..num_regions`.
+- `miss_head.has_miss_head: true` uses a shared trunk with a binary has-miss branch and a positive-only region branch. The final `predict_region()` still returns `0..num_regions`.
+- When `miss_head.enabled` is true and `epoch >= miss_head.start_epoch`, FCOS training loss includes `miss_head_ce` in legacy mode, or `miss_head_has_miss_bce` and `miss_head_region_ce` in split mode.
 - `miss_head.class_balanced_loss: true` uses inverse-frequency CE weights from the current batch target distribution, so present labels contribute equally before any `none_loss_weight` multiplier.
+- In split mode, `has_miss_pos_weight: auto` computes BCE positive weight from the current batch and `has_miss_threshold` controls the none-vs-region gate used by `predict_region()`.
 - MissHead training metrics are written separately under `remiss/miss_head_epoch.json` and `remiss/miss_head_epoch.csv`, not mixed into the main `results.csv`.
 - Prototype injection is not part of this implementation step.
 

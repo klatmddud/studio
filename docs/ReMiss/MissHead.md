@@ -95,6 +95,35 @@ L_total = L_detector + lambda_miss_head * L_miss_head
 
 `lambda_miss_head`는 MissHead loss가 detector 학습을 과도하게 흔들지 않도록 작게 시작한다. 예를 들어 `0.05`, `0.1`, `0.2`를 ablation 후보로 둘 수 있다.
 
+현재 구현은 기존 5-way head와 split head를 모두 지원한다. `miss_head.has_miss_head: false`이면 기존처럼 `0: none`, `1..num_regions`를 하나의 CE로 학습한다. `miss_head.has_miss_head: true`이면 shared trunk 뒤에 두 branch를 둔다.
+
+```text
+FPN features
+  -> GAP / level mean aggregation
+  -> shared MLP trunk
+      -> has_miss_logits: [B]
+      -> region_logits: [B, num_regions]
+```
+
+Split mode의 target 변환은 다음과 같다.
+
+```text
+has_miss_target = target_label > 0
+region_target = target_label - 1  # target_label > 0인 sample에서만 사용
+```
+
+Split mode의 loss는 `none` 여부와 region 분류를 분리한다.
+
+```text
+L_has_miss = BCEWithLogits(has_miss_logits, has_miss_target)
+L_region = CE(region_logits[target_label > 0], region_target)
+L_total = L_detector
+        + lambda_has_miss * L_has_miss
+        + lambda_region * L_region
+```
+
+이 구조에서는 `ignore_none_loss`와 `none_loss_weight`가 region branch에 적용되지 않는다. Region branch는 항상 positive sample만 사용하고, `none` 판단은 has-miss branch가 담당한다.
+
 ## 활성화 시점
 
 MissBank update는 학습 초반부터 수행할 수 있지만, MissHead 학습은 `start_epoch` 이후에 활성화한다.
@@ -204,11 +233,18 @@ miss_head:
   ignore_none_loss: false
   none_loss_weight: 1.0
   class_balanced_loss: false
+  has_miss_head: false
+  has_miss_loss_weight: 0.1
+  region_loss_weight: 0.1
+  has_miss_pos_weight: auto
+  has_miss_threshold: 0.5
 ```
 
 `class_balanced_loss: true`를 켜면 batch 안의 `0..num_regions` target label 빈도를 기준으로 inverse-frequency CE weight를 만든다. 이때 현재 batch에 존재하는 각 class가 loss에서 같은 총 기여도를 갖는다. `none_loss_weight`는 class-balanced weight 위에 추가로 곱해지므로, 0 class까지 완전히 동일하게 맞추려면 `none_loss_weight: 1.0`을 사용한다.
 
-현재 구현은 FCOS에 대해 MissHead loss-only 학습을 지원한다. `miss_head.enabled: true`이고 `epoch >= miss_head.start_epoch`이면 FCOS training loss dict에 `miss_head_ce`가 추가된다. Prototype injection은 아직 연결하지 않는다.
+`has_miss_head: true`를 켜면 `loss_weight` 대신 `has_miss_loss_weight`와 `region_loss_weight`가 각각 BCE와 region CE에 적용된다. 두 값이 생략되면 `loss_weight` 값을 기본으로 사용한다. `has_miss_pos_weight: auto`는 현재 batch의 negative/positive 비율로 BCE positive weight를 계산한다. 숫자를 직접 주거나 `null`로 꺼둘 수 있다. `has_miss_threshold`는 split mode의 최종 `predict_region()`에서 `0: none`을 낼지 region을 낼지 정하는 sigmoid threshold이다.
+
+현재 구현은 FCOS에 대해 MissHead loss-only 학습을 지원한다. `miss_head.enabled: true`이고 `epoch >= miss_head.start_epoch`이면 기존 5-way mode에서는 FCOS training loss dict에 `miss_head_ce`가 추가되고, split mode에서는 `miss_head_has_miss_bce`와 `miss_head_region_ce`가 추가된다. Prototype injection은 아직 연결하지 않는다.
 
 `grid_size`는 MissBank와 MissInject의 grid 설정과 일치해야 한다. 구현에서는 ReMiss 상위 config의 `grid_size`를 공유하거나, 불일치 시 validation error를 내는 방식이 안전하다.
 
@@ -216,19 +252,19 @@ miss_head:
 
 ```python
 class MissHead(nn.Module):
-    def forward(self, features) -> torch.Tensor:
+    def forward(self, features) -> torch.Tensor | dict[str, torch.Tensor]:
         ...
 
     def compute_loss(
         self,
-        region_logits: torch.Tensor,
+        miss_head_output: torch.Tensor | dict[str, torch.Tensor],
         target_labels: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         ...
 
     def predict_region(
         self,
-        region_logits: torch.Tensor,
+        miss_head_output: torch.Tensor | dict[str, torch.Tensor],
     ) -> torch.Tensor:
         ...
 ```
@@ -241,6 +277,15 @@ class MissHead(nn.Module):
 }
 ```
 
+Split mode 반환 예시:
+
+```python
+{
+    "miss_head_has_miss_bce": bce_loss * has_miss_loss_weight,
+    "miss_head_region_ce": region_ce_loss * region_loss_weight,
+}
+```
+
 `predict_region`은 `[B]` shape의 integer tensor를 반환한다.
 
 ## 학습 흐름
@@ -249,12 +294,12 @@ class MissHead(nn.Module):
 
 ```text
 1. detector backbone/neck feature 추출
-2. MissHead가 region_logits 예측
+2. MissHead가 region_logits 또는 split output을 예측
 3. detector head가 기본 detection loss 계산
 4. detector 최종 prediction과 GT를 매칭해 MissBank update
 5. MissBank에서 target_labels 생성
-6. epoch >= start_epoch이면 MissHead CE loss 추가
-7. region_logits의 argmax 또는 target label을 MissInject에 전달
+6. epoch >= start_epoch이면 MissHead loss 추가
+7. MissHead `predict_region()` 결과 또는 target label을 MissInject에 전달
 ```
 
 주의할 점은 MissBank update에 필요한 최종 detection이 detector post-processing 이후 결과라는 점이다. 현재 runtime은 ReMiss가 활성화된 경우 training step 이후 eval-style no-grad prediction을 한 번 더 계산해서 MissBank를 갱신한다. 이 경로는 memory update용이며, MissHead loss와 injection은 별도 구현 단계에서 연결한다.
@@ -293,6 +338,8 @@ c_ij = image i의 missed GT j의 miss_count
 | Missed Object Region Accuracy | `missed_object_region_acc` | `sum_i sum_j 1[p_i == r_ij] / sum_i |M_i|` | image-level 예측이 각 missed GT의 위치를 얼마나 맞추는지 object-level로 평가 |
 | Weighted Missed Object Region Accuracy | `missed_object_region_acc_weighted` | `sum_i sum_j c_ij * 1[p_i == r_ij] / sum_i sum_j c_ij` | 반복적으로 미검출되는 GT를 더 중요하게 반영 |
 | None Precision / Recall | `miss_head_none_precision`, `miss_head_none_recall` | precision: `TP_none / predicted_none`, recall: `TP_none / target_none` | MissHead가 과도하게 none으로 collapse하거나 불필요한 injection을 유발하는지 확인 |
+| Has-Miss Precision / Recall / F1 | `miss_head_has_miss_precision`, `miss_head_has_miss_recall`, `miss_head_has_miss_f1` | split mode에서 `target_label > 0` 여부를 얼마나 맞추는지 평가 | injection gate 품질 확인 |
+| Region Accuracy on Positive | `miss_head_region_acc` | split mode에서 positive target만 대상으로 `argmax(region_logits) + 1 == y_i` 평가 | gate와 분리된 region branch 품질 확인 |
 | Detector Recall on Missed Objects / FN Count | `missed_object_recall`, `missed_object_fn_count` | recall: `matched_missed_gt / total_missed_gt`, count: `total_missed_gt - matched_missed_gt` | MissHead와 injection이 실제 detector 미검출을 줄이는지 확인 |
 
 `Missed Object Region Accuracy`와 `Weighted Missed Object Region Accuracy`는 MissHead 전용 핵심 지표로 본다. detector mAP가 상승하더라도 이 값이 낮으면 injection이 MissHead의 위치 예측이 아니라 다른 regularization 효과로 성능을 얻었을 가능성이 있다.

@@ -28,6 +28,11 @@ miss_head:
   ignore_none_loss: false
   none_loss_weight: 1.0
   class_balanced_loss: false
+  has_miss_head: false
+  has_miss_loss_weight: 0.1
+  region_loss_weight: 0.1
+  has_miss_pos_weight: auto
+  has_miss_threshold: 0.5
 
 models:
   fcos: {}
