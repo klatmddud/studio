@@ -11,9 +11,8 @@ scripts/
     eval.yaml               # Runtime config template (eval)
   runtime/
     config.py               # Config loading, env-var substitution, validation
-    data.py                 # COCO dataset + DataLoader builders, Hard Replay/crop replay wiring
-    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing, DHM mining/replay
-    hard_replay.py          # DHM-driven mixed replay and FN_LOC localization repair sampler
+    data.py                 # COCO dataset + DataLoader builders
+    engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
@@ -24,13 +23,13 @@ models/detection/
   cfg/                      # Per-architecture YAML (fcos/fasterrcnn/dino)
   wrapper/
     _base.py                # Backbone + FPN builder
-    fcos.py                 # FCOS wrapper with DHM/DHM-R hooks
+    fcos.py                 # FCOS wrapper
     fasterrcnn.py           # FasterRCNN wrapper
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # DHM/DHM-R module configs, disabled by default
-  nn/                       # DHM/DHM-R implementations and shared helpers
+  cfg/                      # ReMiss module config, disabled by default
+  nn/                       # ReMiss implementation and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```
@@ -52,14 +51,14 @@ train.py
   -> load_runtime_config()       # merge YAML + env vars
   -> build_model_from_path()     # registry.py -> wrapper
   -> build_train_dataloaders()   # data.py -> CocoDetectionDataset
-  -> fit()                       # engine.py -> training loop + optional DHM mining/replay
+  -> fit()                       # engine.py -> training loop
 ```
 
 ## Supported Architectures
 
 | arch key | Wrapper | Backbone options |
 |---|---|---|
-| `fcos` | `DHMFCOS` | ResNet18/50, MobileNetV2/V3 |
+| `fcos` | `FCOSWrapper` | ResNet18/50, MobileNetV2/V3 |
 | `fasterrcnn` | `FasterRCNN` | ResNet50/101, MobileNetV2/V3 |
 | `dino` | `DINOWrapper` | External backend-defined |
 

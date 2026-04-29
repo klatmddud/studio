@@ -1,0 +1,33 @@
+enabled: false
+grid_size: 2
+start_epoch: 1
+max_records: null
+
+matching:
+  score_threshold: 0.05
+  iou_threshold: 0.5
+
+target:
+  miss_threshold: 2
+  aggregation: miss_count
+
+miss_head:
+  enabled: false
+  start_epoch: 1
+  grid_size: 2
+  in_channels: 256
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.0
+  pooling: gap
+  level_aggregation: mean
+  loss_weight: 0.1
+  ignore_none_loss: false
+  none_loss_weight: 1.0
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

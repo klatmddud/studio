@@ -5,15 +5,11 @@ from typing import Any
 
 import torch.nn as nn
 
-from modules.nn import (
-    build_dhm_from_yaml,
-    build_dhmr_from_yaml,
-)
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
+from modules.nn import build_missbank_from_yaml, build_misshead_from_yaml
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
-from .module_configs import resolve_module_config_paths
 
 ARCH_ALIASES = {
     "faster_rcnn": "fasterrcnn",
@@ -46,7 +42,6 @@ def build_model_from_config(
     module_config_paths: dict[str, str | Path] | None = None,
 ) -> nn.Module:
     normalized_arch = normalize_arch(arch)
-    module_paths = resolve_module_config_paths(module_config_paths, require_exists=False)
     builder = MODEL_BUILDERS.get(normalized_arch)
     if builder is None:
         supported = ", ".join(sorted(MODEL_BUILDERS))
@@ -54,17 +49,13 @@ def build_model_from_config(
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
-    dhm = _build_dhm(normalized_arch, module_paths["dhm"])
-    dhmr = _build_dhmr(normalized_arch, module_paths["dhmr"])
-    if normalized_arch == "fcos":
-        if dhmr is not None and dhm is None:
-            raise ValueError("DHM-R requires DHM to be enabled for FCOS.")
-        return builder(
-            model_config,
-            dhm=dhm,
-            dhmr=dhmr,
-        )
-    return builder(model_config)
+    model = builder(model_config)
+    _attach_remiss_modules(
+        model,
+        arch=normalized_arch,
+        module_config_paths=module_config_paths,
+    )
+    return model
 
 
 def build_model_from_path(
@@ -89,19 +80,31 @@ def build_model_from_path(
     return model, model_config, arch, resolved_path
 
 
-def _build_dhm(arch: str, config_path: str | Path) -> nn.Module | None:
+def _attach_remiss_modules(
+    model: nn.Module,
+    *,
+    arch: str,
+    module_config_paths: dict[str, str | Path] | None,
+) -> None:
     if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_dhm_from_yaml(path, arch=arch)
-
-
-def _build_dhmr(arch: str, config_path: str | Path) -> nn.Module | None:
-    if arch != "fcos":
-        return None
-    path = Path(config_path)
-    if not path.is_file():
-        return None
-    return build_dhmr_from_yaml(path, arch=arch)
+        return
+    if not module_config_paths:
+        return
+    remiss_path = module_config_paths.get("remiss")
+    if remiss_path is None:
+        return
+    missbank = build_missbank_from_yaml(remiss_path, arch=arch)
+    misshead = build_misshead_from_yaml(
+        remiss_path,
+        arch=arch,
+        remiss_enabled=missbank is not None,
+    )
+    if missbank is None:
+        if misshead is not None:
+            raise ValueError("MissHead requires MissBank to be enabled.")
+        return
+    if misshead is not None and int(misshead.config.grid_size) != int(missbank.config.grid_size):
+        raise ValueError("MissHead grid_size must match MissBank grid_size.")
+    model.missbank = missbank
+    if misshead is not None:
+        model.miss_head = misshead

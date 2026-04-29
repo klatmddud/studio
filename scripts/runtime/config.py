@@ -67,46 +67,6 @@ TRAIN_DEFAULTS: dict[str, Any] = {
         "grad_clip_norm": None,
         "log_interval": 20,
         "eval_every_epochs": 1,
-        "hard_replay": {
-            "enabled": False,
-            "start_epoch": 3,
-            "warmup_epochs": 0,
-            "max_ratio": 0.25,
-            "max_replays_per_batch": 0,
-            "beta": 1.0,
-            "temperature": 1.0,
-            "max_image_weight": 5.0,
-            "min_replay_weight": 1.0,
-            "replacement": True,
-            "max_replays_per_gt_per_epoch": 4,
-            "replay_recency_window": 3,
-            "target_transitions": [
-                "FN_BG->FN_BG",
-                "FN_CLS->FN_CLS",
-                "FN_LOC->FN_LOC",
-                "FN_MISS->FN_MISS",
-                "TP->FN_BG",
-                "TP->FN_CLS",
-                "TP->FN_LOC",
-                "TP->FN_MISS",
-            ],
-            "persistent_states": ["FN_BG", "FN_CLS", "FN_LOC", "FN_MISS"],
-            "min_observations": 2,
-            "min_fn_streak": 2,
-            "loc_repair": {
-                "enabled": True,
-                "replay_fraction": 0.6,
-                "context_scale": 2.0,
-                "context_scale_jitter": 0.25,
-                "center_jitter": 0.10,
-                "min_crop_size": 128,
-                "min_visible_ratio": 0.50,
-                "focus_min_visible_ratio": 0.90,
-                "include_other_gt": True,
-                "target_transitions": ["FN_LOC->FN_LOC", "TP->FN_LOC"],
-                "persistent_states": ["FN_LOC"],
-            },
-        },
     },
     "checkpoint": {
         "dir": "checkpoints",
@@ -318,8 +278,6 @@ def _validate_train_config(config: dict[str, Any]) -> None:
         raise ValueError("train.epochs must be >= 1.")
     if config["train"]["eval_every_epochs"] < 1:
         raise ValueError("train.eval_every_epochs must be >= 1.")
-    _validate_hard_replay_config(config["train"].get("hard_replay", {}))
-
     checkpoint = config["checkpoint"]
     metrics = config["metrics"]
     if checkpoint["mode"] not in {"max", "min"}:
@@ -338,95 +296,6 @@ def _validate_train_config(config: dict[str, Any]) -> None:
         not data.get("val_images") or not data.get("val_annotations")
     ):
         raise ValueError("Validation data is required when checkpoint.save_best is true.")
-
-
-def _validate_hard_replay_config(config: Any) -> None:
-    if not isinstance(config, dict):
-        raise ValueError("train.hard_replay must be a mapping.")
-    if not bool(config.get("enabled", False)):
-        return
-
-    for key in (
-        "start_epoch",
-        "warmup_epochs",
-        "max_replays_per_batch",
-        "max_replays_per_gt_per_epoch",
-        "replay_recency_window",
-        "min_observations",
-        "min_fn_streak",
-    ):
-        if int(config.get(key, 0)) < 0:
-            raise ValueError(f"train.hard_replay.{key} must be >= 0.")
-    if int(config.get("start_epoch", 0)) < 1:
-        raise ValueError("train.hard_replay.start_epoch must be >= 1 when enabled.")
-    max_ratio = float(config.get("max_ratio", 0.0))
-    if not 0.0 <= max_ratio < 1.0:
-        raise ValueError("train.hard_replay.max_ratio must satisfy 0 <= value < 1.")
-    for key in ("beta", "temperature", "max_image_weight", "min_replay_weight"):
-        if float(config.get(key, 0.0)) < 0.0:
-            raise ValueError(f"train.hard_replay.{key} must be >= 0.")
-    if float(config.get("temperature", 0.0)) <= 0.0:
-        raise ValueError("train.hard_replay.temperature must be > 0.")
-    if float(config.get("max_image_weight", 0.0)) <= 0.0:
-        raise ValueError("train.hard_replay.max_image_weight must be > 0.")
-    if float(config.get("min_replay_weight", 0.0)) <= 0.0:
-        raise ValueError("train.hard_replay.min_replay_weight must be > 0.")
-    if int(config.get("max_replays_per_gt_per_epoch", 0)) < 1:
-        raise ValueError("train.hard_replay.max_replays_per_gt_per_epoch must be >= 1.")
-    _validate_string_sequence(
-        config.get("target_transitions", []),
-        "train.hard_replay.target_transitions",
-    )
-    _validate_string_sequence(
-        config.get("persistent_states", []),
-        "train.hard_replay.persistent_states",
-    )
-    loc_repair = config.get("loc_repair", {})
-    if loc_repair is None:
-        return
-    if not isinstance(loc_repair, dict):
-        raise ValueError("train.hard_replay.loc_repair must be a mapping.")
-    if not bool(loc_repair.get("enabled", True)):
-        return
-    replay_fraction = float(loc_repair.get("replay_fraction", 0.0))
-    if not 0.0 <= replay_fraction <= 1.0:
-        raise ValueError(
-            "train.hard_replay.loc_repair.replay_fraction must satisfy 0 <= value <= 1."
-        )
-    if float(loc_repair.get("context_scale", 0.0)) <= 0.0:
-        raise ValueError("train.hard_replay.loc_repair.context_scale must be > 0.")
-    for key in ("context_scale_jitter", "center_jitter"):
-        if float(loc_repair.get(key, 0.0)) < 0.0:
-            raise ValueError(f"train.hard_replay.loc_repair.{key} must be >= 0.")
-    if int(loc_repair.get("min_crop_size", 0)) < 1:
-        raise ValueError("train.hard_replay.loc_repair.min_crop_size must be >= 1.")
-    for key in ("min_visible_ratio", "focus_min_visible_ratio"):
-        value = float(loc_repair.get(key, 0.0))
-        if not 0.0 <= value <= 1.0:
-            raise ValueError(
-                f"train.hard_replay.loc_repair.{key} must satisfy 0 <= value <= 1."
-            )
-    _validate_string_sequence(
-        loc_repair.get("target_transitions", []),
-        "train.hard_replay.loc_repair.target_transitions",
-    )
-    _validate_string_sequence(
-        loc_repair.get("persistent_states", []),
-        "train.hard_replay.loc_repair.persistent_states",
-    )
-
-
-def _validate_string_sequence(value: Any, name: str) -> None:
-    if isinstance(value, str):
-        if not value:
-            raise ValueError(f"{name} must not contain empty strings.")
-        return
-    if not isinstance(value, Sequence):
-        raise ValueError(f"{name} must be a string or a sequence of strings.")
-    if not value:
-        raise ValueError(f"{name} must not be empty.")
-    if any(not isinstance(item, str) or not item for item in value):
-        raise ValueError(f"{name} must contain only non-empty strings.")
 
 
 def _validate_eval_config(config: dict[str, Any]) -> None:

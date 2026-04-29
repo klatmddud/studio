@@ -61,14 +61,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--dhm-config",
+        "--remiss-config",
         default=None,
-        help="Optional override for the DHM YAML config path.",
-    )
-    parser.add_argument(
-        "--dhmr-config",
-        default=None,
-        help="Optional override for the DHM-R YAML config path.",
+        help="Optional override for the ReMiss YAML config path.",
     )
     return parser.parse_args()
 
@@ -261,8 +256,7 @@ def _find_free_port() -> int:
 
 def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str, Path]:
     overrides = {
-        "dhm": args.dhm_config,
-        "dhmr": args.dhmr_config,
+        "remiss": args.remiss_config,
     }
     paths = resolve_module_config_paths(overrides, require_exists=False)
     missing = [
@@ -279,8 +273,7 @@ def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str
 
 def _module_config_override_names(args: argparse.Namespace) -> list[str]:
     overrides = {
-        "dhm": args.dhm_config,
-        "dhmr": args.dhmr_config,
+        "remiss": args.remiss_config,
     }
     return [name for name, value in overrides.items() if value is not None]
 
@@ -294,7 +287,7 @@ def _print_module_config_overrides(
     if not override_names:
         return
     print("module_configs:")
-    for name in ("dhm", "dhmr"):
+    for name in ("remiss",):
         if name not in override_names:
             continue
         path = module_config_paths.get(name)

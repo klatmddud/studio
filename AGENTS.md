@@ -1,6 +1,6 @@
 # AGENTS.md
 
-PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module wiring is limited to DHM and DHM-R.
+PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module work is centered on ReMiss.
 
 ## Quick Reference
 
@@ -9,7 +9,7 @@ PyTorch object detection training framework supporting FCOS, Faster R-CNN, and D
 | Project layout, entry points, tech stack | [docs/architecture.md](docs/architecture.md) |
 | Training config, engine, checkpointing | [docs/training.md](docs/training.md) |
 | Model architectures and wrappers | [docs/models.md](docs/models.md) |
-| Research modules (DHM, DHM-R) | [docs/modules.md](docs/modules.md) |
+| Research modules (ReMiss) | [docs/modules.md](docs/modules.md) |
 | Dataset format, DataLoader, env vars | [docs/data.md](docs/data.md) |
 
 ## Common Commands
@@ -21,7 +21,7 @@ uv sync
 # Train
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --seed 42 --device cuda:0 cuda:1
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --dhm-config modules/cfg/dhm.yaml --dhmr-config modules/cfg/dhmr.yaml
+uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --remiss-config modules/cfg/remiss.yaml
 bash scripts/bash/baseline/train.bash
 
 # Evaluate

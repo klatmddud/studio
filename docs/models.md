@@ -4,26 +4,22 @@
 
 All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchVision.
 
-### FCOS (`fcos.py` -> `DHMFCOS`)
+### FCOS (`fcos.py` -> `FCOSWrapper`)
 
 - Single-stage anchor-free detector.
-- Integrates DHM and DHM-R when enabled in `modules/cfg/`.
-- DHM mines per-GT detection-state hysteresis at epoch end.
-- DHM-R reads previous DHM records and can add training-only border refinement or DCLR counterfactual repair losses for localization repair.
-- `mine_dhm_batch()` supports epoch-end full train-set hysteresis mining when DHM is enabled.
+- Uses TorchVision `FCOS` directly.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
 
 ### Faster R-CNN (`fasterrcnn.py`)
 
 - Two-stage region proposal detector.
-- Plain TorchVision FasterRCNN; no research modules are currently wired up.
+- Plain TorchVision FasterRCNN.
 - Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3.
 
 ### DINO (`dino.py` -> `DINOWrapper`)
 
 - Transformer-based detector adapter.
 - Uses an external backend builder via the `backend.builder` YAML field.
-- No research modules are currently wired up.
 
 ## Model Config Fields
 
@@ -47,7 +43,6 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 1. Loads model YAML.
 2. Infers `arch` from filename stem.
 3. Dispatches to the appropriate wrapper class.
-4. Loads DHM/DHM-R configs from `modules/cfg/` and attaches enabled modules for FCOS.
-5. Returns `(model, model_config, arch, model_config_path)`.
+4. Returns `(model, model_config, arch, model_config_path)`.
 
 `num_classes` is resolved at build time: model YAML value takes precedence; otherwise it is inferred from `train_annotations` via `dataset_meta.py`.

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
+import math
 import os
 import random
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,15 +17,15 @@ import torch
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 
+from modules.nn import compute_missbank_stability_metrics, merge_missbank_epoch_snapshots
+
 from .config import dump_yaml_file
-from .data import build_train_mining_dataloader
 from .distributed import (
     DistributedContext,
     all_gather_object,
     barrier,
     is_distributed,
     is_main_process,
-    synchronize_extra_state,
     unwrap_model,
 )
 from .metrics import evaluate_coco_detection, save_predictions
@@ -83,6 +85,8 @@ def fit(
     )
 
     history: list[dict[str, Any]] = []
+    missbank_stability_history: list[dict[str, Any]] = []
+    previous_missbank_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
 
@@ -101,6 +105,13 @@ def fit(
         )
 
     if main_process:
+        if resume_path:
+            missbank_stability_history = _read_missbank_stability_history(
+                output_dir / "remiss",
+            )
+            previous_missbank_snapshot = _read_missbank_stability_state(
+                output_dir / "remiss" / "miss_stability_state.json"
+            )
         persist_run_metadata(
             output_dir=output_dir,
             arch=arch,
@@ -121,10 +132,8 @@ def fit(
     mode = runtime_config["checkpoint"]["mode"]
 
     for epoch in range(start_epoch, total_epochs):
-        _call_model_hook(model, "dhm", "start_epoch", epoch + 1)
-        _call_model_hook(model, "dhmr", "start_epoch", epoch + 1)
-        _refresh_hard_replay(train_loader, model, epoch + 1)
         _set_data_loader_epoch(train_loader, epoch + 1)
+        _set_missbank_epoch(model, epoch + 1)
 
         train_metrics = train_one_epoch(
             model=model,
@@ -139,40 +148,29 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
-        _run_dhm_epoch_mining(
+        current_missbank_snapshot = _collect_missbank_epoch_snapshot(
             model=model,
-            runtime_config=runtime_config,
-            device=device,
-            amp=runtime_config["amp"],
-            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
             epoch=epoch + 1,
-            total_epochs=total_epochs,
             distributed=distributed,
         )
-
-        _call_model_hook(model, "dhm", "end_epoch", epoch + 1)
-        _call_model_hook(model, "dhmr", "end_epoch", epoch + 1)
-
-        local_summaries = {
-            "dhm": _get_module_summary(model, "dhm"),
-            "dhmr": _get_module_summary(model, "dhmr"),
-        }
-        merged_epoch_summaries = _merge_epoch_summaries(local_summaries, distributed)
-        _synchronize_research_memory(model, distributed)
-        dhm_summary = merged_epoch_summaries.get("dhm")
-        dhmr_summary = merged_epoch_summaries.get("dhmr")
-        hard_replay_summary = _get_hard_replay_summary(train_loader)
+        if main_process and current_missbank_snapshot is not None:
+            missbank_metrics = compute_missbank_stability_metrics(
+                current_missbank_snapshot,
+                previous_snapshot=previous_missbank_snapshot,
+                hotspot_top_k=int(current_missbank_snapshot.get("hotspot_top_k", 10)),
+            )
+            missbank_stability_history.append(missbank_metrics)
+            _write_missbank_stability_outputs(
+                output_dir=output_dir,
+                history=missbank_stability_history,
+                snapshot=current_missbank_snapshot,
+            )
+            previous_missbank_snapshot = current_missbank_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
             "train": train_metrics,
         }
-        if dhm_summary is not None:
-            record["dhm"] = dhm_summary
-        if dhmr_summary is not None:
-            record["dhmr"] = dhmr_summary
-        if hard_replay_summary is not None:
-            record["hard_replay"] = hard_replay_summary
 
         should_eval = (
             val_loader is not None
@@ -223,7 +221,7 @@ def fit(
 
         if main_process:
             history.append(record)
-            _write_json(output_dir / "history.json", history)
+            _write_history_outputs(output_dir, history)
 
             summary = format_metrics(record, runtime_config["metrics"]["primary"])
             print(f"[epoch {epoch + 1}/{total_epochs}] {summary}")
@@ -324,6 +322,8 @@ def train_one_epoch(
 ) -> dict[str, float]:
     model.train()
     loss_sums: defaultdict[str, float] = defaultdict(float)
+    metric_sums: defaultdict[str, float] = defaultdict(float)
+    metric_counts: defaultdict[str, int] = defaultdict(int)
     num_batches = 0
     start_time = time.perf_counter()
     total_steps = len(data_loader)
@@ -363,6 +363,21 @@ def train_one_epoch(
         loss_sums["loss"] += float(total_loss.detach().item())
         for name, value in loss_dict.items():
             loss_sums[name] += float(value.detach().item())
+        _accumulate_model_train_metrics(
+            model=model,
+            metric_sums=metric_sums,
+            metric_counts=metric_counts,
+        )
+
+        _update_missbank_for_batch(
+            model=model,
+            images=images,
+            targets=targets,
+            device=device,
+            amp=amp,
+            epoch=epoch_index + 1,
+            step=step,
+        )
 
         should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
         if should_log:
@@ -389,6 +404,8 @@ def train_one_epoch(
     if is_distributed(distributed):
         return _reduce_train_metrics(
             loss_sums=loss_sums,
+            metric_sums=metric_sums,
+            metric_counts=metric_counts,
             num_batches=num_batches,
             duration=duration,
             lr=float(optimizer.param_groups[0]["lr"]),
@@ -398,6 +415,10 @@ def train_one_epoch(
         key: value / max(num_batches, 1)
         for key, value in loss_sums.items()
     }
+    for key, value in metric_sums.items():
+        count = int(metric_counts.get(key, 0))
+        if count > 0:
+            metrics[key] = value / float(count)
     metrics["lr"] = float(optimizer.param_groups[0]["lr"])
     metrics["epoch_time_sec"] = duration
     return metrics
@@ -466,10 +487,8 @@ def load_checkpoint(
 ) -> dict[str, Any]:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=True)
     state_result = unwrap_model(model).load_state_dict(checkpoint["model_state_dict"], strict=False)
-    missing_keys = [key for key in state_result.missing_keys if not _is_optional_research_key(key)]
-    unexpected_keys = [
-        key for key in state_result.unexpected_keys if not _is_optional_research_key(key)
-    ]
+    missing_keys = list(state_result.missing_keys)
+    unexpected_keys = list(state_result.unexpected_keys)
     if missing_keys or unexpected_keys:
         details = []
         if missing_keys:
@@ -568,28 +587,6 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
     if "loss" in train_metrics:
         parts.append(f"train_loss={train_metrics['loss']:.4f}")
 
-    dhm_summary = record.get("dhm")
-    if isinstance(dhm_summary, dict):
-        parts.append(f"dhm_records={int(dhm_summary.get('num_records', 0))}")
-        parts.append(f"dhm_mean_instability={float(dhm_summary.get('mean_instability', 0.0)):.3f}")
-
-    dhmr_summary = record.get("dhmr")
-    if isinstance(dhmr_summary, dict):
-        border_refinement = dhmr_summary.get("border_refinement", {})
-        if isinstance(border_refinement, Mapping) and bool(border_refinement.get("enabled", False)):
-            parts.append(f"border_refine_points={int(border_refinement.get('selected_points', 0))}")
-
-    hard_replay_summary = record.get("hard_replay")
-    if isinstance(hard_replay_summary, dict) and bool(hard_replay_summary.get("enabled", False)):
-        parts.append(f"replay_images={int(hard_replay_summary.get('replay_num_images', 0))}")
-        parts.append(f"replay_samples={int(hard_replay_summary.get('replay_samples', 0))}")
-        parts.append(
-            f"replay_ratio={float(hard_replay_summary.get('replay_ratio_effective', 0.0)):.3f}"
-        )
-        loc_samples = int(hard_replay_summary.get("loc_repair_samples", 0))
-        if loc_samples > 0:
-            parts.append(f"loc_repair_samples={loc_samples}")
-
     val_metrics = record.get("val")
     if isinstance(val_metrics, dict):
         primary = val_metrics.get(primary_metric)
@@ -602,6 +599,8 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
 def _reduce_train_metrics(
     *,
     loss_sums: Mapping[str, float],
+    metric_sums: Mapping[str, float],
+    metric_counts: Mapping[str, int],
     num_batches: int,
     duration: float,
     lr: float,
@@ -610,6 +609,8 @@ def _reduce_train_metrics(
     gathered = all_gather_object(
         {
             "loss_sums": dict(loss_sums),
+            "metric_sums": dict(metric_sums),
+            "metric_counts": dict(metric_counts),
             "num_batches": int(num_batches),
             "duration": float(duration),
             "lr": float(lr),
@@ -618,6 +619,8 @@ def _reduce_train_metrics(
     )
     total_batches = sum(int(item.get("num_batches", 0)) for item in gathered if isinstance(item, Mapping))
     combined: defaultdict[str, float] = defaultdict(float)
+    combined_metric_sums: defaultdict[str, float] = defaultdict(float)
+    combined_metric_counts: defaultdict[str, int] = defaultdict(int)
     max_duration = 0.0
     for item in gathered:
         if not isinstance(item, Mapping):
@@ -628,357 +631,26 @@ def _reduce_train_metrics(
             continue
         for key, value in raw_losses.items():
             combined[str(key)] += float(value)
+        raw_metric_sums = item.get("metric_sums", {})
+        if isinstance(raw_metric_sums, Mapping):
+            for key, value in raw_metric_sums.items():
+                combined_metric_sums[str(key)] += float(value)
+        raw_metric_counts = item.get("metric_counts", {})
+        if isinstance(raw_metric_counts, Mapping):
+            for key, value in raw_metric_counts.items():
+                combined_metric_counts[str(key)] += int(value)
 
     metrics = {
         key: value / float(max(total_batches, 1))
         for key, value in combined.items()
     }
+    for key, value in combined_metric_sums.items():
+        count = int(combined_metric_counts.get(key, 0))
+        if count > 0:
+            metrics[key] = value / float(count)
     metrics["lr"] = float(lr)
     metrics["epoch_time_sec"] = max_duration
     return metrics
-
-
-def _merge_epoch_summaries(
-    local_summaries: Mapping[str, dict[str, Any] | None],
-    distributed: DistributedContext | None,
-) -> dict[str, dict[str, Any] | None]:
-    gathered = all_gather_object(dict(local_summaries), distributed)
-    merged: dict[str, dict[str, Any] | None] = {}
-    for name in ("dhm", "dhmr"):
-        summaries = [
-            item.get(name)
-            for item in gathered
-            if isinstance(item, Mapping) and isinstance(item.get(name), Mapping)
-        ]
-        merged[name] = _merge_summary_group(name, summaries)
-    return merged
-
-
-def _merge_summary_group(
-    name: str,
-    summaries: Sequence[Mapping[str, Any]],
-) -> dict[str, Any] | None:
-    if not summaries:
-        return None
-    result = dict(summaries[0])
-    if name == "dhm":
-        active_summaries = [
-            summary
-            for summary in summaries
-            if isinstance(summary.get("mining"), Mapping)
-            and int(summary.get("mining", {}).get("gt_seen", 0)) > 0
-        ]
-        source_summaries = active_summaries or [
-            max(summaries, key=lambda summary: int(summary.get("num_records", 0)))
-        ]
-        result = dict(source_summaries[0])
-        for key in (
-            "num_records",
-            "num_images",
-            "num_current_failures",
-            "global_max_fn_streak",
-            "total_forgetting",
-            "total_recovery",
-            "total_type_switch",
-        ):
-            result[key] = max(int(summary.get(key, 0)) for summary in source_summaries)
-        _merge_weighted_mean(result, source_summaries, "mean_instability", "num_records")
-
-        for nested_key in ("last_state_counts", "status_counts", "dominant_failure_counts"):
-            counts: defaultdict[str, int] = defaultdict(int)
-            for summary in source_summaries:
-                raw_counts = summary.get(nested_key, {})
-                if not isinstance(raw_counts, Mapping):
-                    continue
-                for state, count in raw_counts.items():
-                    counts[str(state)] += int(count)
-            result[nested_key] = dict(counts)
-
-        result["transition_matrix"] = _merge_nested_count_dicts(
-            source_summaries,
-            "transition_matrix",
-        )
-        result["assignment_by_state"] = _merge_assignment_summary_dicts(
-            source_summaries,
-            "assignment_by_state",
-        )
-        result["assignment_by_transition"] = _merge_assignment_summary_dicts(
-            source_summaries,
-            "assignment_by_transition",
-        )
-
-        mining_counts: defaultdict[str, int] = defaultdict(int)
-        for summary in summaries:
-            raw_mining = summary.get("mining", {})
-            if not isinstance(raw_mining, Mapping):
-                continue
-            for key, value in raw_mining.items():
-                mining_counts[str(key)] += int(value)
-        result["mining"] = dict(mining_counts)
-        return result
-    if name == "dhmr":
-        border_counts: defaultdict[str, int] = defaultdict(int)
-        border_mean_keys: set[str] = set()
-        border_mean_sums: defaultdict[str, float] = defaultdict(float)
-        border_mean_count = 0
-        result["enabled"] = any(bool(summary.get("enabled", False)) for summary in summaries)
-        result["arch"] = next(
-            (summary.get("arch") for summary in summaries if summary.get("arch") is not None),
-            result.get("arch"),
-        )
-        result["current_epoch"] = max(int(summary.get("current_epoch", 0)) for summary in summaries)
-        for summary in summaries:
-            border_refinement = summary.get("border_refinement", {})
-            if isinstance(border_refinement, Mapping):
-                losses = int(border_refinement.get("losses", 0))
-                for key, value in border_refinement.items():
-                    key = str(key)
-                    if key in {"enabled", "active", "warmup_factor"} or key.startswith("mean_"):
-                        if key.startswith("mean_"):
-                            border_mean_keys.add(key)
-                        continue
-                    if isinstance(value, (int, float)):
-                        border_counts[key] += int(value)
-                if losses > 0:
-                    border_mean_count += losses
-                    for key, value in border_refinement.items():
-                        if str(key).startswith("mean_") and isinstance(value, (int, float)):
-                            border_mean_sums[str(key)] += float(value) * float(losses)
-        border_result = dict(border_counts)
-        border_result["enabled"] = any(
-            bool(summary.get("border_refinement", {}).get("enabled", False))
-            for summary in summaries
-            if isinstance(summary.get("border_refinement"), Mapping)
-        )
-        border_result["active"] = any(
-            bool(summary.get("border_refinement", {}).get("active", False))
-            for summary in summaries
-            if isinstance(summary.get("border_refinement"), Mapping)
-        )
-        border_result["warmup_factor"] = max(
-            float(summary.get("border_refinement", {}).get("warmup_factor", 0.0))
-            for summary in summaries
-            if isinstance(summary.get("border_refinement"), Mapping)
-        ) if any(isinstance(summary.get("border_refinement"), Mapping) for summary in summaries) else 0.0
-        if border_mean_count > 0:
-            for key, value in border_mean_sums.items():
-                border_result[key] = float(value) / float(border_mean_count)
-        else:
-            for key in border_mean_keys:
-                border_result[key] = 0.0
-        result["border_refinement"] = border_result
-        return result
-    return result
-
-
-def _merge_nested_count_dicts(
-    summaries: Sequence[Mapping[str, Any]],
-    key: str,
-) -> dict[str, dict[str, int]]:
-    merged: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for summary in summaries:
-        raw = summary.get(key, {})
-        if not isinstance(raw, Mapping):
-            continue
-        for outer_key, inner in raw.items():
-            if not isinstance(inner, Mapping):
-                continue
-            for inner_key, value in inner.items():
-                merged[str(outer_key)][str(inner_key)] += int(value)
-    return {
-        outer_key: dict(inner_counts)
-        for outer_key, inner_counts in merged.items()
-    }
-
-
-def _merge_assignment_summary_dicts(
-    summaries: Sequence[Mapping[str, Any]],
-    key: str,
-) -> dict[str, dict[str, Any]]:
-    buckets: dict[str, dict[str, Any]] = {}
-    for summary in summaries:
-        raw = summary.get(key, {})
-        if not isinstance(raw, Mapping):
-            continue
-        for group_key, group_value in raw.items():
-            if not isinstance(group_value, Mapping):
-                continue
-            count = int(group_value.get("records", 0))
-            if count <= 0:
-                continue
-            bucket = buckets.setdefault(
-                str(group_key),
-                {
-                    "records": 0,
-                    "level_pos_counts": defaultdict(int),
-                    "_weighted": defaultdict(float),
-                },
-            )
-            bucket["records"] += count
-            level_counts = group_value.get("level_pos_counts", {})
-            if isinstance(level_counts, Mapping):
-                for level, value in level_counts.items():
-                    bucket["level_pos_counts"][str(level)] += int(value)
-            weighted = bucket["_weighted"]
-            for metric, value in group_value.items():
-                if metric in {"records", "level_pos_counts"}:
-                    continue
-                if isinstance(value, (int, float)):
-                    weighted[str(metric)] += float(value) * float(count)
-
-    result: dict[str, dict[str, Any]] = {}
-    for group_key, bucket in buckets.items():
-        count = int(bucket.get("records", 0))
-        if count <= 0:
-            continue
-        group_result: dict[str, Any] = {
-            "records": count,
-            "level_pos_counts": dict(bucket.get("level_pos_counts", {})),
-        }
-        weighted = bucket.get("_weighted", {})
-        if isinstance(weighted, Mapping):
-            for metric, value in weighted.items():
-                group_result[str(metric)] = float(value) / float(count)
-        result[group_key] = group_result
-    return result
-
-
-def _merge_weighted_mean(
-    result: dict[str, Any],
-    summaries: Sequence[Mapping[str, Any]],
-    value_key: str,
-    weight_key: str,
-) -> None:
-    total_weight = sum(float(summary.get(weight_key, 0.0)) for summary in summaries)
-    if total_weight <= 0.0:
-        result[value_key] = 0.0
-        return
-    weighted = sum(
-        float(summary.get(value_key, 0.0)) * float(summary.get(weight_key, 0.0))
-        for summary in summaries
-    )
-    result[value_key] = weighted / total_weight
-
-
-def _synchronize_research_memory(
-    model: torch.nn.Module,
-    distributed: DistributedContext | None,
-) -> None:
-    if not is_distributed(distributed):
-        return
-    base_model = unwrap_model(model)
-    sync_specs = (
-        ("dhm", _merge_dhm_states),
-        ("dhmr", _merge_dhmr_states),
-    )
-    for attribute_name, merge_fn in sync_specs:
-        module = getattr(base_model, attribute_name, None)
-        if module is None:
-            continue
-        synchronize_extra_state(module, distributed, merge_fn)
-
-
-def _merge_dhm_states(states: list[Any]) -> dict[str, Any] | None:
-    valid = [state for state in states if isinstance(state, Mapping)]
-    if not valid:
-        return None
-    merged = dict(valid[0])
-    merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
-
-    records: dict[str, Mapping[str, Any]] = {}
-    stats: defaultdict[str, int] = defaultdict(int)
-    for state in valid:
-        raw_stats = state.get("stats", {})
-        if isinstance(raw_stats, Mapping):
-            for key, value in raw_stats.items():
-                stats[str(key)] += int(value)
-
-        raw_records = state.get("records", {})
-        if not isinstance(raw_records, Mapping):
-            continue
-        for gt_uid, raw_record in raw_records.items():
-            if not isinstance(raw_record, Mapping):
-                continue
-            key = str(gt_uid)
-            current = records.get(key)
-            candidate = dict(raw_record)
-            if current is None:
-                records[key] = candidate
-                continue
-            records[key] = _merge_dhm_record(current, candidate)
-
-    merged["records"] = records
-    merged["stats"] = dict(stats)
-    return merged
-
-
-def _merge_dhmr_states(states: list[Any]) -> dict[str, Any] | None:
-    valid = [state for state in states if isinstance(state, Mapping)]
-    if not valid:
-        return None
-    merged = dict(valid[0])
-    merged["current_epoch"] = max(int(state.get("current_epoch", 0)) for state in valid)
-    return merged
-
-
-def _merge_dhm_record(
-    left: Mapping[str, Any],
-    right: Mapping[str, Any],
-) -> dict[str, Any]:
-    left_priority = _dhm_record_priority(left)
-    right_priority = _dhm_record_priority(right)
-    selected = dict(left if left_priority >= right_priority else right)
-    assignment_source = _select_dhm_assignment_record(left, right)
-    for field_name in (
-        "assignment_seen",
-        "last_assignment_epoch",
-        "last_pos_count",
-        "zero_pos_count",
-        "last_level_pos_counts",
-        "level_pos_counts",
-        "last_near_candidate_count",
-        "last_near_negative_count",
-        "last_ambiguous_assigned_elsewhere",
-        "ema_pos_count",
-        "ema_center_dist",
-        "ema_centerness_target",
-        "ema_cls_loss",
-        "ema_box_loss",
-        "ema_ctr_loss",
-        "ema_near_negative_count",
-        "ema_near_negative_ratio",
-        "ema_ambiguous_assigned_elsewhere",
-        "ema_ambiguous_ratio",
-    ):
-        if field_name in assignment_source:
-            selected[field_name] = assignment_source[field_name]
-    return selected
-
-
-def _select_dhm_assignment_record(
-    left: Mapping[str, Any],
-    right: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    left_priority = (
-        float(left.get("last_assignment_epoch") or 0),
-        float(left.get("assignment_seen", 0)),
-    )
-    right_priority = (
-        float(right.get("last_assignment_epoch") or 0),
-        float(right.get("assignment_seen", 0)),
-    )
-    return left if left_priority >= right_priority else right
-
-
-def _dhm_record_priority(record: Mapping[str, Any]) -> tuple[float, ...]:
-    return (
-        float(record.get("last_seen_epoch") or 0),
-        float(record.get("instability_score", 0.0)),
-        float(record.get("forgetting_count", 0)),
-        float(record.get("fn_count", 0)),
-        float(record.get("max_fn_streak", 0)),
-        float(record.get("state_change_count", 0)),
-    )
 
 
 def _set_data_loader_epoch(data_loader, epoch: int) -> None:
@@ -1000,6 +672,190 @@ def _move_target_to_device(
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in target.items()
     }
+
+
+def _set_missbank_epoch(model: torch.nn.Module, epoch: int) -> None:
+    missbank = _get_missbank(model)
+    if missbank is None:
+        return
+    start_epoch = getattr(missbank, "start_epoch", None)
+    if callable(start_epoch):
+        start_epoch(int(epoch))
+
+
+def _accumulate_model_train_metrics(
+    *,
+    model: torch.nn.Module,
+    metric_sums: defaultdict[str, float],
+    metric_counts: defaultdict[str, int],
+) -> None:
+    get_metrics = getattr(unwrap_model(model), "get_training_metrics", None)
+    if not callable(get_metrics):
+        return
+    metrics = get_metrics()
+    if not isinstance(metrics, Mapping):
+        return
+    for name, value in metrics.items():
+        if not isinstance(value, (int, float)):
+            continue
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            continue
+        metric_sums[str(name)] += numeric
+        metric_counts[str(name)] += 1
+
+
+def _update_missbank_for_batch(
+    *,
+    model: torch.nn.Module,
+    images: list[torch.Tensor],
+    targets: list[dict[str, torch.Tensor]],
+    device: torch.device,
+    amp: bool,
+    epoch: int,
+    step: int,
+) -> None:
+    missbank = _get_missbank(model)
+    if not _missbank_enabled(missbank):
+        return
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad(), torch.autocast(
+            device_type=device.type,
+            enabled=amp and device.type == "cuda",
+        ):
+            detections = model(images)
+    finally:
+        if was_training:
+            model.train()
+
+    update = getattr(missbank, "update", None)
+    if callable(update):
+        update(
+            targets=targets,
+            detections=detections,
+            epoch=int(epoch),
+            step=int(step),
+        )
+
+
+def _collect_missbank_epoch_snapshot(
+    *,
+    model: torch.nn.Module,
+    epoch: int,
+    distributed: DistributedContext | None,
+) -> dict[str, Any] | None:
+    missbank = _get_missbank(model)
+    snapshot = None
+    if _missbank_enabled(missbank):
+        epoch_snapshot = getattr(missbank, "epoch_snapshot", None)
+        if callable(epoch_snapshot):
+            snapshot = epoch_snapshot(epoch=int(epoch))
+    gathered = all_gather_object(snapshot, distributed)
+    return merge_missbank_epoch_snapshots(gathered)
+
+
+def _get_missbank(model: torch.nn.Module):
+    return getattr(unwrap_model(model), "missbank", None)
+
+
+def _missbank_enabled(missbank: Any) -> bool:
+    if missbank is None:
+        return False
+    config = getattr(missbank, "config", None)
+    return bool(getattr(config, "enabled", False))
+
+
+def _write_missbank_stability_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> None:
+    remiss_dir = output_dir / "remiss"
+    _write_json(remiss_dir / "miss_stability_epoch.json", history)
+    _write_history_csv(remiss_dir / "miss_stability_epoch.csv", history)
+    _write_json(remiss_dir / "miss_stability_state.json", {"snapshot": snapshot})
+
+
+def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
+    primary_path = remiss_dir / "miss_stability_epoch.json"
+    if primary_path.is_file():
+        return _read_json_list(primary_path)
+    return _read_json_list(remiss_dir / "miss_stability.json")
+
+
+def _read_json_list(path: str | Path) -> list[dict[str, Any]]:
+    json_path = Path(path)
+    if not json_path.is_file():
+        return []
+    with open(json_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise TypeError(f"Expected a JSON list in {json_path}.")
+    return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+
+def _read_missbank_stability_state(path: str | Path) -> dict[str, Any] | None:
+    json_path = Path(path)
+    if not json_path.is_file():
+        return None
+    with open(json_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping):
+        return None
+    snapshot = payload.get("snapshot")
+    return dict(snapshot) if isinstance(snapshot, Mapping) else None
+
+
+def _write_history_outputs(output_dir: Path, history: list[dict[str, Any]]) -> None:
+    _write_json(output_dir / "history.json", history)
+    _write_history_csv(output_dir / "results.csv", history)
+
+
+def _write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
+    rows = [_flatten_history_record(record) for record in history]
+    if not rows:
+        return
+    fieldnames = _history_csv_fieldnames(rows)
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _csv_value(row.get(key)) for key in fieldnames})
+
+
+def _flatten_history_record(
+    record: Mapping[str, Any],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, value in record.items():
+        flat_key = f"{prefix}_{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            flattened.update(_flatten_history_record(value, prefix=flat_key))
+        else:
+            flattened[flat_key] = value
+    return flattened
+
+
+def _history_csv_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    keys = sorted({key for row in rows for key in row})
+    if "epoch" in keys:
+        keys.remove("epoch")
+        return ["epoch", *keys]
+    return keys
+
+
+def _csv_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _write_json(path: str | Path, payload: Any) -> None:
@@ -1043,139 +899,3 @@ def _format_eta(seconds: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
-
-
-def _call_model_hook(
-    model: torch.nn.Module,
-    attribute_name: str,
-    hook_name: str,
-    *args,
-) -> None:
-    model = unwrap_model(model)
-    attribute = getattr(model, attribute_name, None)
-    if attribute is None:
-        return
-    hook = getattr(attribute, hook_name, None)
-    if callable(hook):
-        hook(*args)
-
-
-def _is_optional_research_key(key: str) -> bool:
-    return (
-        key == "dhm._extra_state"
-        or key == "dhmr._extra_state"
-        or key.startswith("dhm.")
-        or key.startswith("dhmr.")
-    )
-
-
-def _get_module_summary(
-    model: torch.nn.Module,
-    attribute_name: str,
-) -> dict[str, Any] | None:
-    model = unwrap_model(model)
-    module = getattr(model, attribute_name, None)
-    if module is None:
-        return None
-    summary = getattr(module, "summary", None)
-    if not callable(summary):
-        return None
-    return summary()
-
-
-def _refresh_hard_replay(
-    train_loader,
-    model: torch.nn.Module,
-    epoch: int,
-) -> None:
-    controller = getattr(train_loader, "hard_replay", None)
-    if controller is None:
-        return
-    start_epoch = getattr(controller, "start_epoch", None)
-    if not callable(start_epoch):
-        return
-    base_model = unwrap_model(model)
-    start_epoch(dhm=getattr(base_model, "dhm", None), epoch=epoch)
-
-
-def _get_hard_replay_summary(train_loader) -> dict[str, Any] | None:
-    controller = getattr(train_loader, "hard_replay", None)
-    if controller is None:
-        return None
-    summary = getattr(controller, "summary", None)
-    if not callable(summary):
-        return None
-    value = summary()
-    return dict(value) if isinstance(value, Mapping) else None
-
-
-def _run_dhm_epoch_mining(
-    *,
-    model: torch.nn.Module,
-    runtime_config: dict[str, Any],
-    device: torch.device,
-    amp: bool,
-    log_interval: int,
-    epoch: int,
-    total_epochs: int,
-    distributed: DistributedContext | None,
-) -> None:
-    base_model = unwrap_model(model)
-    dhm = getattr(base_model, "dhm", None)
-    should_mine = getattr(dhm, "should_mine", None)
-    if dhm is None or not callable(should_mine) or not bool(should_mine(epoch=epoch)):
-        barrier(distributed)
-        return
-
-    if not is_main_process(distributed):
-        barrier(distributed)
-        return
-
-    hook = getattr(base_model, "mine_dhm_batch", None)
-    if not callable(hook):
-        barrier(distributed)
-        return
-
-    mining_loader = build_train_mining_dataloader(runtime_config)
-    start_time = time.perf_counter()
-    total_batches = len(mining_loader)
-    total_gt = 0
-    total_fn = 0
-    total_relapses = 0
-    total_recoveries = 0
-    total_state_changes = 0
-    was_training = base_model.training
-    try:
-        base_model.eval()
-        for step, (images, targets) in enumerate(mining_loader, start=1):
-            images = [image.to(device) for image in images]
-            targets = [_move_target_to_device(target, device) for target in targets]
-            total_gt += sum(int(target["boxes"].shape[0]) for target in targets)
-            with torch.no_grad(), torch.autocast(
-                device_type=device.type,
-                enabled=amp and device.type == "cuda",
-            ):
-                stats = hook(images, targets, epoch=epoch)
-            if isinstance(stats, Mapping):
-                total_fn += int(stats.get("num_fn", 0))
-                total_relapses += int(stats.get("relapses", 0))
-                total_recoveries += int(stats.get("recoveries", 0))
-                total_state_changes += int(stats.get("state_changes", 0))
-
-            should_log = log_interval > 0 and (step % log_interval == 0 or step == total_batches)
-            if should_log:
-                elapsed = time.perf_counter() - start_time
-                avg_step_time = elapsed / max(step, 1)
-                remaining_steps = max(total_batches - step, 0)
-                epoch_eta = _format_eta(avg_step_time * remaining_steps)
-                print(
-                    f"[dhm] epoch {epoch}/{total_epochs} "
-                    f"mining_step {step}/{total_batches} "
-                    f"epoch_eta={epoch_eta} fn={total_fn} "
-                    f"relapses={total_relapses} recoveries={total_recoveries} "
-                    f"state_changes={total_state_changes} gt={total_gt}"
-                )
-    finally:
-        if was_training:
-            base_model.train()
-    barrier(distributed)

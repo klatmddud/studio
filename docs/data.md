@@ -23,14 +23,8 @@ Required runtime config fields:
 
 - `CocoDetectionDataset`: loads images and COCO annotations.
 - `build_train_dataloaders()`: returns train and optional validation loaders.
-- `build_train_mining_dataloader()`: deterministic train-set loader used by DHM epoch-end mining.
-- `build_eval_dataloader()`: evaluation loader.
+- `build_eval_dataloader()`: returns the evaluation loader.
 - `collate_fn()`: returns `list[Tensor]` images and `list[dict]` targets for TorchVision detection models.
-
-When `train.hard_replay.enabled` is true, `build_train_dataloaders()` attaches a
-DHM-driven mixed replay batch sampler. The sampler keeps the configured batch size fixed by
-reserving replay slots according to `train.hard_replay.max_ratio`. Replay samples can be normal
-full-image replays or, when `loc_repair.enabled` is true, `FN_LOC` localization-repair crops.
 
 ## Target Fields
 
@@ -44,15 +38,7 @@ Each target dict contains:
 | `area` | `FloatTensor[N]` | COCO area |
 | `iscrowd` | `LongTensor[N]` | COCO crowd flag |
 | `annotation_ids` | `LongTensor[N]` | COCO annotation IDs, or `-1` when absent |
-| `gt_ids` | `LongTensor[N]` | Alias used by DHM/DHM-R for per-GT lookup |
-
-Localization-repair crop targets additionally contain:
-
-| Key | Type | Description |
-|---|---|---|
-| `is_replay_crop` | `LongTensor[]` | `1` for DHM-guided crop replay targets |
-| `replay_policy_id` | `LongTensor[]` | Numeric replay policy ID; `1` means localization crop |
-| `focus_gt_id` | `LongTensor[]` | Annotation ID of the focused FN_LOC GT, or `-1` |
+| `gt_ids` | `LongTensor[N]` | Alias for per-GT modules such as ReMiss MissBank |
 
 ## Dataset Selector
 

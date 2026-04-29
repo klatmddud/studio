@@ -5,11 +5,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-MODULE_CONFIG_KEYS = ("dhm", "dhmr")
+MODULE_CONFIG_KEYS = ("remiss",)
 
 DEFAULT_MODULE_CONFIG_PATHS = {
-    "dhm": PROJECT_ROOT / "modules" / "cfg" / "dhm.yaml",
-    "dhmr": PROJECT_ROOT / "modules" / "cfg" / "dhmr.yaml",
+    "remiss": PROJECT_ROOT / "modules" / "cfg" / "remiss.yaml",
 }
 
 

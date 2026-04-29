@@ -5,11 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modules.nn import (
-    load_dhm_config,
-    load_dhmr_config,
-    normalize_arch,
-)
+from modules.nn import load_remiss_config, normalize_arch
 
 from .config import load_yaml_file
 from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
@@ -17,13 +13,11 @@ from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_p
 MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
-    "dhm": load_dhm_config,
-    "dhmr": load_dhmr_config,
+    "remiss": load_remiss_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
-    "dhm": {"fcos"},
-    "dhmr": {"fcos"},
+    "remiss": {"fcos"},
 }
 
 
@@ -36,7 +30,7 @@ def collect_enabled_module_configs(
     paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
-    for name in ("dhm", "dhmr"):
+    for name in ("remiss",):
         supported_arches = _ARCH_SUPPORT[name]
         if supported_arches is not None and normalized_arch not in supported_arches:
             continue
