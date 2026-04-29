@@ -298,6 +298,15 @@ c_ij = image i의 missed GT j의 miss_count
 
 ## Logging
 
+MissHead의 평가 지표와 진단 통계는 detector의 기본 `results.csv`에 섞지 않고 ReMiss 전용 출력으로 저장한다.
+
+| 출력 파일 | 설명 |
+|---|---|
+| `remiss/miss_head_epoch.json` | epoch별 MissHead loss와 train metric이 누적되는 JSON list |
+| `remiss/miss_head_epoch.csv` | `miss_head_epoch.json`을 평탄화한 CSV |
+
+기본 `history.json`과 `results.csv`에는 detector train/validation metric만 남긴다. MissHead 관련 key는 `miss_head_*`, `missed_object_*` prefix를 기준으로 분리한다.
+
 MissHead는 평가 지표 외에도 다음 진단 통계를 기록하는 것이 좋다.
 
 | 통계 | 설명 |

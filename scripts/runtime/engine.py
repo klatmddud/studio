@@ -86,6 +86,7 @@ def fit(
 
     history: list[dict[str, Any]] = []
     missbank_stability_history: list[dict[str, Any]] = []
+    misshead_metric_history: list[dict[str, Any]] = []
     previous_missbank_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
@@ -107,6 +108,9 @@ def fit(
     if main_process:
         if resume_path:
             missbank_stability_history = _read_missbank_stability_history(
+                output_dir / "remiss",
+            )
+            misshead_metric_history = _read_misshead_metric_history(
                 output_dir / "remiss",
             )
             previous_missbank_snapshot = _read_missbank_stability_state(
@@ -148,6 +152,7 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
+        train_metrics, misshead_metrics = _split_misshead_train_metrics(train_metrics)
         _run_missbank_offline_mining(
             model=model,
             data_loader=train_loader,
@@ -230,6 +235,17 @@ def fit(
             scheduler.step()
 
         if main_process:
+            if misshead_metrics:
+                misshead_metric_history.append(
+                    {
+                        "epoch": epoch + 1,
+                        **misshead_metrics,
+                    }
+                )
+                _write_misshead_metric_outputs(
+                    output_dir=output_dir,
+                    history=misshead_metric_history,
+                )
             history.append(record)
             _write_history_outputs(output_dir, history)
 
@@ -858,6 +874,23 @@ def _missbank_mining_type(missbank: Any) -> str:
     return str(getattr(mining, "type", "online")).lower()
 
 
+def _split_misshead_train_metrics(
+    metrics: Mapping[str, float],
+) -> tuple[dict[str, float], dict[str, float]]:
+    train_metrics: dict[str, float] = {}
+    misshead_metrics: dict[str, float] = {}
+    for key, value in metrics.items():
+        if _is_misshead_metric_key(str(key)):
+            misshead_metrics[str(key)] = float(value)
+        else:
+            train_metrics[str(key)] = float(value)
+    return train_metrics, misshead_metrics
+
+
+def _is_misshead_metric_key(key: str) -> bool:
+    return key.startswith("miss_head_") or key.startswith("missed_object_")
+
+
 def _write_missbank_stability_outputs(
     *,
     output_dir: Path,
@@ -870,11 +903,25 @@ def _write_missbank_stability_outputs(
     _write_json(remiss_dir / "miss_stability_state.json", {"snapshot": snapshot})
 
 
+def _write_misshead_metric_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+) -> None:
+    remiss_dir = output_dir / "remiss"
+    _write_json(remiss_dir / "miss_head_epoch.json", history)
+    _write_history_csv(remiss_dir / "miss_head_epoch.csv", history)
+
+
 def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
     primary_path = remiss_dir / "miss_stability_epoch.json"
     if primary_path.is_file():
         return _read_json_list(primary_path)
     return _read_json_list(remiss_dir / "miss_stability.json")
+
+
+def _read_misshead_metric_history(remiss_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(remiss_dir / "miss_head_epoch.json")
 
 
 def _read_json_list(path: str | Path) -> list[dict[str, Any]]:

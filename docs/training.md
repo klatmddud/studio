@@ -77,6 +77,8 @@ Common outputs under `output_dir`:
 | `remiss/miss_stability_epoch.json` | Epoch-level MissBank stability metrics accumulated as a JSON list |
 | `remiss/miss_stability_epoch.csv` | Flattened CSV view of `miss_stability_epoch.json` |
 | `remiss/miss_stability_state.json` | Last MissBank snapshot used for next-epoch comparison |
+| `remiss/miss_head_epoch.json` | Epoch-level MissHead train loss and metrics accumulated separately from `history.json` |
+| `remiss/miss_head_epoch.csv` | Flattened CSV view of `miss_head_epoch.json` |
 | `best_val_metrics.json` | Best-checkpoint validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |
