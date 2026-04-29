@@ -255,8 +255,8 @@ MissBank 관련 주요 설정은 다음과 같다.
 | `enabled` | `false` | MissBank 사용 여부 |
 | `grid_size` | `2` | spatial grid 크기 |
 | `target.miss_threshold` | `2` | target GT로 사용할 최소 연속 미검출 횟수 |
-| `matching.score_threshold` | `0.05` | 최종 검출 score threshold |
-| `matching.iou_threshold` | `0.5` | GT 검출 여부 판정 IoU |
+| `matching.score_threshold` | `auto` | detector의 최종 검출 score threshold를 사용한다. FCOS에서는 `head.score_thresh`로 resolve된다. |
+| `matching.iou_threshold` | `auto` | detector의 최종 post-processing IoU threshold를 사용한다. FCOS에서는 `head.nms_thresh`로 resolve된다. |
 | `start_epoch` | 실험 설정 | region loss와 injection 시작 epoch |
 | `max_records` | `None` | memory record 상한, 대규모 dataset에서 사용 |
 

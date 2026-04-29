@@ -7,8 +7,8 @@ mining:
   type: online
 
 matching:
-  score_threshold: 0.05
-  iou_threshold: 0.5
+  score_threshold: auto
+  iou_threshold: auto
 
 target:
   miss_threshold: 2

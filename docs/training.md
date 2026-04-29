@@ -44,7 +44,7 @@ bash scripts/bash/baseline/train.bash
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. When `miss_head.enabled` is true, FCOS training also adds the auxiliary `miss_head_ce` loss after `miss_head.start_epoch`. Prototype injection is not yet wired.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve MissBank matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. When `miss_head.enabled` is true, FCOS training also adds the auxiliary `miss_head_ce` loss after `miss_head.start_epoch`. Prototype injection is not yet wired.
 
 | CLI flag | Default path |
 |---|---|

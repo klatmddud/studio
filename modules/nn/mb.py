@@ -4,7 +4,7 @@ import hashlib
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +18,8 @@ from .common import normalize_arch
 
 @dataclass(frozen=True, slots=True)
 class MissBankMatchingConfig:
-    score_threshold: float = 0.05
-    iou_threshold: float = 0.5
+    score_threshold: float | str = 0.2
+    iou_threshold: float | str = 0.5
 
     @classmethod
     def from_mapping(
@@ -28,17 +28,21 @@ class MissBankMatchingConfig:
     ) -> "MissBankMatchingConfig":
         data = dict(raw or {})
         config = cls(
-            score_threshold=float(data.get("score_threshold", 0.05)),
-            iou_threshold=float(data.get("iou_threshold", 0.5)),
+            score_threshold=_parse_threshold(data.get("score_threshold", 0.2)),
+            iou_threshold=_parse_threshold(data.get("iou_threshold", 0.5)),
         )
         config.validate()
         return config
 
     def validate(self) -> None:
-        if not 0.0 <= float(self.score_threshold) <= 1.0:
-            raise ValueError("MissBank matching.score_threshold must satisfy 0 <= value <= 1.")
-        if not 0.0 <= float(self.iou_threshold) <= 1.0:
-            raise ValueError("MissBank matching.iou_threshold must satisfy 0 <= value <= 1.")
+        if _is_auto_threshold(self.score_threshold):
+            pass
+        elif not 0.0 <= float(self.score_threshold) <= 1.0:
+            raise ValueError("MissBank matching.score_threshold must be 'auto' or satisfy 0 <= value <= 1.")
+        if _is_auto_threshold(self.iou_threshold):
+            pass
+        elif not 0.0 <= float(self.iou_threshold) <= 1.0:
+            raise ValueError("MissBank matching.iou_threshold must be 'auto' or satisfy 0 <= value <= 1.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +170,39 @@ class MissBankConfig:
         if self.max_records is not None and int(self.max_records) < 1:
             raise ValueError("MissBank max_records must be null or >= 1.")
 
+    def resolve_detector_thresholds(
+        self,
+        *,
+        detector_score_threshold: float | None,
+        detector_iou_threshold: float | None,
+    ) -> "MissBankConfig":
+        score_threshold = self.matching.score_threshold
+        iou_threshold = self.matching.iou_threshold
+        if _is_auto_threshold(score_threshold):
+            if detector_score_threshold is None:
+                raise ValueError(
+                    "MissBank matching.score_threshold='auto' requires the detector final score threshold."
+                )
+            score_threshold = float(detector_score_threshold)
+        if _is_auto_threshold(iou_threshold):
+            if detector_iou_threshold is None:
+                raise ValueError(
+                    "MissBank matching.iou_threshold='auto' requires the detector final IoU threshold."
+                )
+            iou_threshold = float(detector_iou_threshold)
+        if (
+            score_threshold == self.matching.score_threshold
+            and iou_threshold == self.matching.iou_threshold
+        ):
+            return self
+        matching = replace(
+            self.matching,
+            score_threshold=score_threshold,
+            iou_threshold=iou_threshold,
+        )
+        matching.validate()
+        return replace(self, matching=matching)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
@@ -283,6 +320,13 @@ class MissBank(nn.Module):
             if isinstance(config, MissBankConfig)
             else MissBankConfig.from_mapping(config or {})
         )
+        if (
+            _is_auto_threshold(self.config.matching.score_threshold)
+            or _is_auto_threshold(self.config.matching.iou_threshold)
+        ):
+            raise ValueError(
+                "MissBank matching auto thresholds must be resolved before constructing MissBank."
+            )
         self.current_epoch = 0
         self._records: dict[str, MissBankRecord] = {}
         self._image_index: dict[str, set[str]] = defaultdict(set)
@@ -679,10 +723,16 @@ def build_missbank_from_config(
     raw_config: Mapping[str, Any] | MissBankConfig,
     *,
     arch: str | None = None,
+    detector_score_threshold: float | None = None,
+    detector_iou_threshold: float | None = None,
 ) -> MissBank | None:
     config = raw_config if isinstance(raw_config, MissBankConfig) else MissBankConfig.from_mapping(raw_config, arch=arch)
     if not config.enabled:
         return None
+    config = config.resolve_detector_thresholds(
+        detector_score_threshold=detector_score_threshold,
+        detector_iou_threshold=detector_iou_threshold,
+    )
     return MissBank(config)
 
 
@@ -690,10 +740,16 @@ def build_missbank_from_yaml(
     path: str | Path,
     *,
     arch: str | None = None,
+    detector_score_threshold: float | None = None,
+    detector_iou_threshold: float | None = None,
 ) -> MissBank | None:
     config = load_remiss_config(path, arch=arch)
     if not config.enabled:
         return None
+    config = config.resolve_detector_thresholds(
+        detector_score_threshold=detector_score_threshold,
+        detector_iou_threshold=detector_iou_threshold,
+    )
     return MissBank(config)
 
 
@@ -866,6 +922,16 @@ def _match_gt(
         "iou": float(ious[best_index].item()),
         "score": float(pred_scores[best_index].item()),
     }
+
+
+def _parse_threshold(value: Any) -> float | str:
+    if isinstance(value, str) and value.lower() == "auto":
+        return "auto"
+    return float(value)
+
+
+def _is_auto_threshold(value: Any) -> bool:
+    return isinstance(value, str) and value.lower() == "auto"
 
 
 def _region_id_for_box(

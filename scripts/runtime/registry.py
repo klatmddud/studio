@@ -52,6 +52,7 @@ def build_model_from_config(
     model = builder(model_config)
     _attach_remiss_modules(
         model,
+        model_config=model_config,
         arch=normalized_arch,
         module_config_paths=module_config_paths,
     )
@@ -83,6 +84,7 @@ def build_model_from_path(
 def _attach_remiss_modules(
     model: nn.Module,
     *,
+    model_config: dict[str, Any],
     arch: str,
     module_config_paths: dict[str, str | Path] | None,
 ) -> None:
@@ -93,7 +95,13 @@ def _attach_remiss_modules(
     remiss_path = module_config_paths.get("remiss")
     if remiss_path is None:
         return
-    missbank = build_missbank_from_yaml(remiss_path, arch=arch)
+    detector_thresholds = _detector_thresholds(model_config, arch=arch)
+    missbank = build_missbank_from_yaml(
+        remiss_path,
+        arch=arch,
+        detector_score_threshold=detector_thresholds.get("score"),
+        detector_iou_threshold=detector_thresholds.get("iou"),
+    )
     misshead = build_misshead_from_yaml(
         remiss_path,
         arch=arch,
@@ -108,3 +116,19 @@ def _attach_remiss_modules(
     model.missbank = missbank
     if misshead is not None:
         model.miss_head = misshead
+
+
+def _detector_thresholds(
+    model_config: Mapping[str, Any],
+    *,
+    arch: str,
+) -> dict[str, float | None]:
+    if arch == "fcos":
+        head = model_config.get("head", {})
+        if isinstance(head, Mapping):
+            return {
+                "score": float(head.get("score_thresh", 0.2)),
+                "iou": float(head.get("nms_thresh", 0.6)),
+            }
+        return {"score": 0.2, "iou": 0.6}
+    return {"score": None, "iou": None}
