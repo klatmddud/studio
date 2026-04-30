@@ -5,12 +5,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-MODULE_CONFIG_KEYS = ("remiss", "remiss_conv", "mpd")
+MODULE_CONFIG_KEYS = ("remiss",)
 
 DEFAULT_MODULE_CONFIG_PATHS = {
     "remiss": PROJECT_ROOT / "modules" / "cfg" / "remiss.yaml",
-    "remiss_conv": PROJECT_ROOT / "modules" / "cfg" / "remiss_conv.yaml",
-    "mpd": PROJECT_ROOT / "modules" / "cfg" / "mpd.yaml",
 }
 
 

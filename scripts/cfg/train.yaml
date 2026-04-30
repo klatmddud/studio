@@ -38,6 +38,7 @@ checkpoint:
   resume: null
   save_last: true
   save_best: true
+  save_every_epochs: 20
   monitor: bbox_mAP_50_95
   mode: max
 

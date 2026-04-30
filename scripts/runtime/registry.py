@@ -7,12 +7,7 @@ from typing import Any
 import torch.nn as nn
 
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
-from modules.nn import (
-    build_missbank_from_yaml,
-    build_misshead_from_yaml,
-    build_mpd_from_yaml,
-    build_remiss_conv_from_yaml,
-)
+from modules.nn import build_missbank_from_yaml
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
@@ -57,18 +52,6 @@ def build_model_from_config(
         )
     model = builder(model_config)
     _attach_remiss_modules(
-        model,
-        model_config=model_config,
-        arch=normalized_arch,
-        module_config_paths=module_config_paths,
-    )
-    _attach_remiss_conv_modules(
-        model,
-        model_config=model_config,
-        arch=normalized_arch,
-        module_config_paths=module_config_paths,
-    )
-    _attach_mpd_modules(
         model,
         model_config=model_config,
         arch=normalized_arch,
@@ -120,92 +103,9 @@ def _attach_remiss_modules(
         detector_score_threshold=detector_thresholds.get("score"),
         detector_iou_threshold=detector_thresholds.get("iou"),
     )
-    misshead = build_misshead_from_yaml(
-        remiss_path,
-        arch=arch,
-        remiss_enabled=missbank is not None,
-    )
     if missbank is None:
-        if misshead is not None:
-            raise ValueError("MissHead requires MissBank to be enabled.")
         return
-    if misshead is not None and int(misshead.config.grid_size) != int(missbank.config.grid_size):
-        raise ValueError("MissHead grid_size must match MissBank grid_size.")
     model.missbank = missbank
-    if misshead is not None:
-        model.miss_head = misshead
-
-
-def _attach_remiss_conv_modules(
-    model: nn.Module,
-    *,
-    model_config: dict[str, Any],
-    arch: str,
-    module_config_paths: dict[str, str | Path] | None,
-) -> None:
-    if arch != "fcos":
-        return
-    if not module_config_paths:
-        return
-    remiss_conv_path = module_config_paths.get("remiss_conv")
-    if remiss_conv_path is None:
-        return
-    detector_thresholds = _detector_thresholds(model_config, arch=arch)
-    remiss_conv_bank = build_missbank_from_yaml(
-        remiss_conv_path,
-        arch=arch,
-        detector_score_threshold=detector_thresholds.get("score"),
-        detector_iou_threshold=detector_thresholds.get("iou"),
-    )
-    remiss_conv = build_remiss_conv_from_yaml(
-        remiss_conv_path,
-        arch=arch,
-        remiss_enabled=remiss_conv_bank is not None,
-    )
-    if remiss_conv_bank is None:
-        if remiss_conv is not None:
-            raise ValueError("ReMissConv requires its MissBank to be enabled.")
-        return
-    if remiss_conv is not None and int(remiss_conv.config.grid_size) != int(remiss_conv_bank.config.grid_size):
-        raise ValueError("ReMissConv grid_size must match its MissBank grid_size.")
-    model.remiss_conv_bank = remiss_conv_bank
-    if remiss_conv is not None:
-        model.remiss_conv = remiss_conv
-
-
-def _attach_mpd_modules(
-    model: nn.Module,
-    *,
-    model_config: dict[str, Any],
-    arch: str,
-    module_config_paths: dict[str, str | Path] | None,
-) -> None:
-    if arch != "fcos":
-        return
-    if not module_config_paths:
-        return
-    mpd_path = module_config_paths.get("mpd")
-    if mpd_path is None:
-        return
-    detector_thresholds = _detector_thresholds(model_config, arch=arch)
-    mpd_bank = build_missbank_from_yaml(
-        mpd_path,
-        arch=arch,
-        detector_score_threshold=detector_thresholds.get("score"),
-        detector_iou_threshold=detector_thresholds.get("iou"),
-    )
-    mpd = build_mpd_from_yaml(
-        mpd_path,
-        arch=arch,
-        missbank_enabled=mpd_bank is not None,
-    )
-    if mpd_bank is None:
-        if mpd is not None:
-            raise ValueError("MPD requires its MissBank to be enabled.")
-        return
-    model.mpd_bank = mpd_bank
-    if mpd is not None:
-        model.mpd = mpd
 
 
 def _detector_thresholds(

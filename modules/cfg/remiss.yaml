@@ -4,7 +4,7 @@ start_epoch: 1
 max_records: null
 
 mining:
-  type: online
+  type: offline
 
 matching:
   score_threshold: auto
@@ -13,26 +13,6 @@ matching:
 target:
   miss_threshold: 2
   aggregation: miss_count
-
-miss_head:
-  enabled: false
-  start_epoch: 1
-  grid_size: 2
-  in_channels: 256
-  hidden_dim: 256
-  num_layers: 2
-  dropout: 0.0
-  pooling: gap
-  level_aggregation: mean
-  loss_weight: 0.1
-  ignore_none_loss: false
-  none_loss_weight: 1.0
-  class_balanced_loss: false
-  has_miss_head: false
-  has_miss_loss_weight: 0.1
-  region_loss_weight: 0.1
-  has_miss_pos_weight: auto
-  has_miss_threshold: 0.5
 
 models:
   fcos: {}

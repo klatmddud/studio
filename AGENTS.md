@@ -1,6 +1,6 @@
 # AGENTS.md
 
-PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module work is centered on ReMiss and MPD.
+PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module work is centered on ReMiss MissBank.
 
 ## Quick Reference
 
@@ -9,7 +9,7 @@ PyTorch object detection training framework supporting FCOS, Faster R-CNN, and D
 | Project layout, entry points, tech stack | [docs/architecture.md](docs/architecture.md) |
 | Training config, engine, checkpointing | [docs/training.md](docs/training.md) |
 | Model architectures and wrappers | [docs/models.md](docs/models.md) |
-| Research modules (ReMiss, MPD) | [docs/modules.md](docs/modules.md) |
+| Research modules (ReMiss) | [docs/modules.md](docs/modules.md) |
 | Dataset format, DataLoader, env vars | [docs/data.md](docs/data.md) |
 
 ## Common Commands
@@ -22,8 +22,6 @@ uv sync
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --seed 42 --device cuda:0 cuda:1
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --remiss-config modules/cfg/remiss.yaml
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --remiss-conv-config modules/cfg/remiss_conv.yaml
-uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti --mpd-config modules/cfg/mpd.yaml
 bash scripts/bash/baseline/train.bash
 
 # Evaluate

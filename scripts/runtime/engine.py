@@ -86,14 +86,7 @@ def fit(
 
     history: list[dict[str, Any]] = []
     missbank_stability_history: list[dict[str, Any]] = []
-    misshead_metric_history: list[dict[str, Any]] = []
-    remiss_conv_stability_history: list[dict[str, Any]] = []
-    remiss_conv_metric_history: list[dict[str, Any]] = []
-    mpd_stability_history: list[dict[str, Any]] = []
-    mpd_metric_history: list[dict[str, Any]] = []
     previous_missbank_snapshot: dict[str, Any] | None = None
-    previous_remiss_conv_snapshot: dict[str, Any] | None = None
-    previous_mpd_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
 
@@ -116,29 +109,8 @@ def fit(
             missbank_stability_history = _read_missbank_stability_history(
                 output_dir / "remiss",
             )
-            misshead_metric_history = _read_misshead_metric_history(
-                output_dir / "remiss",
-            )
             previous_missbank_snapshot = _read_missbank_stability_state(
                 output_dir / "remiss" / "miss_stability_state.json"
-            )
-            remiss_conv_stability_history = _read_missbank_stability_history(
-                output_dir / "remiss_conv",
-            )
-            remiss_conv_metric_history = _read_remiss_conv_metric_history(
-                output_dir / "remiss_conv",
-            )
-            previous_remiss_conv_snapshot = _read_missbank_stability_state(
-                output_dir / "remiss_conv" / "miss_stability_state.json"
-            )
-            mpd_stability_history = _read_missbank_stability_history(
-                output_dir / "mpd",
-            )
-            mpd_metric_history = _read_mpd_metric_history(
-                output_dir / "mpd",
-            )
-            previous_mpd_snapshot = _read_missbank_stability_state(
-                output_dir / "mpd" / "miss_stability_state.json"
             )
         persist_run_metadata(
             output_dir=output_dir,
@@ -176,7 +148,6 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
-        train_metrics, misshead_metrics, remiss_conv_metrics, mpd_metrics = _split_auxiliary_train_metrics(train_metrics)
         _run_missbank_offline_mining(
             model=model,
             data_loader=train_loader,
@@ -191,7 +162,6 @@ def fit(
             model=model,
             epoch=epoch + 1,
             distributed=distributed,
-            bank_attr="missbank",
         )
         if main_process and current_missbank_snapshot is not None:
             missbank_metrics = compute_missbank_stability_metrics(
@@ -207,46 +177,6 @@ def fit(
                 snapshot=current_missbank_snapshot,
             )
             previous_missbank_snapshot = current_missbank_snapshot
-        current_remiss_conv_snapshot = _collect_missbank_epoch_snapshot(
-            model=model,
-            epoch=epoch + 1,
-            distributed=distributed,
-            bank_attr="remiss_conv_bank",
-        )
-        if main_process and current_remiss_conv_snapshot is not None:
-            remiss_conv_stability_metrics = compute_missbank_stability_metrics(
-                current_remiss_conv_snapshot,
-                previous_snapshot=previous_remiss_conv_snapshot,
-                hotspot_top_k=int(current_remiss_conv_snapshot.get("hotspot_top_k", 10)),
-            )
-            remiss_conv_stability_history.append(remiss_conv_stability_metrics)
-            _write_missbank_stability_outputs(
-                output_dir=output_dir,
-                subdir="remiss_conv",
-                history=remiss_conv_stability_history,
-                snapshot=current_remiss_conv_snapshot,
-            )
-            previous_remiss_conv_snapshot = current_remiss_conv_snapshot
-        current_mpd_snapshot = _collect_missbank_epoch_snapshot(
-            model=model,
-            epoch=epoch + 1,
-            distributed=distributed,
-            bank_attr="mpd_bank",
-        )
-        if main_process and current_mpd_snapshot is not None:
-            mpd_stability_metrics = compute_missbank_stability_metrics(
-                current_mpd_snapshot,
-                previous_snapshot=previous_mpd_snapshot,
-                hotspot_top_k=int(current_mpd_snapshot.get("hotspot_top_k", 10)),
-            )
-            mpd_stability_history.append(mpd_stability_metrics)
-            _write_missbank_stability_outputs(
-                output_dir=output_dir,
-                subdir="mpd",
-                history=mpd_stability_history,
-                snapshot=current_mpd_snapshot,
-            )
-            previous_mpd_snapshot = current_mpd_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -296,44 +226,25 @@ def fit(
                 epoch=epoch + 1,
                 best_metric=best_metric,
             )
+        save_every_epochs = runtime_config["checkpoint"].get("save_every_epochs")
+        if (
+            main_process
+            and save_every_epochs is not None
+            and (epoch + 1) % int(save_every_epochs) == 0
+        ):
+            save_checkpoint(
+                checkpoint_dir / f"epoch_{epoch + 1:04d}.pt",
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch + 1,
+                best_metric=best_metric,
+            )
 
         if scheduler is not None:
             scheduler.step()
 
         if main_process:
-            if misshead_metrics:
-                misshead_metric_history.append(
-                    {
-                        "epoch": epoch + 1,
-                        **misshead_metrics,
-                    }
-                )
-                _write_misshead_metric_outputs(
-                    output_dir=output_dir,
-                    history=misshead_metric_history,
-                )
-            if remiss_conv_metrics:
-                remiss_conv_metric_history.append(
-                    {
-                        "epoch": epoch + 1,
-                        **remiss_conv_metrics,
-                    }
-                )
-                _write_remiss_conv_metric_outputs(
-                    output_dir=output_dir,
-                    history=remiss_conv_metric_history,
-                )
-            if mpd_metrics:
-                mpd_metric_history.append(
-                    {
-                        "epoch": epoch + 1,
-                        **mpd_metrics,
-                    }
-                )
-                _write_mpd_metric_outputs(
-                    output_dir=output_dir,
-                    history=mpd_metric_history,
-                )
             history.append(record)
             _write_history_outputs(output_dir, history)
 
@@ -938,9 +849,8 @@ def _collect_missbank_epoch_snapshot(
     model: torch.nn.Module,
     epoch: int,
     distributed: DistributedContext | None,
-    bank_attr: str = "missbank",
 ) -> dict[str, Any] | None:
-    missbank = _get_missbank(model, attr=bank_attr)
+    missbank = _get_missbank(model)
     snapshot = None
     if _missbank_enabled(missbank):
         epoch_snapshot = getattr(missbank, "epoch_snapshot", None)
@@ -956,7 +866,7 @@ def _get_missbank(model: torch.nn.Module, *, attr: str = "missbank"):
 
 def _iter_missbanks(model: torch.nn.Module):
     unwrapped = unwrap_model(model)
-    for attr in ("missbank", "remiss_conv_bank", "mpd_bank"):
+    for attr in ("missbank",):
         missbank = getattr(unwrapped, attr, None)
         if missbank is not None:
             yield missbank
@@ -975,38 +885,6 @@ def _missbank_mining_type(missbank: Any) -> str:
     return str(getattr(mining, "type", "online")).lower()
 
 
-def _split_auxiliary_train_metrics(
-    metrics: Mapping[str, float],
-) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
-    train_metrics: dict[str, float] = {}
-    misshead_metrics: dict[str, float] = {}
-    remiss_conv_metrics: dict[str, float] = {}
-    mpd_metrics: dict[str, float] = {}
-    for key, value in metrics.items():
-        key = str(key)
-        if _is_mpd_metric_key(key):
-            mpd_metrics[key] = float(value)
-        elif _is_remiss_conv_metric_key(key):
-            remiss_conv_metrics[key] = float(value)
-        elif _is_misshead_metric_key(key):
-            misshead_metrics[str(key)] = float(value)
-        else:
-            train_metrics[key] = float(value)
-    return train_metrics, misshead_metrics, remiss_conv_metrics, mpd_metrics
-
-
-def _is_misshead_metric_key(key: str) -> bool:
-    return key.startswith("miss_head_") or key.startswith("missed_object_")
-
-
-def _is_remiss_conv_metric_key(key: str) -> bool:
-    return key.startswith("remiss_conv_")
-
-
-def _is_mpd_metric_key(key: str) -> bool:
-    return key.startswith("mpd_")
-
-
 def _write_missbank_stability_outputs(
     *,
     output_dir: Path,
@@ -1020,53 +898,11 @@ def _write_missbank_stability_outputs(
     _write_json(remiss_dir / "miss_stability_state.json", {"snapshot": snapshot})
 
 
-def _write_misshead_metric_outputs(
-    *,
-    output_dir: Path,
-    history: list[dict[str, Any]],
-) -> None:
-    remiss_dir = output_dir / "remiss"
-    _write_json(remiss_dir / "miss_head_epoch.json", history)
-    _write_history_csv(remiss_dir / "miss_head_epoch.csv", history)
-
-
-def _write_remiss_conv_metric_outputs(
-    *,
-    output_dir: Path,
-    history: list[dict[str, Any]],
-) -> None:
-    remiss_conv_dir = output_dir / "remiss_conv"
-    _write_json(remiss_conv_dir / "miss_map_epoch.json", history)
-    _write_history_csv(remiss_conv_dir / "miss_map_epoch.csv", history)
-
-
-def _write_mpd_metric_outputs(
-    *,
-    output_dir: Path,
-    history: list[dict[str, Any]],
-) -> None:
-    mpd_dir = output_dir / "mpd"
-    _write_json(mpd_dir / "mpd_epoch.json", history)
-    _write_history_csv(mpd_dir / "mpd_epoch.csv", history)
-
-
 def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
     primary_path = remiss_dir / "miss_stability_epoch.json"
     if primary_path.is_file():
         return _read_json_list(primary_path)
     return _read_json_list(remiss_dir / "miss_stability.json")
-
-
-def _read_misshead_metric_history(remiss_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(remiss_dir / "miss_head_epoch.json")
-
-
-def _read_remiss_conv_metric_history(remiss_conv_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(remiss_conv_dir / "miss_map_epoch.json")
-
-
-def _read_mpd_metric_history(mpd_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(mpd_dir / "mpd_epoch.json")
 
 
 def _read_json_list(path: str | Path) -> list[dict[str, Any]]:

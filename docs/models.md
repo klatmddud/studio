@@ -9,7 +9,7 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Single-stage anchor-free detector.
 - Uses TorchVision `FCOS` directly.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
-- Optional research modules can wrap the TorchVision forward path: MissHead adds auxiliary loss, ReMissConv modulates FPN features, and MPD modifies train-time matched GT indices before the original FCOS head loss.
+- Optional MissBank mining is attached outside the detector forward path and does not change FCOS losses or inference.
 
 ### Faster R-CNN (`fasterrcnn.py`)
 

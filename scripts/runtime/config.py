@@ -73,6 +73,7 @@ TRAIN_DEFAULTS: dict[str, Any] = {
         "resume": None,
         "save_last": True,
         "save_best": True,
+        "save_every_epochs": None,
         "monitor": "bbox_mAP_50_95",
         "mode": "max",
     },
@@ -279,6 +280,10 @@ def _validate_train_config(config: dict[str, Any]) -> None:
     if config["train"]["eval_every_epochs"] < 1:
         raise ValueError("train.eval_every_epochs must be >= 1.")
     checkpoint = config["checkpoint"]
+    save_every_epochs = checkpoint.get("save_every_epochs")
+    if save_every_epochs is not None:
+        if not isinstance(save_every_epochs, int) or save_every_epochs < 1:
+            raise ValueError("checkpoint.save_every_epochs must be null or an integer >= 1.")
     metrics = config["metrics"]
     if checkpoint["mode"] not in {"max", "min"}:
         raise ValueError("checkpoint.mode must be either 'max' or 'min'.")

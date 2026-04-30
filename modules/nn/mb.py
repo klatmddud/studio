@@ -230,6 +230,10 @@ class MissBankRecord:
     last_step: int = 0
     last_iou: float | None = None
     last_score: float | None = None
+    best_iou: float | None = None
+    best_iou_score: float | None = None
+    best_score: float | None = None
+    best_score_iou: float | None = None
     total_seen: int = 0
     total_missed: int = 0
     max_miss_count: int = 0
@@ -244,12 +248,20 @@ class MissBankRecord:
         step: int,
         matched_iou: float | None,
         matched_score: float | None,
+        best_iou: float | None,
+        best_iou_score: float | None,
+        best_score: float | None,
+        best_score_iou: float | None,
     ) -> None:
         self.bbox_xyxy = bbox_xyxy
         self.region_id = int(region_id)
         self.is_missed = bool(is_missed)
         self.last_epoch = int(epoch)
         self.last_step = int(step)
+        self.best_iou = None if best_iou is None else float(best_iou)
+        self.best_iou_score = None if best_iou_score is None else float(best_iou_score)
+        self.best_score = None if best_score is None else float(best_score)
+        self.best_score_iou = None if best_score_iou is None else float(best_score_iou)
         self.total_seen += 1
         if bool(is_missed):
             self.miss_count += 1
@@ -280,6 +292,10 @@ class MissBankRecord:
             "last_step": self.last_step,
             "last_iou": self.last_iou,
             "last_score": self.last_score,
+            "best_iou": self.best_iou,
+            "best_iou_score": self.best_iou_score,
+            "best_score": self.best_score,
+            "best_score_iou": self.best_score_iou,
             "total_seen": self.total_seen,
             "total_missed": self.total_missed,
             "max_miss_count": self.max_miss_count,
@@ -304,6 +320,10 @@ class MissBankRecord:
             last_step=int(state.get("last_step", 0)),
             last_iou=None if state.get("last_iou") is None else float(state.get("last_iou")),
             last_score=None if state.get("last_score") is None else float(state.get("last_score")),
+            best_iou=None if state.get("best_iou") is None else float(state.get("best_iou")),
+            best_iou_score=None if state.get("best_iou_score") is None else float(state.get("best_iou_score")),
+            best_score=None if state.get("best_score") is None else float(state.get("best_score")),
+            best_score_iou=None if state.get("best_score_iou") is None else float(state.get("best_score_iou")),
             total_seen=int(state.get("total_seen", 0)),
             total_missed=int(state.get("total_missed", 0)),
             max_miss_count=int(state.get("max_miss_count", 0)),
@@ -656,6 +676,10 @@ class MissBank(nn.Module):
                 step=step,
                 matched_iou=match["iou"],
                 matched_score=match["score"],
+                best_iou=match["best_iou"],
+                best_iou_score=match["best_iou_score"],
+                best_score=match["best_score"],
+                best_score_iou=match["best_score_iou"],
             )
             stats["gt_seen"] += 1
             if is_missed:
@@ -900,19 +924,51 @@ def _match_gt(
     iou_threshold: float,
 ) -> dict[str, Any]:
     if pred_boxes.numel() == 0:
-        return {"matched": False, "iou": None, "score": None}
+        return {
+            "matched": False,
+            "iou": None,
+            "score": None,
+            "best_iou": None,
+            "best_iou_score": None,
+            "best_score": None,
+            "best_score_iou": None,
+        }
     gt_box = gt_box.to(device=pred_boxes.device, dtype=torch.float32).reshape(1, 4)
     pred_boxes = pred_boxes.to(device=gt_box.device, dtype=torch.float32)
     pred_labels = pred_labels.to(device=gt_box.device, dtype=torch.long)
     pred_scores = pred_scores.to(device=gt_box.device, dtype=torch.float32)
     ious = box_ops.box_iou(gt_box, pred_boxes)[0].clamp(min=0.0, max=1.0)
+    same_class_mask = pred_labels == int(gt_label)
+    best_iou = None
+    best_iou_score = None
+    best_score = None
+    best_score_iou = None
+    if bool(same_class_mask.any().item()):
+        same_class_indices = torch.where(same_class_mask)[0]
+        same_class_ious = ious[same_class_indices]
+        best_iou_local = int(torch.argmax(same_class_ious).item())
+        best_iou_index = int(same_class_indices[best_iou_local].item())
+        best_score_local = int(torch.argmax(pred_scores[same_class_indices]).item())
+        best_score_index = int(same_class_indices[best_score_local].item())
+        best_iou = float(ious[best_iou_index].item())
+        best_iou_score = float(pred_scores[best_iou_index].item())
+        best_score = float(pred_scores[best_score_index].item())
+        best_score_iou = float(ious[best_score_index].item())
     candidate_mask = (
-        (pred_labels == int(gt_label))
+        same_class_mask
         & (pred_scores >= float(score_threshold))
         & (ious >= float(iou_threshold))
     )
     if not bool(candidate_mask.any().item()):
-        return {"matched": False, "iou": None, "score": None}
+        return {
+            "matched": False,
+            "iou": None,
+            "score": None,
+            "best_iou": best_iou,
+            "best_iou_score": best_iou_score,
+            "best_score": best_score,
+            "best_score_iou": best_score_iou,
+        }
     candidate_indices = torch.where(candidate_mask)[0]
     candidate_ious = ious[candidate_indices]
     best_local = int(torch.argmax(candidate_ious).item())
@@ -921,6 +977,10 @@ def _match_gt(
         "matched": True,
         "iou": float(ious[best_index].item()),
         "score": float(pred_scores[best_index].item()),
+        "best_iou": best_iou,
+        "best_iou_score": best_iou_score,
+        "best_score": best_score,
+        "best_score_iou": best_score_iou,
     }
 
 
