@@ -15,7 +15,8 @@ uv run scripts/train.py \
   --data kitti \
   --seed 42 \
   --device cuda:0 cuda:1 \
-  --remiss-config modules/cfg/remiss.yaml
+  --remiss-config modules/cfg/remiss.yaml \
+  --remiss-conv-config modules/cfg/remiss_conv.yaml
 ```
 
 Baseline seed-mean training script:
@@ -44,11 +45,14 @@ bash scripts/bash/baseline/train.bash
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve MissBank matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. When `miss_head.enabled` is true, FCOS training also adds MissHead loss after `miss_head.start_epoch`: `miss_head_ce` in legacy 5-way mode, or `miss_head_has_miss_bce` plus `miss_head_region_ce` when `miss_head.has_miss_head: true`. Prototype injection is not yet wired.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve MissBank matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. When `miss_head.enabled` is true, FCOS training also adds MissHead loss after `miss_head.start_epoch`: `miss_head_ce` in legacy 5-way mode, or `miss_head_has_miss_bce` plus `miss_head_region_ce` when `miss_head.has_miss_head: true`.
+
+ReMissConv is configured separately through `modules/cfg/remiss_conv.yaml`. When enabled, runtime attaches a separate `remiss_conv_bank` and `remiss_conv` module. The bank uses the same matching and mining semantics as MissBank but writes outputs under `remiss_conv/`. The convolutional module predicts grid-level miss maps from FCOS FPN features, adds `remiss_conv_loss` after `conv.start_epoch`, and applies gated additive prototype modulation before the FCOS detector head.
 
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
+| `--remiss-conv-config` | `modules/cfg/remiss_conv.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 
@@ -79,6 +83,11 @@ Common outputs under `output_dir`:
 | `remiss/miss_stability_state.json` | Last MissBank snapshot used for next-epoch comparison |
 | `remiss/miss_head_epoch.json` | Epoch-level MissHead train loss and metrics accumulated separately from `history.json` |
 | `remiss/miss_head_epoch.csv` | Flattened CSV view of `miss_head_epoch.json` |
+| `remiss_conv/miss_stability_epoch.json` | Epoch-level stability metrics for the separate ReMissConv MissBank |
+| `remiss_conv/miss_stability_epoch.csv` | Flattened CSV view of ReMissConv stability metrics |
+| `remiss_conv/miss_stability_state.json` | Last ReMissConv MissBank snapshot used for next-epoch comparison |
+| `remiss_conv/miss_map_epoch.json` | Epoch-level ReMissConv miss-map loss and metrics accumulated separately from `history.json` |
+| `remiss_conv/miss_map_epoch.csv` | Flattened CSV view of `miss_map_epoch.json` |
 | `best_val_metrics.json` | Best-checkpoint validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

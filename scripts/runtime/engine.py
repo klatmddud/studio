@@ -87,7 +87,10 @@ def fit(
     history: list[dict[str, Any]] = []
     missbank_stability_history: list[dict[str, Any]] = []
     misshead_metric_history: list[dict[str, Any]] = []
+    remiss_conv_stability_history: list[dict[str, Any]] = []
+    remiss_conv_metric_history: list[dict[str, Any]] = []
     previous_missbank_snapshot: dict[str, Any] | None = None
+    previous_remiss_conv_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
 
@@ -115,6 +118,15 @@ def fit(
             )
             previous_missbank_snapshot = _read_missbank_stability_state(
                 output_dir / "remiss" / "miss_stability_state.json"
+            )
+            remiss_conv_stability_history = _read_missbank_stability_history(
+                output_dir / "remiss_conv",
+            )
+            remiss_conv_metric_history = _read_remiss_conv_metric_history(
+                output_dir / "remiss_conv",
+            )
+            previous_remiss_conv_snapshot = _read_missbank_stability_state(
+                output_dir / "remiss_conv" / "miss_stability_state.json"
             )
         persist_run_metadata(
             output_dir=output_dir,
@@ -152,7 +164,7 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
-        train_metrics, misshead_metrics = _split_misshead_train_metrics(train_metrics)
+        train_metrics, misshead_metrics, remiss_conv_metrics = _split_auxiliary_train_metrics(train_metrics)
         _run_missbank_offline_mining(
             model=model,
             data_loader=train_loader,
@@ -167,6 +179,7 @@ def fit(
             model=model,
             epoch=epoch + 1,
             distributed=distributed,
+            bank_attr="missbank",
         )
         if main_process and current_missbank_snapshot is not None:
             missbank_metrics = compute_missbank_stability_metrics(
@@ -177,10 +190,31 @@ def fit(
             missbank_stability_history.append(missbank_metrics)
             _write_missbank_stability_outputs(
                 output_dir=output_dir,
+                subdir="remiss",
                 history=missbank_stability_history,
                 snapshot=current_missbank_snapshot,
             )
             previous_missbank_snapshot = current_missbank_snapshot
+        current_remiss_conv_snapshot = _collect_missbank_epoch_snapshot(
+            model=model,
+            epoch=epoch + 1,
+            distributed=distributed,
+            bank_attr="remiss_conv_bank",
+        )
+        if main_process and current_remiss_conv_snapshot is not None:
+            remiss_conv_stability_metrics = compute_missbank_stability_metrics(
+                current_remiss_conv_snapshot,
+                previous_snapshot=previous_remiss_conv_snapshot,
+                hotspot_top_k=int(current_remiss_conv_snapshot.get("hotspot_top_k", 10)),
+            )
+            remiss_conv_stability_history.append(remiss_conv_stability_metrics)
+            _write_missbank_stability_outputs(
+                output_dir=output_dir,
+                subdir="remiss_conv",
+                history=remiss_conv_stability_history,
+                snapshot=current_remiss_conv_snapshot,
+            )
+            previous_remiss_conv_snapshot = current_remiss_conv_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -245,6 +279,17 @@ def fit(
                 _write_misshead_metric_outputs(
                     output_dir=output_dir,
                     history=misshead_metric_history,
+                )
+            if remiss_conv_metrics:
+                remiss_conv_metric_history.append(
+                    {
+                        "epoch": epoch + 1,
+                        **remiss_conv_metrics,
+                    }
+                )
+                _write_remiss_conv_metric_outputs(
+                    output_dir=output_dir,
+                    history=remiss_conv_metric_history,
                 )
             history.append(record)
             _write_history_outputs(output_dir, history)
@@ -701,12 +746,10 @@ def _move_target_to_device(
 
 
 def _set_missbank_epoch(model: torch.nn.Module, epoch: int) -> None:
-    missbank = _get_missbank(model)
-    if missbank is None:
-        return
-    start_epoch = getattr(missbank, "start_epoch", None)
-    if callable(start_epoch):
-        start_epoch(int(epoch))
+    for missbank in _iter_missbanks(model):
+        start_epoch = getattr(missbank, "start_epoch", None)
+        if callable(start_epoch):
+            start_epoch(int(epoch))
 
 
 def _accumulate_model_train_metrics(
@@ -741,10 +784,12 @@ def _update_missbank_for_batch(
     epoch: int,
     step: int,
 ) -> None:
-    missbank = _get_missbank(model)
-    if not _missbank_enabled(missbank):
-        return
-    if _missbank_mining_type(missbank) != "online":
+    missbanks = [
+        missbank
+        for missbank in _iter_missbanks(model)
+        if _missbank_enabled(missbank) and _missbank_mining_type(missbank) == "online"
+    ]
+    if not missbanks:
         return
 
     was_training = model.training
@@ -759,13 +804,14 @@ def _update_missbank_for_batch(
         if was_training:
             model.train()
 
-    _update_missbank_from_detections(
-        missbank=missbank,
-        targets=targets,
-        detections=detections,
-        epoch=epoch,
-        step=step,
-    )
+    for missbank in missbanks:
+        _update_missbank_from_detections(
+            missbank=missbank,
+            targets=targets,
+            detections=detections,
+            epoch=epoch,
+            step=step,
+        )
 
 
 def _run_missbank_offline_mining(
@@ -779,10 +825,12 @@ def _run_missbank_offline_mining(
     log_interval: int,
     distributed: DistributedContext | None,
 ) -> None:
-    missbank = _get_missbank(model)
-    if not _missbank_enabled(missbank):
-        return
-    if _missbank_mining_type(missbank) != "offline":
+    missbanks = [
+        missbank
+        for missbank in _iter_missbanks(model)
+        if _missbank_enabled(missbank) and _missbank_mining_type(missbank) == "offline"
+    ]
+    if not missbanks:
         return
 
     was_training = model.training
@@ -799,13 +847,14 @@ def _run_missbank_offline_mining(
             ):
                 detections = model(images)
 
-            _update_missbank_from_detections(
-                missbank=missbank,
-                targets=targets,
-                detections=detections,
-                epoch=epoch,
-                step=step,
-            )
+            for missbank in missbanks:
+                _update_missbank_from_detections(
+                    missbank=missbank,
+                    targets=targets,
+                    detections=detections,
+                    epoch=epoch,
+                    step=step,
+                )
 
             should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
             if should_log:
@@ -846,8 +895,9 @@ def _collect_missbank_epoch_snapshot(
     model: torch.nn.Module,
     epoch: int,
     distributed: DistributedContext | None,
+    bank_attr: str = "missbank",
 ) -> dict[str, Any] | None:
-    missbank = _get_missbank(model)
+    missbank = _get_missbank(model, attr=bank_attr)
     snapshot = None
     if _missbank_enabled(missbank):
         epoch_snapshot = getattr(missbank, "epoch_snapshot", None)
@@ -857,8 +907,16 @@ def _collect_missbank_epoch_snapshot(
     return merge_missbank_epoch_snapshots(gathered)
 
 
-def _get_missbank(model: torch.nn.Module):
-    return getattr(unwrap_model(model), "missbank", None)
+def _get_missbank(model: torch.nn.Module, *, attr: str = "missbank"):
+    return getattr(unwrap_model(model), attr, None)
+
+
+def _iter_missbanks(model: torch.nn.Module):
+    unwrapped = unwrap_model(model)
+    for attr in ("missbank", "remiss_conv_bank"):
+        missbank = getattr(unwrapped, attr, None)
+        if missbank is not None:
+            yield missbank
 
 
 def _missbank_enabled(missbank: Any) -> bool:
@@ -874,30 +932,39 @@ def _missbank_mining_type(missbank: Any) -> str:
     return str(getattr(mining, "type", "online")).lower()
 
 
-def _split_misshead_train_metrics(
+def _split_auxiliary_train_metrics(
     metrics: Mapping[str, float],
-) -> tuple[dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     train_metrics: dict[str, float] = {}
     misshead_metrics: dict[str, float] = {}
+    remiss_conv_metrics: dict[str, float] = {}
     for key, value in metrics.items():
-        if _is_misshead_metric_key(str(key)):
+        key = str(key)
+        if _is_remiss_conv_metric_key(key):
+            remiss_conv_metrics[key] = float(value)
+        elif _is_misshead_metric_key(key):
             misshead_metrics[str(key)] = float(value)
         else:
-            train_metrics[str(key)] = float(value)
-    return train_metrics, misshead_metrics
+            train_metrics[key] = float(value)
+    return train_metrics, misshead_metrics, remiss_conv_metrics
 
 
 def _is_misshead_metric_key(key: str) -> bool:
     return key.startswith("miss_head_") or key.startswith("missed_object_")
 
 
+def _is_remiss_conv_metric_key(key: str) -> bool:
+    return key.startswith("remiss_conv_")
+
+
 def _write_missbank_stability_outputs(
     *,
     output_dir: Path,
+    subdir: str,
     history: list[dict[str, Any]],
     snapshot: dict[str, Any],
 ) -> None:
-    remiss_dir = output_dir / "remiss"
+    remiss_dir = output_dir / subdir
     _write_json(remiss_dir / "miss_stability_epoch.json", history)
     _write_history_csv(remiss_dir / "miss_stability_epoch.csv", history)
     _write_json(remiss_dir / "miss_stability_state.json", {"snapshot": snapshot})
@@ -913,6 +980,16 @@ def _write_misshead_metric_outputs(
     _write_history_csv(remiss_dir / "miss_head_epoch.csv", history)
 
 
+def _write_remiss_conv_metric_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+) -> None:
+    remiss_conv_dir = output_dir / "remiss_conv"
+    _write_json(remiss_conv_dir / "miss_map_epoch.json", history)
+    _write_history_csv(remiss_conv_dir / "miss_map_epoch.csv", history)
+
+
 def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
     primary_path = remiss_dir / "miss_stability_epoch.json"
     if primary_path.is_file():
@@ -922,6 +999,10 @@ def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
 
 def _read_misshead_metric_history(remiss_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(remiss_dir / "miss_head_epoch.json")
+
+
+def _read_remiss_conv_metric_history(remiss_conv_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(remiss_conv_dir / "miss_map_epoch.json")
 
 
 def _read_json_list(path: str | Path) -> list[dict[str, Any]]:

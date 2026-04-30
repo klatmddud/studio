@@ -7,8 +7,9 @@ The current research-module surface is ReMiss. Older unrelated research-module c
 `scripts/train.py` accepts:
 
 - `--remiss-config`
+- `--remiss-conv-config`
 
-`scripts/runtime/module_configs.py` resolves the default ReMiss config path, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
+`scripts/runtime/module_configs.py` resolves the default ReMiss and ReMissConv config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
 ## ReMiss MissBank (`modules/nn/mb.py`)
 
@@ -44,9 +45,28 @@ Runtime behavior:
 - MissHead training metrics are written separately under `remiss/miss_head_epoch.json` and `remiss/miss_head_epoch.csv`, not mixed into the main `results.csv`.
 - Prototype injection is not part of this implementation step.
 
+## ReMissConv (`modules/nn/remiss_conv.py`)
+
+ReMissConv is a separate convolutional extension of ReMiss. It does not replace or modify the existing `model.missbank` / `model.miss_head` path. Runtime attaches a separate `model.remiss_conv_bank` and `model.remiss_conv` when `modules/cfg/remiss_conv.yaml` enables them.
+
+Runtime behavior:
+
+- FCOS only for the first implementation.
+- Uses a separate MissBank instance, so ReMissConv mining state is independent from the original ReMiss state.
+- The ReMissConv block receives FCOS FPN features before the detector head.
+- Each FPN level is adaptively pooled to `grid_size x grid_size` and processed by a small convolutional miss-map head.
+- Optional normalized coordinate channels can be concatenated before pooling with `conv.use_coord: true`.
+- The miss-map logits are trained with BCE against grid-level targets generated from repeated missed GT records.
+- A learnable grid prototype is upsampled to each FPN level and added back with gated additive modulation:
+  `F' = F + alpha * gate * prototype`.
+- `injection.soft_injection: true` uses sigmoid gate probabilities directly; `false` applies `injection.gate_threshold`.
+- Train metrics are written separately under `remiss_conv/miss_map_epoch.json` and `remiss_conv/miss_map_epoch.csv`.
+- ReMissConv stability metrics for its separate MissBank are written under `remiss_conv/miss_stability_epoch.json` and `remiss_conv/miss_stability_epoch.csv`.
+- Basic modulation diagnostics include `remiss_conv_delta_norm` and `remiss_conv_delta_ratio`.
+
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissHead loss-only training is available for FCOS. Prototype injection is planned ReMiss work and is not yet attached.
+When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissHead loss-only training is available for FCOS. ReMissConv is available as a separate FCOS path with its own config, MissBank state, miss-map loss, and gated additive feature modulation.
 
 ## Support Matrix
 
@@ -54,3 +74,4 @@ When ReMiss is enabled, MissBank is attached to FCOS and updated from final post
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update + stability logging | no | no |
 | ReMiss MissHead | loss-only training | no | no |
+| ReMissConv | miss-map loss + feature modulation | no | no |

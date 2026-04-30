@@ -1,0 +1,43 @@
+enabled: false
+grid_size: 2
+start_epoch: 1
+max_records: null
+
+mining:
+  type: offline
+
+matching:
+  score_threshold: auto
+  iou_threshold: auto
+
+target:
+  miss_threshold: 2
+  aggregation: miss_count
+
+conv:
+  enabled: false
+  start_epoch: 18
+  in_channels: 256
+  hidden_channels: 256
+  use_coord: true
+  loss_weight: 0.1
+  pos_weight: auto
+
+prototype:
+  shared_across_levels: true
+  init_std: 0.02
+
+injection:
+  enabled: true
+  mode: gated_additive
+  alpha: 0.1
+  soft_injection: true
+  gate_threshold: 0.5
+  levels: all
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

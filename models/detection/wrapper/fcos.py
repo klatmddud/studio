@@ -59,12 +59,12 @@ class FCOSWrapper(BaseDetectionWrapper):
         images: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None = None,
     ):
-        """Run FCOS and add MissHead loss when ReMiss MissHead is attached."""
-        if getattr(self, "miss_head", None) is None:
+        """Run FCOS and add optional ReMiss auxiliary modules when attached."""
+        if getattr(self, "miss_head", None) is None and getattr(self, "remiss_conv", None) is None:
             self._train_metrics = {}
             return self.model(images, targets)
 
-        return self._forward_with_miss_head(images, targets)
+        return self._forward_with_remiss_modules(images, targets)
 
     def get_training_metrics(self) -> dict[str, float]:
         return dict(self._train_metrics)
@@ -85,14 +85,16 @@ class FCOSWrapper(BaseDetectionWrapper):
             **kwargs,
         )
 
-    def _forward_with_miss_head(
+    def _forward_with_remiss_modules(
         self,
         images: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None,
     ):
         fcos = self.model
-        miss_head = getattr(self, "miss_head")
+        miss_head = getattr(self, "miss_head", None)
         missbank = getattr(self, "missbank", None)
+        remiss_conv = getattr(self, "remiss_conv", None)
+        remiss_conv_bank = getattr(self, "remiss_conv_bank", None)
         self._train_metrics = {}
 
         if fcos.training:
@@ -135,6 +137,13 @@ class FCOSWrapper(BaseDetectionWrapper):
         if isinstance(features, torch.Tensor):
             features = OrderedDict([("0", features)])
         feature_list = list(features.values())
+        remiss_conv_output = self._apply_remiss_conv(
+            features=feature_list,
+            remiss_conv=remiss_conv,
+            remiss_conv_bank=remiss_conv_bank,
+        )
+        if remiss_conv_output is not None:
+            feature_list = remiss_conv_output["features"]
 
         head_outputs = fcos.head(feature_list)
         anchors = fcos.anchor_generator(images, feature_list)
@@ -147,6 +156,14 @@ class FCOSWrapper(BaseDetectionWrapper):
                 torch._assert(False, "targets should not be none when in training mode")
             else:
                 losses = fcos.compute_loss(targets, head_outputs, anchors, num_anchors_per_level)
+                losses.update(
+                    self._compute_remiss_conv_loss(
+                        remiss_conv_output=remiss_conv_output,
+                        targets=targets,
+                        remiss_conv=remiss_conv,
+                        remiss_conv_bank=remiss_conv_bank,
+                    )
+                )
                 losses.update(
                     self._compute_miss_head_loss(
                         features=feature_list,
@@ -171,14 +188,60 @@ class FCOSWrapper(BaseDetectionWrapper):
             return losses, detections
         return fcos.eager_outputs(losses, detections)
 
+    def _apply_remiss_conv(
+        self,
+        *,
+        features: list[torch.Tensor],
+        remiss_conv: nn.Module | None,
+        remiss_conv_bank: Any,
+    ) -> dict[str, Any] | None:
+        if remiss_conv is None or remiss_conv_bank is None:
+            return None
+        epoch = int(getattr(remiss_conv_bank, "current_epoch", 0))
+        is_active = getattr(remiss_conv, "is_active", None)
+        if callable(is_active) and not bool(is_active(epoch)):
+            return None
+        return remiss_conv(features)
+
+    def _compute_remiss_conv_loss(
+        self,
+        *,
+        remiss_conv_output: dict[str, Any] | None,
+        targets: list[dict[str, torch.Tensor]],
+        remiss_conv: nn.Module | None,
+        remiss_conv_bank: Any,
+    ) -> dict[str, torch.Tensor]:
+        if remiss_conv_output is None or remiss_conv is None or remiss_conv_bank is None:
+            return {}
+        output_device = remiss_conv.output_device(remiss_conv_output)
+        target_maps = remiss_conv.make_target_maps(
+            remiss_conv_bank,
+            targets,
+            device=output_device,
+        )
+        losses = remiss_conv.compute_loss(remiss_conv_output, target_maps)
+        detached_output = _detach_tensor_tree(remiss_conv_output)
+        metrics = remiss_conv.compute_metrics(detached_output, target_maps.detach())
+        metrics.update(
+            remiss_conv.compute_missed_object_metrics(
+                detached_output,
+                remiss_conv_bank,
+                targets,
+            )
+        )
+        self._train_metrics.update(metrics)
+        return losses
+
     def _compute_miss_head_loss(
         self,
         *,
         features: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]],
-        miss_head: nn.Module,
+        miss_head: nn.Module | None,
         missbank: Any,
     ) -> dict[str, torch.Tensor]:
+        if miss_head is None:
+            return {}
         if missbank is None:
             return {}
         epoch = int(getattr(missbank, "current_epoch", 0))
@@ -202,15 +265,23 @@ class FCOSWrapper(BaseDetectionWrapper):
                 predicted_regions=miss_head.predict_region(detached_output),
             )
         )
-        self._train_metrics = metrics
+        self._train_metrics.update(metrics)
         return losses
 
 
 def _detach_miss_head_output(output: Any) -> Any:
+    return _detach_tensor_tree(output)
+
+
+def _detach_tensor_tree(output: Any) -> Any:
     if isinstance(output, torch.Tensor):
         return output.detach()
     if isinstance(output, dict):
-        return {key: value.detach() for key, value in output.items()}
+        return {key: _detach_tensor_tree(value) for key, value in output.items()}
+    if isinstance(output, list):
+        return [_detach_tensor_tree(value) for value in output]
+    if isinstance(output, tuple):
+        return tuple(_detach_tensor_tree(value) for value in output)
     return output
 
 
