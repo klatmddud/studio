@@ -28,8 +28,8 @@ models/detection/
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # ReMiss and ReMissConv module configs, disabled by default
-  nn/                       # ReMiss/ReMissConv implementation and shared helpers
+  cfg/                      # ReMiss, ReMissConv, and MPD module configs, disabled by default
+  nn/                       # ReMiss/ReMissConv/MPD implementation and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```

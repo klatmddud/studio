@@ -1,5 +1,5 @@
 backbone:
-  name: resnet18
+  name: resnet50
   pretrained: DEFAULT
   trainable_layers: 3
 

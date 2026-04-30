@@ -59,8 +59,12 @@ class FCOSWrapper(BaseDetectionWrapper):
         images: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None = None,
     ):
-        """Run FCOS and add optional ReMiss auxiliary modules when attached."""
-        if getattr(self, "miss_head", None) is None and getattr(self, "remiss_conv", None) is None:
+        """Run FCOS and add optional research modules when attached."""
+        if (
+            getattr(self, "miss_head", None) is None
+            and getattr(self, "remiss_conv", None) is None
+            and getattr(self, "mpd", None) is None
+        ):
             self._train_metrics = {}
             return self.model(images, targets)
 
@@ -95,6 +99,8 @@ class FCOSWrapper(BaseDetectionWrapper):
         missbank = getattr(self, "missbank", None)
         remiss_conv = getattr(self, "remiss_conv", None)
         remiss_conv_bank = getattr(self, "remiss_conv_bank", None)
+        mpd = getattr(self, "mpd", None)
+        mpd_bank = getattr(self, "mpd_bank", None)
         self._train_metrics = {}
 
         if fcos.training:
@@ -155,7 +161,14 @@ class FCOSWrapper(BaseDetectionWrapper):
             if targets is None:
                 torch._assert(False, "targets should not be none when in training mode")
             else:
-                losses = fcos.compute_loss(targets, head_outputs, anchors, num_anchors_per_level)
+                losses = self._compute_fcos_detection_loss(
+                    targets=targets,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    num_anchors_per_level=num_anchors_per_level,
+                    mpd=mpd,
+                    mpd_bank=mpd_bank,
+                )
                 losses.update(
                     self._compute_remiss_conv_loss(
                         remiss_conv_output=remiss_conv_output,
@@ -202,6 +215,40 @@ class FCOSWrapper(BaseDetectionWrapper):
         if callable(is_active) and not bool(is_active(epoch)):
             return None
         return remiss_conv(features)
+
+    def _compute_fcos_detection_loss(
+        self,
+        *,
+        targets: list[dict[str, torch.Tensor]],
+        head_outputs: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+        num_anchors_per_level: list[int],
+        mpd: nn.Module | None,
+        mpd_bank: Any,
+    ) -> dict[str, torch.Tensor]:
+        fcos = self.model
+        if mpd is None or mpd_bank is None:
+            return fcos.compute_loss(targets, head_outputs, anchors, num_anchors_per_level)
+        epoch = int(getattr(mpd_bank, "current_epoch", 0))
+        is_active = getattr(mpd, "is_active", None)
+        if callable(is_active) and not bool(is_active(epoch)):
+            return fcos.compute_loss(targets, head_outputs, anchors, num_anchors_per_level)
+        build_matches = getattr(mpd, "build_fcos_matched_idxs", None)
+        if not callable(build_matches):
+            return fcos.compute_loss(targets, head_outputs, anchors, num_anchors_per_level)
+
+        match_result = build_matches(
+            targets=targets,
+            anchors=anchors,
+            num_anchors_per_level=num_anchors_per_level,
+            missbank=mpd_bank,
+            center_sampling_radius=float(fcos.center_sampling_radius),
+        )
+        metrics = getattr(match_result, "metrics", None)
+        if isinstance(metrics, dict):
+            self._train_metrics.update(metrics)
+        matched_idxs = getattr(match_result, "matched_idxs")
+        return fcos.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
 
     def _compute_remiss_conv_loss(
         self,

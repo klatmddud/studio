@@ -16,7 +16,8 @@ uv run scripts/train.py \
   --seed 42 \
   --device cuda:0 cuda:1 \
   --remiss-config modules/cfg/remiss.yaml \
-  --remiss-conv-config modules/cfg/remiss_conv.yaml
+  --remiss-conv-config modules/cfg/remiss_conv.yaml \
+  --mpd-config modules/cfg/mpd.yaml
 ```
 
 Baseline seed-mean training script:
@@ -49,10 +50,13 @@ When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the m
 
 ReMissConv is configured separately through `modules/cfg/remiss_conv.yaml`. When enabled, runtime attaches a separate `remiss_conv_bank` and `remiss_conv` module. The bank uses the same matching and mining semantics as MissBank but writes outputs under `remiss_conv/`. The convolutional module predicts grid-level miss maps from FCOS FPN features, adds `remiss_conv_loss` after `conv.start_epoch`, and applies gated additive prototype modulation before the FCOS detector head.
 
+MPD is configured separately through `modules/cfg/mpd.yaml`. When enabled, runtime attaches a separate `mpd_bank` and `mpd` module. The bank uses the same matching and mining semantics as MissBank but writes outputs under `mpd/`. MPD changes FCOS training assignment only after `mpd.start_epoch`: repeated missed GTs are used to densify positive matched locations, then the original FCOS head loss is computed. MPD does not change inference or add an auxiliary loss.
+
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
 | `--remiss-conv-config` | `modules/cfg/remiss_conv.yaml` |
+| `--mpd-config` | `modules/cfg/mpd.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 
@@ -88,6 +92,11 @@ Common outputs under `output_dir`:
 | `remiss_conv/miss_stability_state.json` | Last ReMissConv MissBank snapshot used for next-epoch comparison |
 | `remiss_conv/miss_map_epoch.json` | Epoch-level ReMissConv miss-map loss and metrics accumulated separately from `history.json` |
 | `remiss_conv/miss_map_epoch.csv` | Flattened CSV view of `miss_map_epoch.json` |
+| `mpd/miss_stability_epoch.json` | Epoch-level stability metrics for the separate MPD MissBank |
+| `mpd/miss_stability_epoch.csv` | Flattened CSV view of MPD stability metrics |
+| `mpd/miss_stability_state.json` | Last MPD MissBank snapshot used for next-epoch comparison |
+| `mpd/mpd_epoch.json` | Epoch-level MPD assignment metrics accumulated separately from `history.json` |
+| `mpd/mpd_epoch.csv` | Flattened CSV view of `mpd_epoch.json` |
 | `best_val_metrics.json` | Best-checkpoint validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

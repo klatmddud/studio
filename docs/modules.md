@@ -1,6 +1,6 @@
 # Research Modules
 
-The current research-module surface is ReMiss. Older unrelated research-module code paths have been removed.
+The current research-module surface is ReMiss and MPD. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
@@ -8,8 +8,9 @@ The current research-module surface is ReMiss. Older unrelated research-module c
 
 - `--remiss-config`
 - `--remiss-conv-config`
+- `--mpd-config`
 
-`scripts/runtime/module_configs.py` resolves the default ReMiss and ReMissConv config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
+`scripts/runtime/module_configs.py` resolves the default ReMiss, ReMissConv, and MPD config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
 ## ReMiss MissBank (`modules/nn/mb.py`)
 
@@ -64,9 +65,25 @@ Runtime behavior:
 - ReMissConv stability metrics for its separate MissBank are written under `remiss_conv/miss_stability_epoch.json` and `remiss_conv/miss_stability_epoch.csv`.
 - Basic modulation diagnostics include `remiss_conv_delta_norm` and `remiss_conv_delta_ratio`.
 
+## MPD (`modules/nn/mpd.py`)
+
+MPD(Miss-Guided Positive Densification)는 ReMiss와 충돌하지 않는 별도 FCOS assignment 보정 모듈이다. Runtime attaches a separate `model.mpd_bank` and `model.mpd` when `modules/cfg/mpd.yaml` enables them.
+
+Runtime behavior:
+
+- FCOS only for the first implementation.
+- Uses a separate MissBank instance, so MPD mining state is independent from ReMiss and ReMissConv.
+- During training only, when `mpd.enabled: true` and `epoch >= mpd.start_epoch`, FCOS matched GT indices are rebuilt with MPD densification before calling the original FCOS head loss.
+- MPD does not add an auxiliary loss. Additional positives use the existing FCOS classification, box regression, and centerness losses.
+- `mpd.radius_mode: expand` expands beyond the detector's own `center_sampling_radius`; `absolute` uses `mpd.radius + 0.5` directly.
+- `require_inside_gt: true` and `respect_scale_range: true` keep MPD positives inside the GT and within FCOS level scale ranges.
+- `override_existing_positive: false` preserves existing FCOS positive assignments and only fills background locations.
+- MPD assignment metrics are written separately under `mpd/mpd_epoch.json` and `mpd/mpd_epoch.csv`.
+- MPD stability metrics for its separate MissBank are written under `mpd/miss_stability_epoch.json` and `mpd/miss_stability_epoch.csv`.
+
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissHead loss-only training is available for FCOS. ReMissConv is available as a separate FCOS path with its own config, MissBank state, miss-map loss, and gated additive feature modulation.
+When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissHead loss-only training is available for FCOS. ReMissConv is available as a separate FCOS path with its own config, MissBank state, miss-map loss, and gated additive feature modulation. MPD is available as a separate FCOS path with its own config, MissBank state, and train-time positive assignment densification.
 
 ## Support Matrix
 
@@ -75,3 +92,4 @@ When ReMiss is enabled, MissBank is attached to FCOS and updated from final post
 | ReMiss MissBank | memory update + stability logging | no | no |
 | ReMiss MissHead | loss-only training | no | no |
 | ReMissConv | miss-map loss + feature modulation | no | no |
+| MPD | train-time assignment densification | no | no |
