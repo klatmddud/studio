@@ -7,7 +7,7 @@ from typing import Any
 import torch.nn as nn
 
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
-from modules.nn import build_missbank_from_yaml
+from modules.nn import build_lmb_from_yaml, build_missbank_from_yaml
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
@@ -52,6 +52,12 @@ def build_model_from_config(
         )
     model = builder(model_config)
     _attach_remiss_modules(
+        model,
+        model_config=model_config,
+        arch=normalized_arch,
+        module_config_paths=module_config_paths,
+    )
+    _attach_lmb_modules(
         model,
         model_config=model_config,
         arch=normalized_arch,
@@ -106,6 +112,31 @@ def _attach_remiss_modules(
     if missbank is None:
         return
     model.missbank = missbank
+
+
+def _attach_lmb_modules(
+    model: nn.Module,
+    *,
+    model_config: dict[str, Any],
+    arch: str,
+    module_config_paths: dict[str, str | Path] | None,
+) -> None:
+    if arch != "fcos":
+        return
+    if not module_config_paths:
+        return
+    lmb_path = module_config_paths.get("lmb")
+    if lmb_path is None:
+        return
+    detector_thresholds = _detector_thresholds(model_config, arch=arch)
+    lmb = build_lmb_from_yaml(
+        lmb_path,
+        arch=arch,
+        detector_score_threshold=detector_thresholds.get("score"),
+    )
+    if lmb is None:
+        return
+    model.lmb = lmb
 
 
 def _detector_thresholds(

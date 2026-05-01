@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modules.nn import load_remiss_config, normalize_arch
+from modules.nn import load_lmb_config, load_remiss_config, normalize_arch
 
 from .config import load_yaml_file
 from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
@@ -14,10 +14,12 @@ MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "remiss": load_remiss_config,
+    "lmb": load_lmb_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "remiss": {"fcos"},
+    "lmb": {"fcos"},
 }
 
 
@@ -30,7 +32,7 @@ def collect_enabled_module_configs(
     paths = resolve_module_config_paths(config_paths, require_exists=False)
 
     snapshots: dict[str, Any] = {}
-    for name in ("remiss",):
+    for name in ("remiss", "lmb"):
         supported_arches = _ARCH_SUPPORT[name]
         if supported_arches is not None and normalized_arch not in supported_arches:
             continue

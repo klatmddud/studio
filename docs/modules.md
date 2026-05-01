@@ -1,14 +1,15 @@
 # Research Modules
 
-The current implemented research-module surface is ReMiss MissBank only. Older unrelated research-module code paths have been removed.
+The current runtime-connected research-module surface includes ReMiss MissBank and LMB. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
 `scripts/train.py` accepts:
 
 - `--remiss-config`
+- `--lmb-config`
 
-`scripts/runtime/module_configs.py` resolves the default ReMiss config path, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
+`scripts/runtime/module_configs.py` resolves default module config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
 ## ReMiss MissBank (`modules/nn/mb.py`)
 
@@ -35,3 +36,20 @@ When ReMiss is enabled, MissBank is attached to FCOS and updated from final post
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update + stability logging | no | no |
+| LMB | offline mining + stability logging | no | no |
+
+## Localization Memory Bank (`modules/nn/lmb.py`)
+
+LMB tracks GT-level localization quality instead of missed-detection state. It is independent from ReMiss and uses `modules/cfg/lmb.yaml`.
+
+Key concepts:
+
+- Matching: for each GT, LMB finds the best final prediction above `matching.score_threshold`. `score_threshold: auto` must be resolved from the detector's final score threshold before constructing the module.
+- States: `missing` means `best_iou < low_iou_threshold` or no candidate exists; `low_iou` means `low_iou_threshold <= best_iou < good_iou_threshold`; `good` means `best_iou >= good_iou_threshold`.
+- Stability: `stability.stable_epochs` defines how many consecutive epochs a GT must remain in `low_iou` to count as stable low-IoU.
+- Regions: `grid_size` assigns each GT box to a row-major spatial region, using the region with the largest box overlap.
+- Runtime: when enabled for FCOS, LMB runs one no-grad pass over the training loader after each epoch from `start_epoch`.
+- Metrics: `epoch_snapshot()` records low-IoU counts, stable low-IoU counts, streak statistics, IoU deficit statistics, state transitions, region histograms, and image-region hotspots. Runtime writes accumulated metrics to `lmb/lmb_stability_epoch.json` and `lmb/lmb_stability_epoch.csv`.
+- State: `get_extra_state()` and `set_extra_state()` make LMB checkpointable.
+
+LMB does not alter detector forward computation, add losses, or change inference.

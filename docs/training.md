@@ -15,7 +15,8 @@ uv run scripts/train.py \
   --data kitti \
   --seed 42 \
   --device cuda:0 cuda:1 \
-  --remiss-config modules/cfg/remiss.yaml
+  --remiss-config modules/cfg/remiss.yaml \
+  --lmb-config modules/cfg/lmb.yaml
 ```
 
 Baseline seed-mean training script:
@@ -46,9 +47,12 @@ bash scripts/bash/baseline/train.bash
 
 When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve MissBank matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. MissBank does not add detector losses or feature injection.
 
+When LMB is enabled, `scripts/runtime/registry.py` attaches `LocalizationMemoryBank` to the model. `matching.score_threshold: auto` resolves from the detector's final score threshold. Starting at `start_epoch`, LMB runs one no-grad training-set mining pass after each epoch and writes localization-quality stability metrics under `output_dir/lmb/`. LMB does not add detector losses or change inference.
+
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
+| `--lmb-config` | `modules/cfg/lmb.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 
@@ -66,7 +70,7 @@ Checkpoint fields:
 
 `checkpoint.save_last` writes `last.pt`. `checkpoint.save_best` writes `best.pt` when the monitored metric improves. `checkpoint.save_every_epochs` can be set to a positive integer to additionally write periodic checkpoints such as `epoch_0020.pt`; set it to `null` to disable periodic checkpointing.
 
-When resuming a baseline checkpoint with ReMiss MissBank newly enabled, `missbank._extra_state` is allowed to be missing and MissBank starts from an empty state. Detector weights, optimizer state, scheduler state, epoch, and `best_metric` are still restored from the checkpoint.
+When resuming a baseline checkpoint with ReMiss MissBank or LMB newly enabled, `missbank._extra_state` and `lmb._extra_state` are allowed to be missing and the corresponding memory bank starts from an empty state. Detector weights, optimizer state, scheduler state, epoch, and `best_metric` are still restored from the checkpoint.
 
 ## Metrics And Outputs
 
@@ -82,6 +86,9 @@ Common outputs under `output_dir`:
 | `remiss/miss_stability_epoch.json` | Epoch-level MissBank stability metrics accumulated as a JSON list |
 | `remiss/miss_stability_epoch.csv` | Flattened CSV view of `miss_stability_epoch.json` |
 | `remiss/miss_stability_state.json` | Last MissBank snapshot used for next-epoch comparison |
+| `lmb/lmb_stability_epoch.json` | Epoch-level LMB low-IoU stability metrics accumulated as a JSON list |
+| `lmb/lmb_stability_epoch.csv` | Flattened CSV view of `lmb_stability_epoch.json` |
+| `lmb/lmb_stability_state.json` | Last LMB snapshot used for next-epoch comparison |
 | `best_val_metrics.json` | Best-checkpoint epoch and validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

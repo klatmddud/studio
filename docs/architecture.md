@@ -28,8 +28,8 @@ models/detection/
     dino.py                 # DINO wrapper
 
 modules/
-  cfg/                      # ReMiss module config, disabled by default
-  nn/                       # ReMiss MissBank implementation and shared helpers
+  cfg/                      # Research module configs, disabled by default
+  nn/                       # ReMiss MissBank, LMB, and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```

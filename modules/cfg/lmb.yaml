@@ -1,0 +1,21 @@
+enabled: false
+grid_size: 2
+start_epoch: 1
+max_records: null
+
+matching:
+  score_threshold: auto
+  low_iou_threshold: 0.5
+  good_iou_threshold: 0.75
+  class_aware: true
+
+stability:
+  stable_epochs: 3
+  hotspot_top_k: 10
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

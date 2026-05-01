@@ -17,7 +17,12 @@ import torch
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 
-from modules.nn import compute_missbank_stability_metrics, merge_missbank_epoch_snapshots
+from modules.nn import (
+    compute_lmb_stability_metrics,
+    compute_missbank_stability_metrics,
+    merge_lmb_epoch_snapshots,
+    merge_missbank_epoch_snapshots,
+)
 
 from .config import dump_yaml_file
 from .distributed import (
@@ -86,7 +91,9 @@ def fit(
 
     history: list[dict[str, Any]] = []
     missbank_stability_history: list[dict[str, Any]] = []
+    lmb_stability_history: list[dict[str, Any]] = []
     previous_missbank_snapshot: dict[str, Any] | None = None
+    previous_lmb_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
 
@@ -112,6 +119,12 @@ def fit(
             previous_missbank_snapshot = _read_missbank_stability_state(
                 output_dir / "remiss" / "miss_stability_state.json"
             )
+            lmb_stability_history = _read_lmb_stability_history(
+                output_dir / "lmb",
+            )
+            previous_lmb_snapshot = _read_lmb_stability_state(
+                output_dir / "lmb" / "lmb_stability_state.json"
+            )
         persist_run_metadata(
             output_dir=output_dir,
             arch=arch,
@@ -134,6 +147,7 @@ def fit(
     for epoch in range(start_epoch, total_epochs):
         _set_data_loader_epoch(train_loader, epoch + 1)
         _set_missbank_epoch(model, epoch + 1)
+        _set_lmb_epoch(model, epoch + 1)
 
         train_metrics = train_one_epoch(
             model=model,
@@ -149,6 +163,16 @@ def fit(
             distributed=distributed,
         )
         _run_missbank_offline_mining(
+            model=model,
+            data_loader=train_loader,
+            device=device,
+            amp=runtime_config["amp"],
+            epoch=epoch + 1,
+            total_epochs=total_epochs,
+            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
+            distributed=distributed,
+        )
+        _run_lmb_offline_mining(
             model=model,
             data_loader=train_loader,
             device=device,
@@ -177,6 +201,25 @@ def fit(
                 snapshot=current_missbank_snapshot,
             )
             previous_missbank_snapshot = current_missbank_snapshot
+        current_lmb_snapshot = _collect_lmb_epoch_snapshot(
+            model=model,
+            epoch=epoch + 1,
+            distributed=distributed,
+        )
+        if main_process and current_lmb_snapshot is not None:
+            lmb_metrics = compute_lmb_stability_metrics(
+                current_lmb_snapshot,
+                previous_snapshot=previous_lmb_snapshot,
+                hotspot_top_k=int(current_lmb_snapshot.get("hotspot_top_k", 10)),
+            )
+            lmb_stability_history.append(lmb_metrics)
+            _write_lmb_stability_outputs(
+                output_dir=output_dir,
+                subdir="lmb",
+                history=lmb_stability_history,
+                snapshot=current_lmb_snapshot,
+            )
+            previous_lmb_snapshot = current_lmb_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -543,7 +586,7 @@ def load_checkpoint(
 
 
 def _is_optional_checkpoint_state_key(key: str) -> bool:
-    return key == "missbank._extra_state"
+    return key in {"missbank._extra_state", "lmb._extra_state"}
 
 
 def save_checkpoint(
@@ -720,6 +763,13 @@ def _set_missbank_epoch(model: torch.nn.Module, epoch: int) -> None:
             start_epoch(int(epoch))
 
 
+def _set_lmb_epoch(model: torch.nn.Module, epoch: int) -> None:
+    for lmb in _iter_lmbs(model):
+        start_epoch = getattr(lmb, "start_epoch", None)
+        if callable(start_epoch):
+            start_epoch(int(epoch))
+
+
 def _accumulate_model_train_metrics(
     *,
     model: torch.nn.Module,
@@ -840,6 +890,64 @@ def _run_missbank_offline_mining(
     barrier(distributed)
 
 
+def _run_lmb_offline_mining(
+    *,
+    model: torch.nn.Module,
+    data_loader,
+    device: torch.device,
+    amp: bool,
+    epoch: int,
+    total_epochs: int,
+    log_interval: int,
+    distributed: DistributedContext | None,
+) -> None:
+    lmbs = [
+        lmb
+        for lmb in _iter_lmbs(model)
+        if _lmb_active(lmb, epoch)
+    ]
+    if not lmbs:
+        return
+
+    was_training = model.training
+    model.eval()
+    start_time = time.perf_counter()
+    total_steps = len(data_loader)
+    try:
+        for step, (images, targets) in enumerate(data_loader, start=1):
+            images = [image.to(device) for image in images]
+            targets = [_move_target_to_device(target, device) for target in targets]
+            with torch.no_grad(), torch.autocast(
+                device_type=device.type,
+                enabled=amp and device.type == "cuda",
+            ):
+                detections = model(images)
+
+            for lmb in lmbs:
+                _update_lmb_from_detections(
+                    lmb=lmb,
+                    targets=targets,
+                    detections=detections,
+                    epoch=epoch,
+                    step=step,
+                )
+
+            should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
+            if should_log:
+                elapsed = time.perf_counter() - start_time
+                avg_step_time = elapsed / max(step, 1)
+                remaining_steps = max(total_steps - step, 0)
+                epoch_eta = _format_eta(avg_step_time * remaining_steps)
+                print(
+                    f"[lmb-mining] epoch {epoch}/{total_epochs} "
+                    f"step {step}/{total_steps} epoch_eta={epoch_eta}"
+                )
+    finally:
+        if was_training:
+            model.train()
+    barrier(distributed)
+
+
 def _update_missbank_from_detections(
     *,
     missbank: Any,
@@ -849,6 +957,24 @@ def _update_missbank_from_detections(
     step: int,
 ) -> None:
     update = getattr(missbank, "update", None)
+    if callable(update):
+        update(
+            targets=targets,
+            detections=detections,
+            epoch=int(epoch),
+            step=int(step),
+        )
+
+
+def _update_lmb_from_detections(
+    *,
+    lmb: Any,
+    targets: list[dict[str, torch.Tensor]],
+    detections: Any,
+    epoch: int,
+    step: int,
+) -> None:
+    update = getattr(lmb, "update", None)
     if callable(update):
         update(
             targets=targets,
@@ -874,7 +1000,27 @@ def _collect_missbank_epoch_snapshot(
     return merge_missbank_epoch_snapshots(gathered)
 
 
+def _collect_lmb_epoch_snapshot(
+    *,
+    model: torch.nn.Module,
+    epoch: int,
+    distributed: DistributedContext | None,
+) -> dict[str, Any] | None:
+    lmb = _get_lmb(model)
+    snapshot = None
+    if _lmb_active(lmb, epoch):
+        epoch_snapshot = getattr(lmb, "epoch_snapshot", None)
+        if callable(epoch_snapshot):
+            snapshot = epoch_snapshot(epoch=int(epoch))
+    gathered = all_gather_object(snapshot, distributed)
+    return merge_lmb_epoch_snapshots(gathered)
+
+
 def _get_missbank(model: torch.nn.Module, *, attr: str = "missbank"):
+    return getattr(unwrap_model(model), attr, None)
+
+
+def _get_lmb(model: torch.nn.Module, *, attr: str = "lmb"):
     return getattr(unwrap_model(model), attr, None)
 
 
@@ -884,6 +1030,14 @@ def _iter_missbanks(model: torch.nn.Module):
         missbank = getattr(unwrapped, attr, None)
         if missbank is not None:
             yield missbank
+
+
+def _iter_lmbs(model: torch.nn.Module):
+    unwrapped = unwrap_model(model)
+    for attr in ("lmb",):
+        lmb = getattr(unwrapped, attr, None)
+        if lmb is not None:
+            yield lmb
 
 
 def _missbank_enabled(missbank: Any) -> bool:
@@ -899,6 +1053,22 @@ def _missbank_mining_type(missbank: Any) -> str:
     return str(getattr(mining, "type", "online")).lower()
 
 
+def _lmb_enabled(lmb: Any) -> bool:
+    if lmb is None:
+        return False
+    config = getattr(lmb, "config", None)
+    return bool(getattr(config, "enabled", False))
+
+
+def _lmb_active(lmb: Any, epoch: int) -> bool:
+    if not _lmb_enabled(lmb):
+        return False
+    is_active = getattr(lmb, "is_active", None)
+    if callable(is_active):
+        return bool(is_active(int(epoch)))
+    return True
+
+
 def _write_missbank_stability_outputs(
     *,
     output_dir: Path,
@@ -912,11 +1082,28 @@ def _write_missbank_stability_outputs(
     _write_json(remiss_dir / "miss_stability_state.json", {"snapshot": snapshot})
 
 
+def _write_lmb_stability_outputs(
+    *,
+    output_dir: Path,
+    subdir: str,
+    history: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> None:
+    lmb_dir = output_dir / subdir
+    _write_json(lmb_dir / "lmb_stability_epoch.json", history)
+    _write_history_csv(lmb_dir / "lmb_stability_epoch.csv", history)
+    _write_json(lmb_dir / "lmb_stability_state.json", {"snapshot": snapshot})
+
+
 def _read_missbank_stability_history(remiss_dir: Path) -> list[dict[str, Any]]:
     primary_path = remiss_dir / "miss_stability_epoch.json"
     if primary_path.is_file():
         return _read_json_list(primary_path)
     return _read_json_list(remiss_dir / "miss_stability.json")
+
+
+def _read_lmb_stability_history(lmb_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(lmb_dir / "lmb_stability_epoch.json")
 
 
 def _read_json_list(path: str | Path) -> list[dict[str, Any]]:
@@ -940,6 +1127,10 @@ def _read_missbank_stability_state(path: str | Path) -> dict[str, Any] | None:
         return None
     snapshot = payload.get("snapshot")
     return dict(snapshot) if isinstance(snapshot, Mapping) else None
+
+
+def _read_lmb_stability_state(path: str | Path) -> dict[str, Any] | None:
+    return _read_missbank_stability_state(path)
 
 
 def _write_history_outputs(output_dir: Path, history: list[dict[str, Any]]) -> None:
