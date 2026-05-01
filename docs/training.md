@@ -66,6 +66,8 @@ Checkpoint fields:
 
 `checkpoint.save_last` writes `last.pt`. `checkpoint.save_best` writes `best.pt` when the monitored metric improves. `checkpoint.save_every_epochs` can be set to a positive integer to additionally write periodic checkpoints such as `epoch_0020.pt`; set it to `null` to disable periodic checkpointing.
 
+When resuming a baseline checkpoint with ReMiss MissBank newly enabled, `missbank._extra_state` is allowed to be missing and MissBank starts from an empty state. Detector weights, optimizer state, scheduler state, epoch, and `best_metric` are still restored from the checkpoint.
+
 ## Metrics And Outputs
 
 Common outputs under `output_dir`:

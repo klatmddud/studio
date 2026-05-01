@@ -516,8 +516,14 @@ def load_checkpoint(
 ) -> dict[str, Any]:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=True)
     state_result = unwrap_model(model).load_state_dict(checkpoint["model_state_dict"], strict=False)
-    missing_keys = list(state_result.missing_keys)
-    unexpected_keys = list(state_result.unexpected_keys)
+    missing_keys = [
+        key for key in state_result.missing_keys
+        if not _is_optional_checkpoint_state_key(str(key))
+    ]
+    unexpected_keys = [
+        key for key in state_result.unexpected_keys
+        if not _is_optional_checkpoint_state_key(str(key))
+    ]
     if missing_keys or unexpected_keys:
         details = []
         if missing_keys:
@@ -534,6 +540,10 @@ def load_checkpoint(
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     return checkpoint
+
+
+def _is_optional_checkpoint_state_key(key: str) -> bool:
+    return key == "missbank._extra_state"
 
 
 def save_checkpoint(
