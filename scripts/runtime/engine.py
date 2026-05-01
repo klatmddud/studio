@@ -99,17 +99,30 @@ def fit(
 
     resume_path = runtime_config["checkpoint"].get("resume")
     if resume_path:
+        checkpoint_config = runtime_config["checkpoint"]
+        resume_optimizer = bool(checkpoint_config.get("resume_optimizer", True))
+        resume_scheduler = bool(checkpoint_config.get("resume_scheduler", True))
         checkpoint = load_checkpoint(
             resume_path,
             model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
+            optimizer=optimizer if resume_optimizer else None,
+            scheduler=scheduler if resume_scheduler else None,
             map_location=device,
         )
         start_epoch = int(checkpoint.get("epoch", 0))
         best_metric = float(
             checkpoint.get("best_metric", _initial_best(runtime_config["checkpoint"]["mode"]))
         )
+        if bool(checkpoint_config.get("reset_optimizer_lr", False)):
+            _reset_optimizer_lr(
+                optimizer,
+                lr=float(runtime_config["optimizer"]["lr"]),
+            )
+        if scheduler is not None and not resume_scheduler:
+            _align_scheduler_to_epoch(
+                scheduler,
+                epoch=start_epoch,
+            )
 
     if main_process:
         if resume_path:
@@ -548,6 +561,59 @@ def build_scheduler(
         )
 
     raise ValueError(f"Unsupported scheduler.name: {config['name']!r}")
+
+
+def _reset_optimizer_lr(optimizer: optim.Optimizer, *, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = float(lr)
+
+
+def _align_scheduler_to_epoch(scheduler, *, epoch: int) -> None:
+    """Align a fresh scheduler to the global completed epoch after resume."""
+    epoch_value = int(max(epoch, 0))
+    optimizer = getattr(scheduler, "optimizer", None)
+    param_groups = [] if optimizer is None else list(getattr(optimizer, "param_groups", []))
+    base_lrs = list(getattr(scheduler, "base_lrs", []))
+    if not param_groups or not base_lrs:
+        return
+
+    lrs = _scheduler_lrs_at_epoch(scheduler, epoch=epoch_value, base_lrs=base_lrs)
+    for group, base_lr, lr in zip(param_groups, base_lrs, lrs, strict=False):
+        group["initial_lr"] = float(base_lr)
+        group["lr"] = float(lr)
+    scheduler.last_epoch = epoch_value
+    if hasattr(scheduler, "_last_lr"):
+        scheduler._last_lr = [float(lr) for lr in lrs]
+
+
+def _scheduler_lrs_at_epoch(
+    scheduler,
+    *,
+    epoch: int,
+    base_lrs: list[float],
+) -> list[float]:
+    if isinstance(scheduler, optim.lr_scheduler.MultiStepLR):
+        milestones = getattr(scheduler, "milestones", {})
+        gamma = float(getattr(scheduler, "gamma", 0.1))
+        decay_count = sum(
+            int(count)
+            for milestone, count in milestones.items()
+            if int(milestone) <= int(epoch)
+        )
+        factor = gamma ** decay_count
+        return [float(base_lr) * factor for base_lr in base_lrs]
+    if isinstance(scheduler, optim.lr_scheduler.StepLR):
+        step_size = int(getattr(scheduler, "step_size", 1))
+        gamma = float(getattr(scheduler, "gamma", 0.1))
+        decay_count = int(epoch) // max(step_size, 1)
+        factor = gamma ** decay_count
+        return [float(base_lr) * factor for base_lr in base_lrs]
+    if isinstance(scheduler, optim.lr_scheduler.CosineAnnealingLR):
+        t_max = max(int(getattr(scheduler, "T_max", 1)), 1)
+        eta_min = float(getattr(scheduler, "eta_min", 0.0))
+        cosine = (1.0 + math.cos(math.pi * float(epoch) / float(t_max))) * 0.5
+        return [eta_min + (float(base_lr) - eta_min) * cosine for base_lr in base_lrs]
+    return [float(group["lr"]) for group in scheduler.optimizer.param_groups]
 
 
 def load_checkpoint(

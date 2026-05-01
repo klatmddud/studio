@@ -36,6 +36,9 @@ train:
 checkpoint:
   dir: checkpoints
   resume: null
+  resume_optimizer: true
+  resume_scheduler: false
+  reset_optimizer_lr: false
   save_last: true
   save_best: true
   save_every_epochs: 20

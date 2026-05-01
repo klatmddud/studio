@@ -70,7 +70,27 @@ Checkpoint fields:
 
 `checkpoint.save_last` writes `last.pt`. `checkpoint.save_best` writes `best.pt` when the monitored metric improves. `checkpoint.save_every_epochs` can be set to a positive integer to additionally write periodic checkpoints such as `epoch_0020.pt`; set it to `null` to disable periodic checkpointing.
 
-When resuming a baseline checkpoint with ReMiss MissBank or LMB newly enabled, `missbank._extra_state` and `lmb._extra_state` are allowed to be missing and the corresponding memory bank starts from an empty state. Detector weights, optimizer state, scheduler state, epoch, and `best_metric` are still restored from the checkpoint.
+Resume controls:
+
+| Field | Default | Description |
+|---|---:|---|
+| `checkpoint.resume_optimizer` | `true` | Load optimizer momentum/state from the checkpoint |
+| `checkpoint.resume_scheduler` | `true` | Load scheduler state from the checkpoint |
+| `checkpoint.reset_optimizer_lr` | `false` | After loading optimizer state, reset optimizer param-group LR to `optimizer.lr` from the YAML |
+
+To resume model weights while making the LR schedule follow the current YAML milestones, set:
+
+```yaml
+checkpoint:
+  resume: /path/to/checkpoint.pt
+  resume_optimizer: true
+  resume_scheduler: false
+  reset_optimizer_lr: true
+```
+
+When `resume_scheduler: false`, the fresh scheduler is aligned to the resumed global epoch, so a `multistep` milestone `143` still takes effect after epoch 143 and affects epoch 144 onward.
+
+When resuming a baseline checkpoint with ReMiss MissBank or LMB newly enabled, `missbank._extra_state` and `lmb._extra_state` are allowed to be missing and the corresponding memory bank starts from an empty state. Detector weights, epoch, and `best_metric` are restored from the checkpoint; optimizer and scheduler state follow the resume controls above.
 
 ## Metrics And Outputs
 

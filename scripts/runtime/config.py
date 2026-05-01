@@ -71,6 +71,9 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "checkpoint": {
         "dir": "checkpoints",
         "resume": None,
+        "resume_optimizer": True,
+        "resume_scheduler": True,
+        "reset_optimizer_lr": False,
         "save_last": True,
         "save_best": True,
         "save_every_epochs": None,
@@ -280,6 +283,9 @@ def _validate_train_config(config: dict[str, Any]) -> None:
     if config["train"]["eval_every_epochs"] < 1:
         raise ValueError("train.eval_every_epochs must be >= 1.")
     checkpoint = config["checkpoint"]
+    for key in ("resume_optimizer", "resume_scheduler", "reset_optimizer_lr"):
+        if key in checkpoint and not isinstance(checkpoint[key], bool):
+            raise ValueError(f"checkpoint.{key} must be a boolean.")
     save_every_epochs = checkpoint.get("save_every_epochs")
     if save_every_epochs is not None:
         if not isinstance(save_every_epochs, int) or save_every_epochs < 1:
