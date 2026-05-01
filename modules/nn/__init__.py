@@ -27,6 +27,13 @@ from .mb import (
     load_remiss_config,
     merge_missbank_epoch_snapshots,
 )
+from .qg_afp import (
+    QGAFPConfig,
+    QueryGuidedScaleGate,
+    build_qg_afp_from_config,
+    build_qg_afp_from_yaml,
+    load_qg_afp_config,
+)
 
 __all__ = [
     "GOOD_STATE",
@@ -48,9 +55,14 @@ __all__ = [
     "MissBankMiningConfig",
     "MissBankRecord",
     "MissBankTargetConfig",
+    "QGAFPConfig",
+    "QueryGuidedScaleGate",
     "build_missbank_from_config",
     "build_missbank_from_yaml",
+    "build_qg_afp_from_config",
+    "build_qg_afp_from_yaml",
     "compute_missbank_stability_metrics",
+    "load_qg_afp_config",
     "load_remiss_config",
     "merge_missbank_epoch_snapshots",
     "normalize_arch",

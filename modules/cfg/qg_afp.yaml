@@ -1,0 +1,16 @@
+enabled: false
+in_channels: 256
+topk: 128
+hidden_dim: 256
+max_levels: 8
+gate_temperature: 1.0
+residual_scale_init: 0.0
+min_score: null
+levels: null
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

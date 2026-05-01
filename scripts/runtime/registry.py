@@ -7,7 +7,7 @@ from typing import Any
 import torch.nn as nn
 
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
-from modules.nn import build_lmb_from_yaml, build_missbank_from_yaml
+from modules.nn import build_lmb_from_yaml, build_missbank_from_yaml, build_qg_afp_from_yaml
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
@@ -50,7 +50,11 @@ def build_model_from_config(
             f"Model arch {arch!r} is not implemented. Supported arches: {supported}. "
             "If your YAML filename does not match the arch name, add an explicit 'arch:' field."
         )
-    model = builder(model_config)
+    post_neck = _build_post_neck_modules(
+        arch=normalized_arch,
+        module_config_paths=module_config_paths,
+    )
+    model = builder(model_config, post_neck=post_neck)
     _attach_remiss_modules(
         model,
         model_config=model_config,
@@ -65,6 +69,46 @@ def build_model_from_config(
     )
     return model
 
+
+def _build_post_neck_modules(
+    *,
+    arch: str,
+    module_config_paths: dict[str, str | Path] | None,
+) -> nn.Module | None:
+    if not module_config_paths:
+        return None
+    modules: list[nn.Module] = []
+    qg_afp_path = module_config_paths.get("qg_afp")
+    if qg_afp_path is not None and arch == "fcos":
+        qg_afp = build_qg_afp_from_yaml(
+            qg_afp_path,
+            arch=arch,
+        )
+        if qg_afp is not None:
+            modules.append(qg_afp)
+    if not modules:
+        return None
+    if len(modules) == 1:
+        return modules[0]
+    return _FeatureDictSequential(*modules)
+
+
+class _FeatureDictSequential(nn.Sequential):
+    def forward(self, features):  # type: ignore[override]
+        for module in self:
+            features = module(features)
+        return features
+
+    def get_training_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for module in self:
+            get_metrics = getattr(module, "get_training_metrics", None)
+            if not callable(get_metrics):
+                continue
+            for name, value in get_metrics().items():
+                if isinstance(value, (int, float)):
+                    metrics[str(name)] = float(value)
+        return metrics
 
 def build_model_from_path(
     model_config_path: str | Path,

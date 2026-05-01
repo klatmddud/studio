@@ -16,7 +16,8 @@ uv run scripts/train.py \
   --seed 42 \
   --device cuda:0 cuda:1 \
   --remiss-config modules/cfg/remiss.yaml \
-  --lmb-config modules/cfg/lmb.yaml
+  --lmb-config modules/cfg/lmb.yaml \
+  --qg-afp-config modules/cfg/qg_afp.yaml
 ```
 
 Baseline seed-mean training script:
@@ -49,10 +50,15 @@ When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the m
 
 When LMB is enabled, `scripts/runtime/registry.py` attaches `LocalizationMemoryBank` to the model. `matching.score_threshold: auto` resolves from the detector's final score threshold. Starting at `start_epoch`, LMB runs one no-grad training-set mining pass after each epoch and writes localization-quality stability metrics under `output_dir/lmb/`. LMB does not add detector losses or change inference.
 
+When QG-AFP v0 is enabled, `scripts/runtime/registry.py` builds it before the FCOS wrapper and inserts it as a `post_neck` module. It mines top-k proxy-objectness feature locations from FPN outputs, predicts query-conditioned level gates, and applies an identity-biased residual scale to the pyramid features. QG-AFP v0 changes FCOS forward features but does not add auxiliary losses.
+
+QG-AFP v0 metrics are aggregated through the standard train metric path, so `history.json` and `results.csv` include fields such as `train_qg_afp_gate_entropy`, `train_qg_afp_gate_max_mean`, `train_qg_afp_level_usage_entropy`, `train_qg_afp_level_top1_share`, and `train_qg_afp_alpha_l0`.
+
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
 | `--lmb-config` | `modules/cfg/lmb.yaml` |
+| `--qg-afp-config` | `modules/cfg/qg_afp.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 

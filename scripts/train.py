@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the LMB YAML config path.",
     )
+    parser.add_argument(
+        "--qg-afp-config",
+        default=None,
+        help="Optional override for the QG-AFP YAML config path.",
+    )
     return parser.parse_args()
 
 
@@ -263,6 +268,7 @@ def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str
     overrides = {
         "remiss": args.remiss_config,
         "lmb": args.lmb_config,
+        "qg_afp": args.qg_afp_config,
     }
     paths = resolve_module_config_paths(overrides, require_exists=False)
     missing = [
@@ -281,6 +287,7 @@ def _module_config_override_names(args: argparse.Namespace) -> list[str]:
     overrides = {
         "remiss": args.remiss_config,
         "lmb": args.lmb_config,
+        "qg_afp": args.qg_afp_config,
     }
     return [name for name, value in overrides.items() if value is not None]
 
@@ -294,7 +301,7 @@ def _print_module_config_overrides(
     if not override_names:
         return
     print("module_configs:")
-    for name in ("remiss", "lmb"):
+    for name in ("remiss", "lmb", "qg_afp"):
         if name not in override_names:
             continue
         path = module_config_paths.get(name)

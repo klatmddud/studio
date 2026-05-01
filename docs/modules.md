@@ -1,6 +1,6 @@
 # Research Modules
 
-The current runtime-connected research-module surface includes ReMiss MissBank and LMB. Older unrelated research-module code paths have been removed.
+The current runtime-connected research-module surface includes ReMiss MissBank, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
@@ -8,6 +8,7 @@ The current runtime-connected research-module surface includes ReMiss MissBank a
 
 - `--remiss-config`
 - `--lmb-config`
+- `--qg-afp-config`
 
 `scripts/runtime/module_configs.py` resolves default module config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
@@ -37,6 +38,7 @@ When ReMiss is enabled, MissBank is attached to FCOS and updated from final post
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update + stability logging | no | no |
 | LMB | offline mining + stability logging | no | no |
+| QG-AFP v0 | post-neck query-scale gate | no | no |
 
 ## Localization Memory Bank (`modules/nn/lmb.py`)
 
@@ -53,3 +55,19 @@ Key concepts:
 - State: `get_extra_state()` and `set_extra_state()` make LMB checkpointable.
 
 LMB does not alter detector forward computation, add losses, or change inference.
+
+## QG-AFP v0 (`modules/nn/qg_afp.py`)
+
+QG-AFP v0 is a FCOS post-neck feature modulation module. It keeps the TorchVision FPN feature-dict contract intact and returns the same keys and tensor shapes.
+
+Key concepts:
+
+- Query source: v0 does not reuse FCOS head logits, because that would create a head-to-neck-to-head loop. It predicts a lightweight proxy objectness map inside the post-neck module and mines top-k feature locations as query seeds.
+- Query encoding: each seed combines the local feature vector, a level embedding, normalized spatial position, and proxy score.
+- Scale routing: the query MLP predicts a soft level gate over active pyramid levels.
+- Residual feature update: query gates are aggregated per batch and level, then applied as `P_l * (1 + residual_scale * alpha_l)`.
+- Stability: `residual_scale_init: 0.0` makes the module identity-biased at startup.
+- Metrics: training logs include gate-collapse diagnostics such as `qg_afp_gate_entropy`, `qg_afp_gate_max_mean`, `qg_afp_level_usage_entropy`, `qg_afp_level_top1_share`, `qg_afp_alpha_l0`, `qg_afp_residual_scale`, and `qg_afp_query_count` when the module has run. These are emitted through the normal train metric path and are persisted in `history.json` and `results.csv`.
+- Config: `modules/cfg/qg_afp.yaml`.
+
+QG-AFP v0 changes detector forward computation when enabled, but it does not add an auxiliary loss. It is currently wired only for FCOS.

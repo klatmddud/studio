@@ -60,7 +60,15 @@ class FCOSWrapper(BaseDetectionWrapper):
         return self.model(images, targets)
 
     def get_training_metrics(self) -> dict[str, float]:
-        return dict(self._train_metrics)
+        metrics = dict(self._train_metrics)
+        backbone = getattr(self.model, "backbone", None)
+        post_neck = getattr(backbone, "post_neck", None)
+        get_metrics = getattr(post_neck, "get_training_metrics", None)
+        if callable(get_metrics):
+            for name, value in get_metrics().items():
+                if isinstance(value, (int, float)):
+                    metrics[str(name)] = float(value)
+        return metrics
 
     @classmethod
     def from_yaml(

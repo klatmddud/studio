@@ -29,7 +29,7 @@ models/detection/
 
 modules/
   cfg/                      # Research module configs, disabled by default
-  nn/                       # ReMiss MissBank, LMB, and shared helpers
+  nn/                       # ReMiss MissBank, LMB, QG-AFP, and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```

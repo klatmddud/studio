@@ -10,6 +10,7 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Uses TorchVision `FCOS` directly.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
 - Optional MissBank and LMB mining are attached outside the detector forward path and do not change FCOS losses or inference.
+- Optional QG-AFP v0 is inserted as a `post_neck` module between TorchVision FPN outputs and the FCOS head. It preserves feature keys and shapes but changes forward features when enabled.
 
 ### Faster R-CNN (`fasterrcnn.py`)
 
@@ -36,6 +37,10 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 | `num_classes` | Auto-inferred from COCO JSON if not set |
 | `transform.min_size` | Shorter edge resize target |
 | `transform.max_size` | Longer edge cap |
+
+## Post-Neck Modules
+
+`models/detection/wrapper/_base.py` exposes `pre_neck` and `post_neck` extension points around TorchVision FPN. QG-AFP v0 uses the `post_neck` slot for FCOS, so it receives the FPN feature dict and returns an updated feature dict before the detection head runs.
 
 ## Model Building (`scripts/runtime/registry.py`)
 
