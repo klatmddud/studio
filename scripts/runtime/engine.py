@@ -254,7 +254,8 @@ def fit(
     best_pt = checkpoint_dir / "best.pt"
     if main_process and val_loader is not None and best_pt.is_file():
         print(f"[best_val] Loading best checkpoint: {best_pt}")
-        load_checkpoint(best_pt, model=unwrap_model(model), map_location=device)
+        best_checkpoint = load_checkpoint(best_pt, model=unwrap_model(model), map_location=device)
+        best_epoch = int(best_checkpoint.get("epoch", 0))
         best_val_metrics, best_val_predictions = evaluate_coco_detection(
             model=unwrap_model(model),
             data_loader=val_loader,
@@ -263,10 +264,13 @@ def fit(
             log_interval=runtime_config["train"]["log_interval"],
             stage_label="best_val",
         )
-        _write_json(output_dir / "best_val_metrics.json", best_val_metrics)
+        best_val_payload: dict[str, Any] = {"epoch": best_epoch}
+        best_val_payload.update(best_val_metrics)
+        _write_json(output_dir / "best_val_metrics.json", best_val_payload)
         primary = runtime_config["metrics"]["primary"]
         print(
-            f"[best_val] {primary}={best_val_metrics.get(primary, float('nan')):.4f} "
+            f"[best_val] epoch={best_epoch} "
+            f"{primary}={best_val_metrics.get(primary, float('nan')):.4f} "
             f"saved to {output_dir / 'best_val_metrics.json'}"
         )
 
