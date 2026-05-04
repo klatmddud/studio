@@ -1,6 +1,6 @@
 # Research Modules
 
-The current runtime-connected research-module surface includes ReMiss MissBank, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
+The current runtime-connected research-module surface includes ReMiss MissBank, Hard Replay, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
@@ -9,6 +9,7 @@ The current runtime-connected research-module surface includes ReMiss MissBank, 
 - `--remiss-config`
 - `--lmb-config`
 - `--qg-afp-config`
+- `--hard-replay-config`
 
 `scripts/runtime/module_configs.py` resolves default module config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
@@ -32,11 +33,26 @@ Key concepts:
 
 When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissBank does not alter detector forward computation, add auxiliary losses, or inject features.
 
+## Hard Replay (`scripts/runtime/hard_replay.py`)
+
+Hard Replay is a data-layer policy driven by ReMiss MissBank. It does not split FN into subtypes. A replay target is a GT that MissBank currently marks as missed, meaning no final prediction of the same class satisfies the configured score and IoU thresholds.
+
+Key concepts:
+
+- Source: current MissBank records from the previous mining/update state.
+- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`.
+- Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
+- Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`.
+- Crop replay: `crop_replay.enabled` is disabled by default. When enabled, eligible missed GTs can produce GT-centered crop samples through `ReplaySampleRef`.
+- Offline mining: ReMiss and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
+- Config: `modules/cfg/hard_replay.yaml`.
+
 ## Support Matrix
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update + stability logging | no | no |
+| Hard Replay | MissBank-guided image/crop sampling | no | no |
 | LMB | offline mining + stability logging | no | no |
 | QG-AFP v0 | post-neck query-scale gate | no | no |
 

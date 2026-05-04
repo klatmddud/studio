@@ -17,7 +17,8 @@ uv run scripts/train.py \
   --device cuda:0 cuda:1 \
   --remiss-config modules/cfg/remiss.yaml \
   --lmb-config modules/cfg/lmb.yaml \
-  --qg-afp-config modules/cfg/qg_afp.yaml
+  --qg-afp-config modules/cfg/qg_afp.yaml \
+  --hard-replay-config modules/cfg/hard_replay.yaml
 ```
 
 Baseline seed-mean training script:
@@ -54,11 +55,16 @@ When QG-AFP v0 is enabled, `scripts/runtime/registry.py` builds it before the FC
 
 QG-AFP v0 metrics are aggregated through the standard train metric path, so `history.json` and `results.csv` include fields such as `train_qg_afp_gate_entropy`, `train_qg_afp_gate_max_mean`, `train_qg_afp_level_usage_entropy`, `train_qg_afp_level_top1_share`, and `train_qg_afp_alpha_l0`.
 
+When Hard Replay is enabled, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. The initial path is image-level replay: images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. `crop_replay` is disabled by default but can be enabled to emit GT-centered crop replay samples from the same missed-GT records.
+
+MissBank and LMB offline mining temporarily switch the train loader to base-only iteration, so mining still sees the base training set once rather than replay-augmented batches.
+
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
 | `--lmb-config` | `modules/cfg/lmb.yaml` |
 | `--qg-afp-config` | `modules/cfg/qg_afp.yaml` |
+| `--hard-replay-config` | `modules/cfg/hard_replay.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 
@@ -115,6 +121,7 @@ Common outputs under `output_dir`:
 | `lmb/lmb_stability_epoch.json` | Epoch-level LMB low-IoU stability metrics accumulated as a JSON list |
 | `lmb/lmb_stability_epoch.csv` | Flattened CSV view of `lmb_stability_epoch.json` |
 | `lmb/lmb_stability_state.json` | Last LMB snapshot used for next-epoch comparison |
+| `history.json` `hard_replay` key | Epoch-level replay candidate and exposure summary when Hard Replay is enabled |
 | `best_val_metrics.json` | Best-checkpoint epoch and validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

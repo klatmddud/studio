@@ -161,6 +161,7 @@ def fit(
         _set_data_loader_epoch(train_loader, epoch + 1)
         _set_missbank_epoch(model, epoch + 1)
         _set_lmb_epoch(model, epoch + 1)
+        _refresh_hard_replay(train_loader, model, epoch + 1)
 
         train_metrics = train_one_epoch(
             model=model,
@@ -238,6 +239,9 @@ def fit(
             "epoch": epoch + 1,
             "train": train_metrics,
         }
+        hard_replay_summary = _get_hard_replay_summary(train_loader)
+        if hard_replay_summary is not None:
+            record["hard_replay"] = hard_replay_summary
 
         should_eval = (
             val_loader is not None
@@ -741,6 +745,11 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         if primary is not None:
             parts.append(f"val_{primary_metric}={primary:.4f}")
 
+    hard_replay = record.get("hard_replay")
+    if isinstance(hard_replay, Mapping) and bool(hard_replay.get("enabled", False)):
+        parts.append(f"replay_images={int(hard_replay.get('replay_num_images', 0))}")
+        parts.append(f"replay_ratio={float(hard_replay.get('replay_ratio_effective', 0.0)):.3f}")
+
     return " ".join(parts)
 
 
@@ -810,6 +819,36 @@ def _set_data_loader_epoch(data_loader, epoch: int) -> None:
     set_epoch = getattr(batch_sampler, "set_epoch", None)
     if callable(set_epoch):
         set_epoch(int(epoch))
+
+
+def _refresh_hard_replay(data_loader, model: torch.nn.Module, epoch: int) -> None:
+    controller = getattr(data_loader, "hard_replay", None)
+    refresh = getattr(controller, "refresh", None)
+    if not callable(refresh):
+        return
+    refresh(
+        missbank=_get_missbank(model),
+        epoch=int(epoch),
+    )
+
+
+def _get_hard_replay_summary(data_loader) -> dict[str, Any] | None:
+    controller = getattr(data_loader, "hard_replay", None)
+    summary = getattr(controller, "summary", None)
+    if not callable(summary):
+        return None
+    value = summary()
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+def _set_hard_replay_base_only(data_loader, enabled: bool) -> bool:
+    controller = getattr(data_loader, "hard_replay", None)
+    batch_sampler = getattr(controller, "batch_sampler", None)
+    previous = bool(getattr(batch_sampler, "base_only", False))
+    set_base_only = getattr(controller, "set_base_only", None)
+    if callable(set_base_only):
+        set_base_only(bool(enabled))
+    return previous
 
 
 def _move_target_to_device(
@@ -918,6 +957,7 @@ def _run_missbank_offline_mining(
         return
 
     was_training = model.training
+    previous_base_only = _set_hard_replay_base_only(data_loader, True)
     model.eval()
     start_time = time.perf_counter()
     total_steps = len(data_loader)
@@ -951,6 +991,7 @@ def _run_missbank_offline_mining(
                     f"step {step}/{total_steps} epoch_eta={epoch_eta}"
                 )
     finally:
+        _set_hard_replay_base_only(data_loader, previous_base_only)
         if was_training:
             model.train()
     barrier(distributed)
@@ -976,6 +1017,7 @@ def _run_lmb_offline_mining(
         return
 
     was_training = model.training
+    previous_base_only = _set_hard_replay_base_only(data_loader, True)
     model.eval()
     start_time = time.perf_counter()
     total_steps = len(data_loader)
@@ -1009,6 +1051,7 @@ def _run_lmb_offline_mining(
                     f"step {step}/{total_steps} epoch_eta={epoch_eta}"
                 )
     finally:
+        _set_hard_replay_base_only(data_loader, previous_base_only)
         if was_training:
             model.train()
     barrier(distributed)
