@@ -290,32 +290,30 @@ matching.iou_threshold
 
 Dataset이 바뀌거나 annotation id 체계가 바뀌면 기존 MissBank state는 폐기해야 한다.
 
-## Epoch 안정성 지표
+## Failure-Type 기록
 
-MissHead의 `start_epoch`을 정하려면 MissBank target이 충분히 안정화됐는지 확인해야 한다. 이를 위해 MissBank는 매 epoch 종료 시 현재 epoch에서 miss된 GT snapshot을 만들고, 직전 epoch snapshot과 비교한 안정성 지표를 계산한다.
+현재 runtime은 MissBank 안정성 지표를 저장하지 않고, 같은 mining detection 결과를 FTMB에 기록한다. FTMB는 localization, classification, both, missed, duplicate, background failure type별 개수와 replay 후보 식별자를 저장한다.
 
-학습 결과는 `output_dir/remiss/` 아래에 JSON으로 저장한다.
+학습 결과는 `output_dir/ftmb/` 아래에 JSON으로 저장한다.
 
 | 파일 | 설명 |
 |---|---|
-| `miss_stability_epoch.json` | epoch별 안정성 지표가 누적되는 JSON list |
-| `miss_stability_epoch.csv` | `miss_stability_epoch.json`을 평탄화한 CSV |
-| `miss_stability_state.json` | 다음 epoch 비교를 위한 마지막 snapshot state |
+| `failure_type_epoch.json` | epoch별 failure type 개수와 GT/prediction failure record가 누적되는 JSON list |
+| `failure_type_epoch.csv` | `failure_type_epoch.json`을 평탄화한 CSV |
+| `failure_type_state.json` | 마지막 failure type snapshot state |
 
-기본 지표는 다음과 같다.
+기본 failure type은 다음과 같다.
 
-| 지표 | 설명 |
+| Type | 설명 |
 |---|---|
-| `miss_gt_jaccard_stability` | 직전 epoch와 현재 epoch의 missed GT set Jaccard similarity |
-| `miss_gt_churn_rate` | `1 - miss_gt_jaccard_stability` |
-| `new_miss_rate` | 현재 missed GT 중 직전 epoch에는 missed가 아니었던 GT 비율 |
-| `persistent_miss_ratio` | 현재 missed GT 중 `miss_count >= miss_threshold`인 target GT 비율 |
-| `miss_region_js_divergence` | 직전 epoch와 현재 epoch의 missed region histogram JS divergence |
-| `top1_miss_region_share` | 가장 많이 miss된 region이 전체 miss에서 차지하는 비율 |
-| `miss_region_entropy` | missed region histogram의 normalized entropy |
-| `miss_hotspot_overlap_at_k` | `(image_id, region_id)` hotspot Top-K가 직전 epoch와 겹치는 비율 |
+| `localization` | class는 맞지만 IoU가 matching threshold보다 낮은 GT failure |
+| `classification` | IoU는 충분하지만 class가 틀린 GT failure |
+| `both` | class도 틀리고 localization도 부족하지만 background threshold 이상 겹치는 GT failure |
+| `missed` | 의미 있는 overlap prediction이 없는 GT failure |
+| `duplicate` | 이미 matched된 GT에 대한 중복 prediction failure |
+| `background` | 어떤 GT와도 background threshold 이상 겹치지 않는 prediction failure |
 
-`miss_gt_jaccard_stability`가 높고 `miss_gt_churn_rate`가 낮으면 같은 GT가 반복적으로 miss되고 있다는 뜻이다. `miss_region_js_divergence`가 낮아지고 `miss_hotspot_overlap_at_k`가 높아지면 특정 image-region 단위의 실패 패턴이 안정화됐다고 볼 수 있다. 이 시점을 MissHead 학습 시작 후보로 사용한다.
+이 기록은 이후 Type-Aware Replay가 failure type별 replay slot을 구성하는 데 사용한다.
 
 ## Logging
 

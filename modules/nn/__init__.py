@@ -1,4 +1,18 @@
 from .common import normalize_arch
+from .ftmb import (
+    BACKGROUND,
+    BOTH,
+    CLASSIFICATION,
+    DUPLICATE,
+    FAILURE_TYPES,
+    FTMBConfig,
+    FTMBGTRecord,
+    FailureTypeMemoryBank,
+    LOCALIZATION,
+    MISSED,
+    build_ftmb_from_yaml,
+    merge_ftmb_epoch_snapshots,
+)
 from .lmb import (
     GOOD_STATE,
     LOW_IOU_STATE,
@@ -37,14 +51,25 @@ from .qg_afp import (
 
 __all__ = [
     "GOOD_STATE",
+    "BACKGROUND",
+    "BOTH",
+    "CLASSIFICATION",
+    "DUPLICATE",
+    "FAILURE_TYPES",
+    "FTMBConfig",
+    "FTMBGTRecord",
+    "FailureTypeMemoryBank",
     "LOW_IOU_STATE",
+    "LOCALIZATION",
     "MISSING_STATE",
+    "MISSED",
     "LocalizationMemoryBank",
     "LMBConfig",
     "LMBMatchingConfig",
     "LMBRecord",
     "LMBStabilityConfig",
     "build_lmb_from_config",
+    "build_ftmb_from_yaml",
     "build_lmb_from_yaml",
     "compute_lmb_stability_metrics",
     "load_lmb_config",
@@ -64,6 +89,7 @@ __all__ = [
     "compute_missbank_stability_metrics",
     "load_qg_afp_config",
     "load_remiss_config",
+    "merge_ftmb_epoch_snapshots",
     "merge_missbank_epoch_snapshots",
     "normalize_arch",
 ]

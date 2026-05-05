@@ -1,6 +1,6 @@
 # Research Modules
 
-The current runtime-connected research-module surface includes ReMiss MissBank, Hard Replay, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
+The current runtime-connected research-module surface includes ReMiss MissBank, FTMB, Hard Replay, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
@@ -10,6 +10,7 @@ The current runtime-connected research-module surface includes ReMiss MissBank, 
 - `--lmb-config`
 - `--qg-afp-config`
 - `--hard-replay-config`
+- `--tar-config`
 
 `scripts/runtime/module_configs.py` resolves default module config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
@@ -26,12 +27,25 @@ Key concepts:
 - Targets: `get_image_targets()` and `get_batch_labels()` emit image-level hard labels. A GT contributes only when it is currently missed and `miss_count >= target.miss_threshold`.
 - State: `get_extra_state()` and `set_extra_state()` make MissBank checkpointable.
 - Summary: `missbank.summary()` reports record counts, current missed counts, target GT counts, region histograms, class histograms, and update stats.
-- Stability: `epoch_snapshot()` and `stability_metrics()` support epoch-to-epoch miss stability metrics.
+- Runtime failure typing: FTMB records failure-type counts and per-GT failure records from the same mining detections.
 - Config: `modules/cfg/remiss.yaml`.
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissBank does not alter detector forward computation, add auxiliary losses, or inject features.
+When ReMiss is enabled, MissBank and FTMB are attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissBank and FTMB do not alter detector forward computation, add auxiliary losses, or inject features.
+
+## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
+
+FTMB stores detector failure types for later type-aware replay. It is attached from the ReMiss config and uses the same resolved detector score and IoU thresholds as MissBank, with a separate `background_iou_threshold` default of `0.1`.
+
+Key concepts:
+
+- GT failure types: `localization`, `classification`, `both`, and `missed`.
+- Prediction failure types: `duplicate` and `background`.
+- Records: `FTMBGTRecord` stores image ID, GT ID, class, box, latest failure type, type counts, consecutive type streak, and diagnostic prediction IoU/score fields.
+- Step summaries: each mining update records counts for `localization`, `classification`, `both`, `missed`, `duplicate`, and `background`.
+- Outputs: runtime writes `ftmb/failure_type_epoch.json`, `ftmb/failure_type_epoch.csv`, and `ftmb/failure_type_state.json`.
+- Replay status: current Hard Replay still reads MissBank records. FTMB is logging-only until type-aware replay policies are connected.
 
 ## Hard Replay (`scripts/runtime/hard_replay.py`)
 
@@ -44,15 +58,30 @@ Key concepts:
 - Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
 - Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`.
 - Crop replay: `crop_replay.enabled` is disabled by default. When enabled, eligible missed GTs can produce GT-centered crop samples through `ReplaySampleRef`.
-- Offline mining: ReMiss and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
+- Offline mining: ReMiss, FTMB, and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
 - Config: `modules/cfg/hard_replay.yaml`.
+
+## Type-Aware Replay (`scripts/runtime/tar.py`)
+
+TAR is a data-layer policy driven by FTMB. It is mutually exclusive with Hard Replay at the DataLoader level; when `modules/cfg/tar.yaml` is enabled, TAR owns the replay batch sampler and Hard Replay is not attached for that loader.
+
+Key concepts:
+
+- Source: FTMB GT records for `localization`, `classification`, `both`, and `missed`; FTMB prediction events for `duplicate` and `background`.
+- Total budget: `replay_ratio` controls how many batch slots are replay slots.
+- Type split: `type_ratios` assigns replay slots to `loc`, `cls`, `both`, `missed`, `duplicate`, and `background`. If a requested type has no candidates, its slots are redistributed across available types.
+- Eligibility: records must satisfy `min_consecutive_count`, `min_total_failed`, and `replay_recency_window`. Prediction events use the same recency window.
+- Current replay form: full-image replay. `TARSampleRef` carries failure type, image ID, optional GT ID, class, and bbox so later type-specific crop or hard-negative policies can use the same sampler path.
+- Config: `modules/cfg/tar.yaml`.
 
 ## Support Matrix
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
-| ReMiss MissBank | memory update + stability logging | no | no |
+| ReMiss MissBank | memory update for Hard Replay | no | no |
+| FTMB | failure-type logging | no | no |
 | Hard Replay | MissBank-guided image/crop sampling | no | no |
+| TAR | FTMB-guided type-aware image sampling | no | no |
 | LMB | offline mining + stability logging | no | no |
 | QG-AFP v0 | post-neck query-scale gate | no | no |
 

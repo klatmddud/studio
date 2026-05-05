@@ -18,7 +18,8 @@ uv run scripts/train.py \
   --remiss-config modules/cfg/remiss.yaml \
   --lmb-config modules/cfg/lmb.yaml \
   --qg-afp-config modules/cfg/qg_afp.yaml \
-  --hard-replay-config modules/cfg/hard_replay.yaml
+  --hard-replay-config modules/cfg/hard_replay.yaml \
+  --tar-config modules/cfg/tar.yaml
 ```
 
 Baseline seed-mean training script:
@@ -47,7 +48,7 @@ bash scripts/bash/baseline/train.bash
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve MissBank matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls MissBank mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before ReMiss stability metrics are written. MissBank does not add detector losses or feature injection.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank and FTMB to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before FTMB failure-type outputs are written. MissBank and FTMB do not add detector losses or feature injection.
 
 When LMB is enabled, `scripts/runtime/registry.py` attaches `LocalizationMemoryBank` to the model. `matching.score_threshold: auto` resolves from the detector's final score threshold. Starting at `start_epoch`, LMB runs one no-grad training-set mining pass after each epoch and writes localization-quality stability metrics under `output_dir/lmb/`. LMB does not add detector losses or change inference.
 
@@ -57,7 +58,9 @@ QG-AFP v0 metrics are aggregated through the standard train metric path, so `his
 
 When Hard Replay is enabled, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. The initial path is image-level replay: images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. `crop_replay` is disabled by default but can be enabled to emit GT-centered crop replay samples from the same missed-GT records.
 
-MissBank and LMB offline mining temporarily switch the train loader to base-only iteration, so mining still sees the base training set once rather than replay-augmented batches.
+When TAR is enabled, `scripts/runtime/data.py` uses the TAR batch sampler instead of Hard Replay. The TAR index is refreshed at epoch start from FTMB records and prediction events. `modules/cfg/tar.yaml` controls the total `replay_ratio` and the split of replay slots across `loc`, `cls`, `both`, `missed`, `duplicate`, and `background` failure types through `type_ratios`. TAR currently replays full images by failure type and keeps `gt_id`, class, bbox, and failure type on the replay sample reference for later crop/negative replay policies.
+
+MissBank, FTMB, TAR, Hard Replay, and LMB offline mining temporarily switch the train loader to base-only iteration, so mining still sees the base training set once rather than replay-augmented batches.
 
 | CLI flag | Default path |
 |---|---|
@@ -65,6 +68,7 @@ MissBank and LMB offline mining temporarily switch the train loader to base-only
 | `--lmb-config` | `modules/cfg/lmb.yaml` |
 | `--qg-afp-config` | `modules/cfg/qg_afp.yaml` |
 | `--hard-replay-config` | `modules/cfg/hard_replay.yaml` |
+| `--tar-config` | `modules/cfg/tar.yaml` |
 
 Enabled module config snapshots are persisted to `metadata/modules.yaml`.
 
@@ -102,7 +106,7 @@ checkpoint:
 
 When `resume_scheduler: false`, the fresh scheduler is aligned to the resumed global epoch, so a `multistep` milestone `143` still takes effect after epoch 143 and affects epoch 144 onward.
 
-When resuming a baseline checkpoint with ReMiss MissBank or LMB newly enabled, `missbank._extra_state` and `lmb._extra_state` are allowed to be missing and the corresponding memory bank starts from an empty state. Detector weights, epoch, and `best_metric` are restored from the checkpoint; optimizer and scheduler state follow the resume controls above.
+When resuming a baseline checkpoint with ReMiss MissBank, FTMB, or LMB newly enabled, `missbank._extra_state`, `ftmb._extra_state`, and `lmb._extra_state` are allowed to be missing and the corresponding memory bank starts from an empty state. Detector weights, epoch, and `best_metric` are restored from the checkpoint; optimizer and scheduler state follow the resume controls above.
 
 ## Metrics And Outputs
 
@@ -115,13 +119,14 @@ Common outputs under `output_dir`:
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
 | `checkpoints/epoch_0020.pt` | Periodic checkpoint example written by `checkpoint.save_every_epochs: 20` |
-| `remiss/miss_stability_epoch.json` | Epoch-level MissBank stability metrics accumulated as a JSON list |
-| `remiss/miss_stability_epoch.csv` | Flattened CSV view of `miss_stability_epoch.json` |
-| `remiss/miss_stability_state.json` | Last MissBank snapshot used for next-epoch comparison |
+| `ftmb/failure_type_epoch.json` | Epoch-level FTMB failure-type counts, GT records, prediction events, and step summaries |
+| `ftmb/failure_type_epoch.csv` | Flattened CSV view of `failure_type_epoch.json` |
+| `ftmb/failure_type_state.json` | Last FTMB failure-type snapshot |
 | `lmb/lmb_stability_epoch.json` | Epoch-level LMB low-IoU stability metrics accumulated as a JSON list |
 | `lmb/lmb_stability_epoch.csv` | Flattened CSV view of `lmb_stability_epoch.json` |
 | `lmb/lmb_stability_state.json` | Last LMB snapshot used for next-epoch comparison |
 | `history.json` `hard_replay` key | Epoch-level replay candidate and exposure summary when Hard Replay is enabled |
+| `history.json` `tar` key | Epoch-level type-aware replay candidate, slot, and exposure summary when TAR is enabled |
 | `best_val_metrics.json` | Best-checkpoint epoch and validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

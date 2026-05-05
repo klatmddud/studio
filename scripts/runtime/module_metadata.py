@@ -10,6 +10,7 @@ from modules.nn import load_lmb_config, load_qg_afp_config, load_remiss_config, 
 from .config import load_yaml_file
 from .hard_replay import load_hard_replay_config
 from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
+from .tar import load_tar_config
 
 MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
@@ -18,6 +19,7 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "lmb": load_lmb_config,
     "qg_afp": load_qg_afp_config,
     "hard_replay": load_hard_replay_config,
+    "tar": load_tar_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
@@ -25,6 +27,7 @@ _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "lmb": {"fcos"},
     "qg_afp": {"fcos"},
     "hard_replay": {"fcos"},
+    "tar": {"fcos"},
 }
 
 

@@ -7,7 +7,7 @@ from typing import Any
 import torch.nn as nn
 
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
-from modules.nn import build_lmb_from_yaml, build_missbank_from_yaml, build_qg_afp_from_yaml
+from modules.nn import build_ftmb_from_yaml, build_lmb_from_yaml, build_missbank_from_yaml, build_qg_afp_from_yaml
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
@@ -156,6 +156,14 @@ def _attach_remiss_modules(
     if missbank is None:
         return
     model.missbank = missbank
+    ftmb = build_ftmb_from_yaml(
+        remiss_path,
+        arch=arch,
+        detector_score_threshold=detector_thresholds.get("score"),
+        detector_iou_threshold=detector_thresholds.get("iou"),
+    )
+    if ftmb is not None:
+        model.ftmb = ftmb
 
 
 def _attach_lmb_modules(

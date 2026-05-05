@@ -1,0 +1,25 @@
+enabled: false
+start_epoch: 2
+warmup_epochs: 0
+replay_ratio: 0.25
+max_replays_per_batch: 0
+replacement: true
+replay_recency_window: 1
+max_replays_per_record_per_epoch: 4
+min_consecutive_count: 1
+min_total_failed: 1
+
+type_ratios:
+  loc: 0.25
+  cls: 0.15
+  both: 0.25
+  missed: 0.25
+  duplicate: 0.05
+  background: 0.05
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

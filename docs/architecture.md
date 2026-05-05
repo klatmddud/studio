@@ -14,6 +14,7 @@ scripts/
     data.py                 # COCO dataset + DataLoader builders
     engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
     hard_replay.py          # MissBank-guided image/crop replay planner and mixed batch sampler
+    tar.py                  # FTMB-guided type-aware replay planner and batch sampler
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
@@ -51,11 +52,11 @@ ops/                        # Reserved for custom ops (currently empty)
 train.py
   -> load_runtime_config()       # merge YAML + env vars
   -> build_model_from_path()     # registry.py -> wrapper
-  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset / optional Hard Replay sampler
+  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset / optional TAR or Hard Replay sampler
   -> fit()                       # engine.py -> training loop + replay refresh hooks
 ```
 
-When `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler`. `engine.fit()` refreshes its epoch-level replay index from ReMiss MissBank before each epoch and temporarily disables replay during offline mining passes.
+When `modules/cfg/tar.yaml` is enabled, the train loader uses the TAR batch sampler and refreshes its epoch-level replay index from FTMB before each epoch. Otherwise, when `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler` and refreshes from ReMiss MissBank. `engine.fit()` temporarily disables replay during offline mining passes.
 
 ## Supported Architectures
 

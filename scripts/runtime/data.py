@@ -14,6 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
 from .hard_replay import HardReplayController, ReplaySampleRef, build_hard_replay_controller_from_yaml
+from .tar import TARController, TARSampleRef, build_tar_controller_from_yaml
 
 
 class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
@@ -26,9 +27,11 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
     def __len__(self) -> int:
         return len(self.image_ids)
 
-    def __getitem__(self, index: int | ReplaySampleRef) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def __getitem__(self, index: int | ReplaySampleRef | TARSampleRef) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if isinstance(index, ReplaySampleRef):
             return self._get_replay_sample(index)
+        if isinstance(index, TARSampleRef):
+            return self[int(index.dataset_index)]
 
         image_id = self.image_ids[int(index)]
         image_info = self.coco.loadImgs([image_id])[0]
@@ -90,7 +93,16 @@ def build_train_dataloaders(
         config["data"]["train_images"],
         config["data"]["train_annotations"],
     )
-    hard_replay = _build_hard_replay_controller(
+    tar = _build_tar_controller(
+        dataset=train_dataset,
+        config=config,
+        arch=arch,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        module_config_paths=module_config_paths,
+    )
+    hard_replay = None if tar is not None else _build_hard_replay_controller(
         dataset=train_dataset,
         config=config,
         arch=arch,
@@ -100,7 +112,11 @@ def build_train_dataloaders(
         module_config_paths=module_config_paths,
     )
     sampler = None
-    if distributed and hard_replay is None:
+    replay_batch_sampler = tar.batch_sampler if tar is not None else None
+    if replay_batch_sampler is None and hard_replay is not None:
+        replay_batch_sampler = hard_replay.batch_sampler
+
+    if distributed and replay_batch_sampler is None:
         sampler = DistributedSampler(
             train_dataset,
             num_replicas=int(world_size),
@@ -117,8 +133,10 @@ def build_train_dataloaders(
         pin_memory=config["loader"]["pin_memory"],
         shuffle=config["loader"]["shuffle"] if sampler is None else False,
         sampler=sampler,
-        batch_sampler=None if hard_replay is None else hard_replay.batch_sampler,
+        batch_sampler=replay_batch_sampler,
     )
+    if tar is not None:
+        train_loader.tar_replay = tar
     if hard_replay is not None:
         train_loader.hard_replay = hard_replay
 
@@ -210,6 +228,36 @@ def _build_hard_replay_controller(
     if not path.is_file():
         return None
     return build_hard_replay_controller_from_yaml(
+        path,
+        dataset=dataset,
+        batch_size=int(config["loader"]["batch_size"]),
+        shuffle=bool(config["loader"]["shuffle"]),
+        seed=int(config["seed"]),
+        rank=int(rank) if distributed else 0,
+        world_size=int(world_size) if distributed else 1,
+        arch=arch,
+    )
+
+
+def _build_tar_controller(
+    *,
+    dataset: CocoDetectionDataset,
+    config: dict[str, Any],
+    arch: str | None,
+    distributed: bool,
+    rank: int,
+    world_size: int,
+    module_config_paths: dict[str, str | Path] | None,
+) -> TARController | None:
+    if not module_config_paths:
+        return None
+    tar_path = module_config_paths.get("tar")
+    if tar_path is None:
+        return None
+    path = Path(tar_path).expanduser().resolve()
+    if not path.is_file():
+        return None
+    return build_tar_controller_from_yaml(
         path,
         dataset=dataset,
         batch_size=int(config["loader"]["batch_size"]),
