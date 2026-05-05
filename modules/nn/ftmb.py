@@ -433,7 +433,16 @@ class FailureTypeMemoryBank(nn.Module):
         )
         image_id = _normalize_image_id(target.get("image_id", torch.tensor(image_index)))
         stats["images_seen"] += 1
-        stats["predictions_seen"] += int((pred_scores >= float(self.config.score_threshold)).sum().item())
+
+        pred_boxes = pred_boxes.to(dtype=torch.float32)
+        pred_labels = pred_labels.to(device=pred_boxes.device, dtype=torch.long)
+        pred_scores = pred_scores.to(device=pred_boxes.device, dtype=torch.float32)
+        active_mask = pred_scores >= float(self.config.score_threshold)
+        pred_boxes = pred_boxes[active_mask]
+        pred_labels = pred_labels[active_mask]
+        pred_scores = pred_scores[active_mask]
+        active_indices = torch.arange(pred_boxes.shape[0], device=pred_boxes.device)
+        stats["predictions_seen"] += int(pred_scores.shape[0])
 
         if gt_boxes.numel() == 0:
             stats.update(
@@ -492,11 +501,11 @@ class FailureTypeMemoryBank(nn.Module):
         gt_tensor = torch.tensor([item["bbox_xyxy"] for item in gt_items], dtype=torch.float32)
         if pred_boxes.numel() > 0:
             gt_tensor = gt_tensor.to(device=pred_boxes.device)
-        pred_boxes = pred_boxes.to(device=gt_tensor.device, dtype=torch.float32)
-        pred_labels = pred_labels.to(device=gt_tensor.device, dtype=torch.long)
-        pred_scores = pred_scores.to(device=gt_tensor.device, dtype=torch.float32)
-        active_mask = pred_scores >= float(self.config.score_threshold)
-        active_indices = torch.where(active_mask)[0]
+        else:
+            pred_boxes = pred_boxes.to(device=gt_tensor.device)
+            pred_labels = pred_labels.to(device=gt_tensor.device)
+            pred_scores = pred_scores.to(device=gt_tensor.device)
+            active_indices = active_indices.to(device=gt_tensor.device)
         iou_matrix = (
             box_ops.box_iou(gt_tensor, pred_boxes).clamp(min=0.0, max=1.0)
             if pred_boxes.numel() > 0

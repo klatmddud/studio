@@ -42,6 +42,7 @@ Key concepts:
 
 - GT failure types: `localization`, `classification`, `both`, and `missed`.
 - Prediction failure types: `duplicate` and `background`.
+- Prediction filtering: predictions below `matching.score_threshold` are removed before FTMB computes GT x prediction IoU and failure-type matches.
 - Records: `FTMBGTRecord` stores image ID, GT ID, class, box, latest failure type, type counts, consecutive type streak, and diagnostic prediction IoU/score fields.
 - Step summaries: each mining update records counts for `localization`, `classification`, `both`, `missed`, `duplicate`, and `background`.
 - Outputs: runtime writes count-only `ftmb/failure_type_epoch.json`, `ftmb/failure_type_epoch.csv`, and `ftmb/failure_type_state.json`; detailed GT records and prediction events are kept in memory for replay but are not written to these result files.
