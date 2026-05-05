@@ -2,6 +2,10 @@
 
 PyTorch object detection training framework supporting FCOS, Faster R-CNN, and DINO with COCO-format datasets. Current research-module work is centered on ReMiss MissBank.
 
+## Coding Guidelines
+
+When creating or modifying code, you must follow [docs/codes.md](docs/codes.md).
+
 ## Quick Reference
 
 | Task | Docs |
@@ -11,6 +15,7 @@ PyTorch object detection training framework supporting FCOS, Faster R-CNN, and D
 | Model architectures and wrappers | [docs/models.md](docs/models.md) |
 | Research modules (ReMiss) | [docs/modules.md](docs/modules.md) |
 | Dataset format, DataLoader, env vars | [docs/data.md](docs/data.md) |
+| Coding guidelines | [docs/codes.md](docs/codes.md) |
 
 ## Common Commands
 
