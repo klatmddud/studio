@@ -61,6 +61,12 @@ def build_model_from_config(
         arch=normalized_arch,
         module_config_paths=module_config_paths,
     )
+    _attach_ftmb_modules(
+        model,
+        model_config=model_config,
+        arch=normalized_arch,
+        module_config_paths=module_config_paths,
+    )
     _attach_lmb_modules(
         model,
         model_config=model_config,
@@ -156,8 +162,25 @@ def _attach_remiss_modules(
     if missbank is None:
         return
     model.missbank = missbank
+
+
+def _attach_ftmb_modules(
+    model: nn.Module,
+    *,
+    model_config: dict[str, Any],
+    arch: str,
+    module_config_paths: dict[str, str | Path] | None,
+) -> None:
+    if arch != "fcos":
+        return
+    if not module_config_paths:
+        return
+    ftmb_path = module_config_paths.get("ftmb")
+    if ftmb_path is None:
+        return
+    detector_thresholds = _detector_thresholds(model_config, arch=arch)
     ftmb = build_ftmb_from_yaml(
-        remiss_path,
+        ftmb_path,
         arch=arch,
         detector_score_threshold=detector_thresholds.get("score"),
         detector_iou_threshold=detector_thresholds.get("iou"),

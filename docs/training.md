@@ -16,6 +16,7 @@ uv run scripts/train.py \
   --seed 42 \
   --device cuda:0 cuda:1 \
   --remiss-config modules/cfg/remiss.yaml \
+  --ftmb-config modules/cfg/ftmb.yaml \
   --lmb-config modules/cfg/lmb.yaml \
   --qg-afp-config modules/cfg/qg_afp.yaml \
   --hard-replay-config modules/cfg/hard_replay.yaml \
@@ -48,7 +49,9 @@ bash scripts/bash/baseline/train.bash
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank and FTMB to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch, before FTMB failure-type outputs are written. MissBank and FTMB do not add detector losses or feature injection.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to the model. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config, so FCOS uses `head.score_thresh` and `head.nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch. MissBank does not add detector losses or feature injection.
+
+When FTMB is enabled, `scripts/runtime/registry.py` attaches `FailureTypeMemoryBank` from `modules/cfg/ftmb.yaml` independently from ReMiss MissBank. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve from the detector's final post-processing config. FTMB uses `mining.type: online` or `offline` to record epoch-level `localization`, `classification`, `both`, `missed`, `duplicate`, and `background` counts. Runtime outputs under `output_dir/ftmb/` are count-only summaries and do not persist detailed GT records or prediction events.
 
 When LMB is enabled, `scripts/runtime/registry.py` attaches `LocalizationMemoryBank` to the model. `matching.score_threshold: auto` resolves from the detector's final score threshold. Starting at `start_epoch`, LMB runs one no-grad training-set mining pass after each epoch and writes localization-quality stability metrics under `output_dir/lmb/`. LMB does not add detector losses or change inference.
 
@@ -65,6 +68,7 @@ MissBank, FTMB, TAR, Hard Replay, and LMB offline mining temporarily switch the 
 | CLI flag | Default path |
 |---|---|
 | `--remiss-config` | `modules/cfg/remiss.yaml` |
+| `--ftmb-config` | `modules/cfg/ftmb.yaml` |
 | `--lmb-config` | `modules/cfg/lmb.yaml` |
 | `--qg-afp-config` | `modules/cfg/qg_afp.yaml` |
 | `--hard-replay-config` | `modules/cfg/hard_replay.yaml` |
@@ -119,9 +123,9 @@ Common outputs under `output_dir`:
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
 | `checkpoints/epoch_0020.pt` | Periodic checkpoint example written by `checkpoint.save_every_epochs: 20` |
-| `ftmb/failure_type_epoch.json` | Epoch-level FTMB failure-type counts, GT records, prediction events, and step summaries |
+| `ftmb/failure_type_epoch.json` | Epoch-level FTMB failure-type counts accumulated as a JSON list |
 | `ftmb/failure_type_epoch.csv` | Flattened CSV view of `failure_type_epoch.json` |
-| `ftmb/failure_type_state.json` | Last FTMB failure-type snapshot |
+| `ftmb/failure_type_state.json` | Last count-only FTMB failure-type snapshot |
 | `lmb/lmb_stability_epoch.json` | Epoch-level LMB low-IoU stability metrics accumulated as a JSON list |
 | `lmb/lmb_stability_epoch.csv` | Flattened CSV view of `lmb_stability_epoch.json` |
 | `lmb/lmb_stability_state.json` | Last LMB snapshot used for next-epoch comparison |

@@ -1,0 +1,20 @@
+enabled: false
+start_epoch: 1
+max_records: null
+
+mining:
+  type: offline
+
+matching:
+  score_threshold: auto
+  iou_threshold: auto
+
+background:
+  iou_threshold: 0.1
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

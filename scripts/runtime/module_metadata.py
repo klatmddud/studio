@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modules.nn import load_lmb_config, load_qg_afp_config, load_remiss_config, normalize_arch
+from modules.nn import load_ftmb_config, load_lmb_config, load_qg_afp_config, load_remiss_config, normalize_arch
 
 from .config import load_yaml_file
 from .hard_replay import load_hard_replay_config
@@ -16,6 +16,7 @@ MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "remiss": load_remiss_config,
+    "ftmb": load_ftmb_config,
     "lmb": load_lmb_config,
     "qg_afp": load_qg_afp_config,
     "hard_replay": load_hard_replay_config,
@@ -24,6 +25,7 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "remiss": {"fcos"},
+    "ftmb": {"fcos"},
     "lmb": {"fcos"},
     "qg_afp": {"fcos"},
     "hard_replay": {"fcos"},

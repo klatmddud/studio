@@ -66,6 +66,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the ReMiss YAML config path.",
     )
     parser.add_argument(
+        "--ftmb-config",
+        default=None,
+        help="Optional override for the FTMB YAML config path.",
+    )
+    parser.add_argument(
         "--lmb-config",
         default=None,
         help="Optional override for the LMB YAML config path.",
@@ -277,6 +282,7 @@ def _find_free_port() -> int:
 def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str, Path]:
     overrides = {
         "remiss": args.remiss_config,
+        "ftmb": args.ftmb_config,
         "lmb": args.lmb_config,
         "qg_afp": args.qg_afp_config,
         "hard_replay": args.hard_replay_config,
@@ -298,6 +304,7 @@ def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str
 def _module_config_override_names(args: argparse.Namespace) -> list[str]:
     overrides = {
         "remiss": args.remiss_config,
+        "ftmb": args.ftmb_config,
         "lmb": args.lmb_config,
         "qg_afp": args.qg_afp_config,
         "hard_replay": args.hard_replay_config,
@@ -315,7 +322,7 @@ def _print_module_config_overrides(
     if not override_names:
         return
     print("module_configs:")
-    for name in ("remiss", "lmb", "qg_afp", "hard_replay", "tar"):
+    for name in ("remiss", "ftmb", "lmb", "qg_afp", "hard_replay", "tar"):
         if name not in override_names:
             continue
         path = module_config_paths.get(name)

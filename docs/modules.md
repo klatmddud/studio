@@ -7,6 +7,7 @@ The current runtime-connected research-module surface includes ReMiss MissBank, 
 `scripts/train.py` accepts:
 
 - `--remiss-config`
+- `--ftmb-config`
 - `--lmb-config`
 - `--qg-afp-config`
 - `--hard-replay-config`
@@ -27,16 +28,15 @@ Key concepts:
 - Targets: `get_image_targets()` and `get_batch_labels()` emit image-level hard labels. A GT contributes only when it is currently missed and `miss_count >= target.miss_threshold`.
 - State: `get_extra_state()` and `set_extra_state()` make MissBank checkpointable.
 - Summary: `missbank.summary()` reports record counts, current missed counts, target GT counts, region histograms, class histograms, and update stats.
-- Runtime failure typing: FTMB records failure-type counts and per-GT failure records from the same mining detections.
 - Config: `modules/cfg/remiss.yaml`.
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank and FTMB are attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. MissBank and FTMB do not alter detector forward computation, add auxiliary losses, or inject features.
+When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml`. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features.
 
 ## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
 
-FTMB stores detector failure types for later type-aware replay. It is attached from the ReMiss config and uses the same resolved detector score and IoU thresholds as MissBank, with a separate `background_iou_threshold` default of `0.1`.
+FTMB stores detector failure types for later type-aware replay. It is attached from `modules/cfg/ftmb.yaml` independently from ReMiss MissBank. It resolves `matching.score_threshold: auto` and `matching.iou_threshold: auto` from the detector's final post-processing config, with a separate `background.iou_threshold` default of `0.1`.
 
 Key concepts:
 
@@ -44,8 +44,8 @@ Key concepts:
 - Prediction failure types: `duplicate` and `background`.
 - Records: `FTMBGTRecord` stores image ID, GT ID, class, box, latest failure type, type counts, consecutive type streak, and diagnostic prediction IoU/score fields.
 - Step summaries: each mining update records counts for `localization`, `classification`, `both`, `missed`, `duplicate`, and `background`.
-- Outputs: runtime writes `ftmb/failure_type_epoch.json`, `ftmb/failure_type_epoch.csv`, and `ftmb/failure_type_state.json`.
-- Replay status: current Hard Replay still reads MissBank records. FTMB is logging-only until type-aware replay policies are connected.
+- Outputs: runtime writes count-only `ftmb/failure_type_epoch.json`, `ftmb/failure_type_epoch.csv`, and `ftmb/failure_type_state.json`; detailed GT records and prediction events are kept in memory for replay but are not written to these result files.
+- Config: `modules/cfg/ftmb.yaml`.
 
 ## Hard Replay (`scripts/runtime/hard_replay.py`)
 

@@ -1289,9 +1289,11 @@ def _write_ftmb_failure_outputs(
     snapshot: dict[str, Any],
 ) -> None:
     ftmb_dir = output_dir / "ftmb"
-    _write_json(ftmb_dir / "failure_type_epoch.json", history)
-    _write_history_csv(ftmb_dir / "failure_type_epoch.csv", history)
-    _write_json(ftmb_dir / "failure_type_state.json", {"snapshot": snapshot})
+    slim_history = [_slim_ftmb_failure_record(record) for record in history]
+    slim_snapshot = _slim_ftmb_failure_record(snapshot)
+    _write_json(ftmb_dir / "failure_type_epoch.json", slim_history)
+    _write_history_csv(ftmb_dir / "failure_type_epoch.csv", slim_history)
+    _write_json(ftmb_dir / "failure_type_state.json", {"snapshot": slim_snapshot})
 
 
 def _write_lmb_stability_outputs(
@@ -1308,7 +1310,24 @@ def _write_lmb_stability_outputs(
 
 
 def _read_ftmb_failure_history(ftmb_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(ftmb_dir / "failure_type_epoch.json")
+    return [
+        _slim_ftmb_failure_record(record)
+        for record in _read_json_list(ftmb_dir / "failure_type_epoch.json")
+    ]
+
+
+def _slim_ftmb_failure_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    detail_keys = {
+        "gt_failure_records",
+        "gt_failure_records_by_type",
+        "prediction_failure_events",
+        "step_summaries",
+    }
+    return {
+        str(key): value
+        for key, value in record.items()
+        if str(key) not in detail_keys
+    }
 
 
 def _read_lmb_stability_history(lmb_dir: Path) -> list[dict[str, Any]]:

@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
+import yaml
 from torchvision.ops import boxes as box_ops
 
+from .common import normalize_arch
 from .mb import (
-    MissBankConfig,
     _as_boxes_tensor,
     _as_float_tensor,
     _as_int_tensor,
@@ -22,7 +23,6 @@ from .mb import (
     _record_key,
     _resolve_image_size,
     _valid_box,
-    load_remiss_config,
 )
 
 LOCALIZATION = "localization"
@@ -42,49 +42,108 @@ class FTMBConfig:
     enabled: bool = False
     start_epoch: int = 1
     mining_type: str = "online"
-    score_threshold: float = 0.2
-    iou_threshold: float = 0.5
+    score_threshold: float | str = "auto"
+    iou_threshold: float | str = "auto"
     background_iou_threshold: float = 0.1
     max_records: int | None = None
     arch: str | None = None
 
     @classmethod
-    def from_missbank_config(
+    def from_mapping(
         cls,
-        config: MissBankConfig,
+        raw: Mapping[str, Any] | None = None,
         *,
-        background_iou_threshold: float = 0.1,
+        arch: str | None = None,
     ) -> "FTMBConfig":
-        score_threshold = config.matching.score_threshold
-        iou_threshold = config.matching.iou_threshold
-        if _is_auto_threshold(score_threshold) or _is_auto_threshold(iou_threshold):
-            raise ValueError("FTMB requires resolved detector thresholds.")
-        ftmb_config = cls(
-            enabled=bool(config.enabled),
-            start_epoch=int(config.start_epoch),
-            mining_type=str(config.mining.type).lower(),
-            score_threshold=float(score_threshold),
-            iou_threshold=float(iou_threshold),
-            background_iou_threshold=float(background_iou_threshold),
-            max_records=config.max_records,
-            arch=config.arch,
+        data = dict(raw or {})
+        normalized_arch = normalize_arch(arch or data.get("arch"))
+        model_overrides: dict[str, Any] = {}
+        if normalized_arch is not None:
+            per_model = data.get("models", {})
+            if isinstance(per_model, Mapping):
+                selected = per_model.get(normalized_arch, {})
+                if isinstance(selected, Mapping):
+                    model_overrides = dict(selected)
+
+        merged = dict(data)
+        for key, value in model_overrides.items():
+            if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+                nested = dict(merged[key])
+                nested.update(value)
+                merged[key] = nested
+            else:
+                merged[key] = value
+
+        mining = _mapping_or_empty(merged.get("mining"))
+        matching = _mapping_or_empty(merged.get("matching"))
+        background = _mapping_or_empty(merged.get("background"))
+        config = cls(
+            enabled=bool(merged.get("enabled", False)),
+            start_epoch=int(merged.get("start_epoch", 1)),
+            mining_type=str(mining.get("type", merged.get("mining_type", "online"))).lower(),
+            score_threshold=matching.get("score_threshold", merged.get("score_threshold", "auto")),
+            iou_threshold=matching.get("iou_threshold", merged.get("iou_threshold", "auto")),
+            background_iou_threshold=float(
+                background.get("iou_threshold", merged.get("background_iou_threshold", 0.1))
+            ),
+            max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
+            arch=normalized_arch,
         )
-        ftmb_config.validate()
-        return ftmb_config
+        config.validate()
+        return config
 
     def validate(self) -> None:
         if int(self.start_epoch) < 0:
             raise ValueError("FTMB start_epoch must be >= 0.")
         if self.mining_type not in {"online", "offline"}:
             raise ValueError("FTMB mining_type must be either 'online' or 'offline'.")
-        for name in ("score_threshold", "iou_threshold", "background_iou_threshold"):
-            value = float(getattr(self, name))
+        for name in ("score_threshold", "iou_threshold"):
+            value = getattr(self, name)
+            if _is_auto_threshold(value):
+                continue
+            value = float(value)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"FTMB {name} must satisfy 0 <= value <= 1.")
-        if float(self.background_iou_threshold) > float(self.iou_threshold):
+        background_iou_threshold = float(self.background_iou_threshold)
+        if not 0.0 <= background_iou_threshold <= 1.0:
+            raise ValueError("FTMB background_iou_threshold must satisfy 0 <= value <= 1.")
+        if (
+            not _is_auto_threshold(self.iou_threshold)
+            and background_iou_threshold > float(self.iou_threshold)
+        ):
             raise ValueError("FTMB background_iou_threshold must be <= iou_threshold.")
         if self.max_records is not None and int(self.max_records) < 1:
             raise ValueError("FTMB max_records must be null or >= 1.")
+
+    def resolve_detector_thresholds(
+        self,
+        *,
+        detector_score_threshold: float | None,
+        detector_iou_threshold: float | None,
+    ) -> "FTMBConfig":
+        score_threshold = self.score_threshold
+        iou_threshold = self.iou_threshold
+        if _is_auto_threshold(score_threshold):
+            if detector_score_threshold is None:
+                raise ValueError(
+                    "FTMB matching.score_threshold='auto' requires the detector final score threshold."
+                )
+            score_threshold = float(detector_score_threshold)
+        if _is_auto_threshold(iou_threshold):
+            if detector_iou_threshold is None:
+                raise ValueError(
+                    "FTMB matching.iou_threshold='auto' requires the detector final IoU threshold."
+                )
+            iou_threshold = float(detector_iou_threshold)
+        if score_threshold == self.score_threshold and iou_threshold == self.iou_threshold:
+            return self
+        config = replace(
+            self,
+            score_threshold=float(score_threshold),
+            iou_threshold=float(iou_threshold),
+        )
+        config.validate()
+        return config
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,26 +364,6 @@ class FailureTypeMemoryBank(nn.Module):
         for summary in step_summaries:
             for failure_type in FAILURE_TYPES:
                 counts[failure_type] += int(summary.get(f"{failure_type}_count", 0))
-
-        records = [
-            record
-            for record in self._records.values()
-            if int(record.last_epoch) == epoch_value
-        ]
-        failed_records = [record for record in records if record.failure_type in GT_FAILURE_TYPES]
-        prediction_events = [
-            event
-            for event in self._prediction_events
-            if int(event.get("epoch", 0)) == epoch_value
-        ]
-        type_records = {
-            failure_type: [
-                record.to_state()
-                for record in failed_records
-                if record.failure_type == failure_type
-            ]
-            for failure_type in GT_FAILURE_TYPES
-        }
         return {
             "epoch": epoch_value,
             "enabled": self.config.enabled,
@@ -338,10 +377,6 @@ class FailureTypeMemoryBank(nn.Module):
             "num_gt_detected": sum(int(summary.get("gt_detected", 0)) for summary in step_summaries),
             "num_predictions_seen": sum(int(summary.get("predictions_seen", 0)) for summary in step_summaries),
             **{f"{failure_type}_count": int(counts[failure_type]) for failure_type in FAILURE_TYPES},
-            "gt_failure_records": [record.to_state() for record in failed_records],
-            "gt_failure_records_by_type": type_records,
-            "prediction_failure_events": prediction_events,
-            "step_summaries": step_summaries,
         }
 
     def get_extra_state(self) -> dict[str, Any]:
@@ -658,24 +693,51 @@ class FailureTypeMemoryBank(nn.Module):
         self._image_index = image_index
 
 
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
 def build_ftmb_from_yaml(
     path: str | Path,
     *,
     arch: str | None = None,
     detector_score_threshold: float | None = None,
     detector_iou_threshold: float | None = None,
-    background_iou_threshold: float = 0.1,
 ) -> FailureTypeMemoryBank | None:
-    missbank_config = load_remiss_config(path, arch=arch)
-    if not missbank_config.enabled:
+    config = load_ftmb_config(path, arch=arch)
+    if not config.enabled:
         return None
-    missbank_config = missbank_config.resolve_detector_thresholds(
+    config = config.resolve_detector_thresholds(
         detector_score_threshold=detector_score_threshold,
         detector_iou_threshold=detector_iou_threshold,
     )
-    config = FTMBConfig.from_missbank_config(
-        missbank_config,
-        background_iou_threshold=background_iou_threshold,
+    return FailureTypeMemoryBank(config)
+
+
+def load_ftmb_config(path: str | Path, *, arch: str | None = None) -> FTMBConfig:
+    config_path = Path(path).expanduser().resolve()
+    with open(config_path, "r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"FTMB YAML must contain a mapping at the top level: {config_path}")
+    return FTMBConfig.from_mapping(raw, arch=arch)
+
+
+def build_ftmb_from_config(
+    raw_config: Mapping[str, Any] | FTMBConfig,
+    *,
+    arch: str | None = None,
+    detector_score_threshold: float | None = None,
+    detector_iou_threshold: float | None = None,
+) -> FailureTypeMemoryBank | None:
+    config = raw_config if isinstance(raw_config, FTMBConfig) else FTMBConfig.from_mapping(raw_config, arch=arch)
+    if not config.enabled:
+        return None
+    config = config.resolve_detector_thresholds(
+        detector_score_threshold=detector_score_threshold,
+        detector_iou_threshold=detector_iou_threshold,
     )
     return FailureTypeMemoryBank(config)
 
@@ -688,9 +750,6 @@ def merge_ftmb_epoch_snapshots(
         return None
 
     counts = Counter()
-    gt_records: dict[str, dict[str, Any]] = {}
-    prediction_events: list[dict[str, Any]] = []
-    step_summaries: list[dict[str, Any]] = []
     merged: dict[str, Any] = {
         "epoch": max(_optional_int(snapshot.get("epoch")) or 0 for snapshot in valid_snapshots),
         "enabled": bool(valid_snapshots[0].get("enabled", True)),
@@ -709,26 +768,8 @@ def merge_ftmb_epoch_snapshots(
             merged[key] += _optional_int(snapshot.get(key)) or 0
         for failure_type in FAILURE_TYPES:
             counts[failure_type] += _optional_int(snapshot.get(f"{failure_type}_count")) or 0
-        for raw_record in _as_mapping_list(snapshot.get("gt_failure_records")):
-            record_key = str(raw_record.get("record_key", ""))
-            if record_key:
-                gt_records[record_key] = dict(raw_record)
-        prediction_events.extend(dict(event) for event in _as_mapping_list(snapshot.get("prediction_failure_events")))
-        step_summaries.extend(dict(summary) for summary in _as_mapping_list(snapshot.get("step_summaries")))
 
     merged.update({f"{failure_type}_count": int(counts[failure_type]) for failure_type in FAILURE_TYPES})
-    sorted_records = sorted(gt_records.values(), key=lambda record: str(record.get("record_key", "")))
-    merged["gt_failure_records"] = sorted_records
-    merged["gt_failure_records_by_type"] = {
-        failure_type: [
-            record
-            for record in sorted_records
-            if record.get("failure_type") == failure_type
-        ]
-        for failure_type in GT_FAILURE_TYPES
-    }
-    merged["prediction_failure_events"] = prediction_events
-    merged["step_summaries"] = step_summaries
     return merged
 
 

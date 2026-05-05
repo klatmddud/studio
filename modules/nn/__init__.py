@@ -10,7 +10,9 @@ from .ftmb import (
     FailureTypeMemoryBank,
     LOCALIZATION,
     MISSED,
+    build_ftmb_from_config,
     build_ftmb_from_yaml,
+    load_ftmb_config,
     merge_ftmb_epoch_snapshots,
 )
 from .lmb import (
@@ -68,6 +70,7 @@ __all__ = [
     "LMBMatchingConfig",
     "LMBRecord",
     "LMBStabilityConfig",
+    "build_ftmb_from_config",
     "build_lmb_from_config",
     "build_ftmb_from_yaml",
     "build_lmb_from_yaml",
@@ -87,6 +90,7 @@ __all__ = [
     "build_qg_afp_from_config",
     "build_qg_afp_from_yaml",
     "compute_missbank_stability_metrics",
+    "load_ftmb_config",
     "load_qg_afp_config",
     "load_remiss_config",
     "merge_ftmb_epoch_snapshots",
