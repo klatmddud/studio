@@ -13,7 +13,7 @@ scripts/
     config.py               # Config loading, env-var substitution, validation
     data.py                 # COCO dataset + DataLoader builders
     engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
-    hard_replay.py          # MissBank-guided image/crop replay planner and mixed batch sampler
+    hard_replay.py          # MissBank-guided image replay planner and mixed batch sampler
     tar.py                  # FTMB-guided type-aware replay planner and batch sampler
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)

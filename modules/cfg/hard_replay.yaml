@@ -11,18 +11,8 @@ replacement: true
 min_miss_count: 1
 min_observations: 1
 replay_recency_window: 1
+current_epoch_only: true
 max_replays_per_gt_per_epoch: 4
-
-crop_replay:
-  enabled: false
-  replay_fraction: 0.5
-  context_scale: 2.0
-  context_scale_jitter: 0.0
-  center_jitter: 0.0
-  min_crop_size: 128
-  min_visible_ratio: 0.5
-  focus_min_visible_ratio: 0.9
-  include_other_gt: true
 
 models:
   fcos: {}

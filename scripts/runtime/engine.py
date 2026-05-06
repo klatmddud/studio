@@ -89,6 +89,8 @@ def fit(
     )
 
     history: list[dict[str, Any]] = []
+    hard_replay_history: list[dict[str, Any]] = []
+    tar_history: list[dict[str, Any]] = []
     ftmb_failure_history: list[dict[str, Any]] = []
     lmb_stability_history: list[dict[str, Any]] = []
     previous_lmb_snapshot: dict[str, Any] | None = None
@@ -124,6 +126,12 @@ def fit(
 
     if main_process:
         if resume_path:
+            hard_replay_history = _read_hard_replay_history(
+                output_dir / "hard-replay",
+            )
+            tar_history = _read_tar_history(
+                output_dir / "tar",
+            )
             ftmb_failure_history = _read_ftmb_failure_history(
                 output_dir / "ftmb",
             )
@@ -230,11 +238,21 @@ def fit(
             "train": train_metrics,
         }
         hard_replay_summary = _get_hard_replay_summary(train_loader)
-        if hard_replay_summary is not None:
-            record["hard_replay"] = hard_replay_summary
+        if main_process and hard_replay_summary is not None:
+            hard_replay_history.append(hard_replay_summary)
+            _write_hard_replay_outputs(
+                output_dir=output_dir,
+                history=hard_replay_history,
+                snapshot=hard_replay_summary,
+            )
         tar_summary = _get_tar_summary(train_loader)
-        if tar_summary is not None:
-            record["tar"] = tar_summary
+        if main_process and tar_summary is not None:
+            tar_history.append(tar_summary)
+            _write_tar_outputs(
+                output_dir=output_dir,
+                history=tar_history,
+                snapshot=tar_summary,
+            )
 
         should_eval = (
             val_loader is not None
@@ -301,7 +319,12 @@ def fit(
             history.append(record)
             _write_history_outputs(output_dir, history)
 
-            summary = format_metrics(record, runtime_config["metrics"]["primary"])
+            display_record = dict(record)
+            if hard_replay_summary is not None:
+                display_record["hard_replay"] = hard_replay_summary
+            if tar_summary is not None:
+                display_record["tar"] = tar_summary
+            summary = format_metrics(display_record, runtime_config["metrics"]["primary"])
             print(f"[epoch {epoch + 1}/{total_epochs}] {summary}")
 
     best_pt = checkpoint_dir / "best.pt"
@@ -1282,6 +1305,30 @@ def _lmb_active(lmb: Any, epoch: int) -> bool:
     return True
 
 
+def _write_hard_replay_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> None:
+    hard_replay_dir = output_dir / "hard-replay"
+    _write_json(hard_replay_dir / "hard_replay_epoch.json", history)
+    _write_history_csv(hard_replay_dir / "hard_replay_epoch.csv", history)
+    _write_json(hard_replay_dir / "hard_replay_state.json", {"snapshot": snapshot})
+
+
+def _write_tar_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> None:
+    tar_dir = output_dir / "tar"
+    _write_json(tar_dir / "tar_epoch.json", history)
+    _write_history_csv(tar_dir / "tar_epoch.csv", history)
+    _write_json(tar_dir / "tar_state.json", {"snapshot": snapshot})
+
+
 def _write_ftmb_failure_outputs(
     *,
     output_dir: Path,
@@ -1294,6 +1341,14 @@ def _write_ftmb_failure_outputs(
     _write_json(ftmb_dir / "failure_type_epoch.json", slim_history)
     _write_history_csv(ftmb_dir / "failure_type_epoch.csv", slim_history)
     _write_json(ftmb_dir / "failure_type_state.json", {"snapshot": slim_snapshot})
+
+
+def _read_hard_replay_history(hard_replay_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(hard_replay_dir / "hard_replay_epoch.json")
+
+
+def _read_tar_history(tar_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(tar_dir / "tar_epoch.json")
 
 
 def _write_lmb_stability_outputs(

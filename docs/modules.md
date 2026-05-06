@@ -55,10 +55,9 @@ Hard Replay is a data-layer policy driven by ReMiss MissBank. It does not split 
 Key concepts:
 
 - Source: current MissBank records from the previous mining/update state.
-- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`.
+- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `current_epoch_only: true`, `last_epoch` must equal the replay refresh epoch and the recency window is ignored.
 - Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
 - Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`.
-- Crop replay: `crop_replay.enabled` is disabled by default. When enabled, eligible missed GTs can produce GT-centered crop samples through `ReplaySampleRef`.
 - Offline mining: ReMiss, FTMB, and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
 - Config: `modules/cfg/hard_replay.yaml`.
 
@@ -81,7 +80,7 @@ Key concepts:
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update for Hard Replay | no | no |
 | FTMB | failure-type logging | no | no |
-| Hard Replay | MissBank-guided image/crop sampling | no | no |
+| Hard Replay | MissBank-guided image sampling | no | no |
 | TAR | FTMB-guided type-aware image sampling | no | no |
 | LMB | offline mining + stability logging | no | no |
 | QG-AFP v0 | post-neck query-scale gate | no | no |

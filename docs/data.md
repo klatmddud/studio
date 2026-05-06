@@ -30,9 +30,7 @@ Required runtime config fields:
 
 When `modules/cfg/hard_replay.yaml` is enabled, `build_train_dataloaders()` attaches a `HardReplayController` and uses `MixedReplayBatchSampler` instead of the normal sampler. Each epoch still walks the base training dataset once, then fills configured replay slots with images selected from ReMiss MissBank records.
 
-Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Image-level replay is the default path. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
-
-`crop_replay.enabled` is off by default. When enabled, the sampler can emit `ReplaySampleRef` items that `CocoDetectionDataset` resolves into GT-centered crops. Crop targets preserve the original `image_id`, shift boxes into crop-local coordinates, include the focus GT when sufficiently visible, and optionally include other visible GTs.
+Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `current_epoch_only: true` to require the MissBank record's `last_epoch` to equal the replay refresh epoch. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
 
 ## Target Fields
 
@@ -47,14 +45,6 @@ Each target dict contains:
 | `iscrowd` | `LongTensor[N]` | COCO crowd flag |
 | `annotation_ids` | `LongTensor[N]` | COCO annotation IDs, or `-1` when absent |
 | `gt_ids` | `LongTensor[N]` | Alias for per-GT modules such as ReMiss MissBank |
-
-Crop replay targets additionally contain:
-
-| Key | Type | Description |
-|---|---|---|
-| `is_replay_crop` | `LongTensor[]` | `1` for crop replay samples |
-| `replay_policy_id` | `LongTensor[]` | Numeric replay policy ID; `1` means missed-GT crop |
-| `replay_focus_gt_id` | `LongTensor[]` | Focus annotation ID, or `-1` when unavailable |
 
 ## Dataset Selector
 

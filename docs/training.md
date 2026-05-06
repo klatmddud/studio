@@ -59,9 +59,9 @@ When QG-AFP v0 is enabled, `scripts/runtime/registry.py` builds it before the FC
 
 QG-AFP v0 metrics are aggregated through the standard train metric path, so `history.json` and `results.csv` include fields such as `train_qg_afp_gate_entropy`, `train_qg_afp_gate_max_mean`, `train_qg_afp_level_usage_entropy`, `train_qg_afp_level_top1_share`, and `train_qg_afp_alpha_l0`.
 
-When Hard Replay is enabled, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. The initial path is image-level replay: images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. `crop_replay` is disabled by default but can be enabled to emit GT-centered crop replay samples from the same missed-GT records.
+When Hard Replay is enabled, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. Images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. Hard Replay epoch summaries are written under `output_dir/hard-replay/` instead of being mixed into the main `results.csv`.
 
-When TAR is enabled, `scripts/runtime/data.py` uses the TAR batch sampler instead of Hard Replay. The TAR index is refreshed at epoch start from FTMB records and prediction events. `modules/cfg/tar.yaml` controls the total `replay_ratio` and the split of replay slots across `loc`, `cls`, `both`, `missed`, `duplicate`, and `background` failure types through `type_ratios`. TAR currently replays full images by failure type and keeps `gt_id`, class, bbox, and failure type on the replay sample reference for later crop/negative replay policies.
+When TAR is enabled, `scripts/runtime/data.py` uses the TAR batch sampler instead of Hard Replay. The TAR index is refreshed at epoch start from FTMB records and prediction events. `modules/cfg/tar.yaml` controls the total `replay_ratio` and the split of replay slots across `loc`, `cls`, `both`, `missed`, `duplicate`, and `background` failure types through `type_ratios`. TAR currently replays full images by failure type and keeps `gt_id`, class, bbox, and failure type on the replay sample reference for later crop/negative replay policies. TAR epoch summaries are written under `output_dir/tar/` instead of being mixed into the main `results.csv`.
 
 MissBank, FTMB, TAR, Hard Replay, and LMB offline mining temporarily switch the train loader to base-only iteration, so mining still sees the base training set once rather than replay-augmented batches.
 
@@ -123,14 +123,18 @@ Common outputs under `output_dir`:
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
 | `checkpoints/epoch_0020.pt` | Periodic checkpoint example written by `checkpoint.save_every_epochs: 20` |
+| `hard-replay/hard_replay_epoch.json` | Epoch-level Hard Replay candidate and exposure summaries |
+| `hard-replay/hard_replay_epoch.csv` | Flattened CSV view of `hard_replay_epoch.json` |
+| `hard-replay/hard_replay_state.json` | Last Hard Replay replay summary |
+| `tar/tar_epoch.json` | Epoch-level TAR candidate, slot, and exposure summaries |
+| `tar/tar_epoch.csv` | Flattened CSV view of `tar_epoch.json` |
+| `tar/tar_state.json` | Last TAR replay summary |
 | `ftmb/failure_type_epoch.json` | Epoch-level FTMB failure-type counts accumulated as a JSON list |
 | `ftmb/failure_type_epoch.csv` | Flattened CSV view of `failure_type_epoch.json` |
 | `ftmb/failure_type_state.json` | Last count-only FTMB failure-type snapshot |
 | `lmb/lmb_stability_epoch.json` | Epoch-level LMB low-IoU stability metrics accumulated as a JSON list |
 | `lmb/lmb_stability_epoch.csv` | Flattened CSV view of `lmb_stability_epoch.json` |
 | `lmb/lmb_stability_state.json` | Last LMB snapshot used for next-epoch comparison |
-| `history.json` `hard_replay` key | Epoch-level replay candidate and exposure summary when Hard Replay is enabled |
-| `history.json` `tar` key | Epoch-level type-aware replay candidate, slot, and exposure summary when TAR is enabled |
 | `best_val_metrics.json` | Best-checkpoint epoch and validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |

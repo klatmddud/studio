@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import math
 import random
-from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,65 +12,6 @@ import yaml
 from torch.utils.data import Sampler
 
 from modules.nn import normalize_arch
-
-
-@dataclass(frozen=True, slots=True)
-class CropReplayConfig:
-    enabled: bool = False
-    replay_fraction: float = 0.5
-    context_scale: float = 2.0
-    context_scale_jitter: float = 0.0
-    center_jitter: float = 0.0
-    min_crop_size: int = 128
-    min_visible_ratio: float = 0.5
-    focus_min_visible_ratio: float = 0.9
-    include_other_gt: bool = True
-
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> "CropReplayConfig":
-        data = dict(raw or {})
-        config = cls(
-            enabled=bool(data.get("enabled", False)),
-            replay_fraction=float(data.get("replay_fraction", 0.5)),
-            context_scale=float(data.get("context_scale", 2.0)),
-            context_scale_jitter=float(data.get("context_scale_jitter", 0.0)),
-            center_jitter=float(data.get("center_jitter", 0.0)),
-            min_crop_size=int(data.get("min_crop_size", 128)),
-            min_visible_ratio=float(data.get("min_visible_ratio", 0.5)),
-            focus_min_visible_ratio=float(data.get("focus_min_visible_ratio", 0.9)),
-            include_other_gt=bool(data.get("include_other_gt", True)),
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        if not 0.0 <= float(self.replay_fraction) <= 1.0:
-            raise ValueError("Hard Replay crop_replay.replay_fraction must satisfy 0 <= value <= 1.")
-        if float(self.context_scale) <= 0.0:
-            raise ValueError("Hard Replay crop_replay.context_scale must be > 0.")
-        if float(self.context_scale_jitter) < 0.0:
-            raise ValueError("Hard Replay crop_replay.context_scale_jitter must be >= 0.")
-        if float(self.center_jitter) < 0.0:
-            raise ValueError("Hard Replay crop_replay.center_jitter must be >= 0.")
-        if int(self.min_crop_size) < 1:
-            raise ValueError("Hard Replay crop_replay.min_crop_size must be >= 1.")
-        for name in ("min_visible_ratio", "focus_min_visible_ratio"):
-            value = float(getattr(self, name))
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"Hard Replay crop_replay.{name} must satisfy 0 <= value <= 1.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "replay_fraction": self.replay_fraction,
-            "context_scale": self.context_scale,
-            "context_scale_jitter": self.context_scale_jitter,
-            "center_jitter": self.center_jitter,
-            "min_crop_size": self.min_crop_size,
-            "min_visible_ratio": self.min_visible_ratio,
-            "focus_min_visible_ratio": self.focus_min_visible_ratio,
-            "include_other_gt": self.include_other_gt,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +29,8 @@ class HardReplayConfig:
     min_miss_count: int = 1
     min_observations: int = 1
     replay_recency_window: int = 1
+    current_epoch_only: bool = False
     max_replays_per_gt_per_epoch: int = 4
-    crop_replay: CropReplayConfig = field(default_factory=CropReplayConfig)
     arch: str | None = None
 
     @classmethod
@@ -133,8 +73,8 @@ class HardReplayConfig:
             min_miss_count=int(merged.get("min_miss_count", 1)),
             min_observations=int(merged.get("min_observations", 1)),
             replay_recency_window=int(merged.get("replay_recency_window", 1)),
+            current_epoch_only=bool(merged.get("current_epoch_only", False)),
             max_replays_per_gt_per_epoch=int(merged.get("max_replays_per_gt_per_epoch", 4)),
-            crop_replay=CropReplayConfig.from_mapping(merged.get("crop_replay")),
             arch=normalized_arch,
         )
         config.validate()
@@ -194,23 +134,10 @@ class HardReplayConfig:
             "min_miss_count": self.min_miss_count,
             "min_observations": self.min_observations,
             "replay_recency_window": self.replay_recency_window,
+            "current_epoch_only": self.current_epoch_only,
             "max_replays_per_gt_per_epoch": self.max_replays_per_gt_per_epoch,
-            "crop_replay": self.crop_replay.to_dict(),
             "arch": self.arch,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class ReplaySampleRef:
-    dataset_index: int
-    image_id: str
-    gt_uid: str
-    gt_id: str | None
-    class_id: int
-    bbox_xyxy: tuple[float, float, float, float]
-    policy: str
-    crop: CropReplayConfig
-    seed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,13 +147,6 @@ class ReplayCandidate:
     cap: int
     active_gt_count: int
     priority: float
-    policy: str
-    sample_ref: ReplaySampleRef | None = None
-
-    def to_sample(self, *, seed: int) -> int | ReplaySampleRef:
-        if self.sample_ref is None:
-            return int(self.dataset_index)
-        return replace(self.sample_ref, seed=int(seed))
 
 
 @dataclass(slots=True)
@@ -238,7 +158,6 @@ class ReplayIndex:
     replay_gt_ids: set[str] = field(default_factory=set)
     active_gt_counts: dict[int, int] = field(default_factory=dict)
     image_candidates: list[ReplayCandidate] = field(default_factory=list)
-    crop_candidates: list[ReplayCandidate] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -249,7 +168,6 @@ class ReplayIndex:
         epoch: int = 0,
         requested_ratio: float = 0.0,
         reason: str = "inactive",
-        crop_enabled: bool = False,
     ) -> "ReplayIndex":
         return cls(
             enabled=bool(enabled),
@@ -260,7 +178,6 @@ class ReplayIndex:
                 epoch=epoch,
                 requested_ratio=requested_ratio,
                 reason=reason,
-                crop_enabled=crop_enabled,
             ),
         )
 
@@ -283,7 +200,6 @@ class HardReplayPlanner:
                 epoch=epoch,
                 requested_ratio=0.0,
                 reason="disabled",
-                crop_enabled=self.config.crop_replay.enabled,
             )
         if requested_ratio <= 0.0:
             return ReplayIndex.empty(
@@ -291,7 +207,6 @@ class HardReplayPlanner:
                 epoch=epoch,
                 requested_ratio=0.0,
                 reason="warmup",
-                crop_enabled=self.config.crop_replay.enabled,
             )
         if missbank is None:
             return ReplayIndex.empty(
@@ -299,7 +214,6 @@ class HardReplayPlanner:
                 epoch=epoch,
                 requested_ratio=requested_ratio,
                 reason="missing_missbank",
-                crop_enabled=self.config.crop_replay.enabled,
             )
 
         image_ids = getattr(dataset, "image_ids", None)
@@ -310,7 +224,6 @@ class HardReplayPlanner:
         replay_gt_ids: set[str] = set()
         active_gt_counts: dict[int, int] = {}
         image_candidates: list[ReplayCandidate] = []
-        crop_candidates: list[ReplayCandidate] = []
         priority_sum = 0.0
 
         score_threshold, iou_threshold = _missbank_thresholds(missbank)
@@ -333,6 +246,8 @@ class HardReplayPlanner:
             )
             if image_priority <= 0.0:
                 continue
+            for record in records:
+                replay_gt_ids.add(_record_uid(record))
 
             image_key = _normalize_image_id(image_id)
             clipped_weight = self._clipped_weight(image_priority)
@@ -348,48 +263,16 @@ class HardReplayPlanner:
                     cap=int(cap),
                     active_gt_count=len(records),
                     priority=float(image_priority),
-                    policy="image",
                 )
             )
             priority_sum += image_priority
 
-            for record in records:
-                gt_uid = _record_uid(record)
-                replay_gt_ids.add(gt_uid)
-                if self.config.crop_replay.enabled:
-                    record_priority = _record_priority(
-                        record,
-                        score_threshold=score_threshold,
-                        iou_threshold=iou_threshold,
-                    )
-                    crop_candidates.append(
-                        ReplayCandidate(
-                            dataset_index=int(dataset_index),
-                            weight=float(self._clipped_weight(record_priority)),
-                            cap=int(self.config.max_replays_per_gt_per_epoch),
-                            active_gt_count=1,
-                            priority=float(record_priority),
-                            policy="crop",
-                            sample_ref=ReplaySampleRef(
-                                dataset_index=int(dataset_index),
-                                image_id=image_key,
-                                gt_uid=gt_uid,
-                                gt_id=_record_gt_id(record),
-                                class_id=int(getattr(record, "gt_class", 0)),
-                                bbox_xyxy=_record_bbox(record),
-                                policy="crop",
-                                crop=self.config.crop_replay,
-                            ),
-                        )
-                    )
-
-        if not image_candidates and not crop_candidates:
+        if not image_candidates:
             return ReplayIndex.empty(
                 enabled=True,
                 epoch=epoch,
                 requested_ratio=requested_ratio,
                 reason="no_missed_gt",
-                crop_enabled=self.config.crop_replay.enabled,
             )
 
         mean_image_weight = sum(image_weights.values()) / float(max(len(image_weights), 1))
@@ -399,14 +282,12 @@ class HardReplayPlanner:
             epoch=epoch,
             requested_ratio=requested_ratio,
             reason="active",
-            crop_enabled=self.config.crop_replay.enabled,
         )
         summary.update(
             {
                 "active": False,
                 "replay_num_images": len(image_weights),
                 "replay_num_active_gt": len(replay_gt_ids),
-                "replay_num_crop_candidates": len(crop_candidates),
                 "replay_mean_image_weight": mean_image_weight,
                 "replay_mean_gt_priority": mean_gt_priority,
             }
@@ -419,7 +300,6 @@ class HardReplayPlanner:
             replay_gt_ids=replay_gt_ids,
             active_gt_counts=active_gt_counts,
             image_candidates=image_candidates,
-            crop_candidates=crop_candidates,
             summary=summary,
         )
 
@@ -450,9 +330,11 @@ class HardReplayPlanner:
             return False
         if int(getattr(record, "total_seen", 0)) < int(self.config.min_observations):
             return False
+        last_epoch = int(getattr(record, "last_epoch", 0))
+        if bool(self.config.current_epoch_only):
+            return last_epoch == int(epoch)
         if int(self.config.replay_recency_window) <= 0:
             return True
-        last_epoch = int(getattr(record, "last_epoch", 0))
         return int(epoch) - last_epoch <= int(self.config.replay_recency_window)
 
     def _clipped_weight(self, priority: float) -> float:
@@ -461,7 +343,7 @@ class HardReplayPlanner:
         return max(float(self.config.min_image_weight), clipped)
 
 
-class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
+class MixedReplayBatchSampler(Sampler[list[int]]):
     def __init__(
         self,
         *,
@@ -532,41 +414,17 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
 
         base_count = self.batch_size - replay_slots
         num_batches = int(math.ceil(len(base_indices) / float(base_count)))
-        image_slots, crop_slots = self._replay_slot_split(replay_slots)
-        image_schedule = self._build_replay_schedule(
+        replay_schedule = self._build_replay_schedule(
             self._replay_index.image_candidates,
-            total_samples=num_batches * image_slots,
+            total_samples=num_batches * replay_slots,
             seed_offset=17,
         )
-        crop_schedule = self._build_replay_schedule(
-            self._replay_index.crop_candidates,
-            total_samples=num_batches * crop_slots,
-            seed_offset=37,
-        )
 
-        image_cursor = 0
-        crop_cursor = 0
-        replay_samples: list[int | ReplaySampleRef] = []
+        replay_cursor = 0
+        replay_samples: list[int] = []
         for batch_number, base_batch in enumerate(_chunks(base_indices, base_count), start=1):
-            replay_slice: list[int | ReplaySampleRef] = []
-            if crop_slots > 0:
-                crop_slice = crop_schedule[crop_cursor : crop_cursor + crop_slots]
-                crop_cursor += len(crop_slice)
-                replay_slice.extend(crop_slice)
-            if image_slots > 0:
-                image_slice = image_schedule[image_cursor : image_cursor + image_slots]
-                image_cursor += len(image_slice)
-                replay_slice.extend(image_slice)
-            if len(replay_slice) < replay_slots:
-                needed = replay_slots - len(replay_slice)
-                fallback = image_schedule[image_cursor : image_cursor + needed]
-                image_cursor += len(fallback)
-                replay_slice.extend(fallback)
-            if len(replay_slice) < replay_slots:
-                needed = replay_slots - len(replay_slice)
-                fallback = crop_schedule[crop_cursor : crop_cursor + needed]
-                crop_cursor += len(fallback)
-                replay_slice.extend(fallback)
+            replay_slice = replay_schedule[replay_cursor : replay_cursor + replay_slots]
+            replay_cursor += len(replay_slice)
 
             batch = [*base_batch, *replay_slice]
             random.Random(self.seed + self.epoch * 1009 + batch_number).shuffle(batch)
@@ -600,26 +458,7 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
         return replay_slots
 
     def _has_candidates(self) -> bool:
-        return bool(self._replay_index.image_candidates or self._replay_index.crop_candidates)
-
-    def _replay_slot_split(self, replay_slots: int) -> tuple[int, int]:
-        if replay_slots <= 0:
-            return 0, 0
-        crop_fraction = 0.0
-        if self._replay_index.crop_candidates:
-            crop_ref = self._replay_index.crop_candidates[0].sample_ref
-            if crop_ref is not None and crop_ref.crop.enabled:
-                crop_fraction = float(crop_ref.crop.replay_fraction)
-        crop_slots = int(round(replay_slots * crop_fraction))
-        crop_slots = min(crop_slots, replay_slots)
-        image_slots = replay_slots - crop_slots
-        if crop_slots > 0 and not self._replay_index.crop_candidates:
-            image_slots = replay_slots
-            crop_slots = 0
-        if image_slots > 0 and not self._replay_index.image_candidates:
-            crop_slots = replay_slots
-            image_slots = 0
-        return image_slots, crop_slots
+        return bool(self._replay_index.image_candidates)
 
     def _build_base_indices(self) -> list[int]:
         indices = list(range(self.dataset_size))
@@ -647,7 +486,7 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
         *,
         total_samples: int,
         seed_offset: int,
-    ) -> list[int | ReplaySampleRef]:
+    ) -> list[int]:
         if total_samples <= 0 or not candidates:
             return []
 
@@ -678,11 +517,10 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
             generator=generator,
         ).tolist()
 
-        samples: list[int | ReplaySampleRef] = []
-        for order, expanded_index in enumerate(selected):
+        samples: list[int] = []
+        for expanded_index in selected:
             candidate = candidates[expanded_positions[int(expanded_index)]]
-            sample_seed = self.seed + self.epoch * 1000003 + seed_offset * 1009 + order
-            samples.append(candidate.to_sample(seed=sample_seed))
+            samples.append(int(candidate.dataset_index))
         return samples
 
     def _summary_with_slot_plan(self, replay_index: ReplayIndex) -> dict[str, Any]:
@@ -701,16 +539,13 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
         self,
         *,
         total_base_samples: int,
-        replay_samples: Sequence[int | ReplaySampleRef],
+        replay_samples: Sequence[int],
     ) -> None:
-        policy_counts: Counter[str] = Counter()
-        replay_counts: Counter[int] = Counter()
+        replay_counts: dict[int, int] = {}
         gt_exposure_count = 0
         for sample in replay_samples:
-            dataset_index = _sample_dataset_index(sample)
-            replay_counts[dataset_index] += 1
-            policy = _sample_policy(sample)
-            policy_counts[policy] += 1
+            dataset_index = int(sample)
+            replay_counts[dataset_index] = replay_counts.get(dataset_index, 0) + 1
             gt_exposure_count += self._sample_active_gt_count(sample)
 
         total_replay_samples = len(replay_samples)
@@ -733,16 +568,12 @@ class MixedReplayBatchSampler(Sampler[list[int | ReplaySampleRef]]):
             "replay_ratio_effective": effective_ratio,
             "replay_samples": int(total_replay_samples),
             "replay_unique_images": int(len(replay_counts)),
-            "image_replay_samples": int(policy_counts.get("image", 0)),
-            "crop_replay_samples": int(policy_counts.get("crop", 0)),
             "replay_exposure_per_gt": replay_exposure_per_gt,
             "replay_slots_per_batch": int(replay_slots),
             "base_slots_per_batch": int(self.batch_size - replay_slots),
         }
 
-    def _sample_active_gt_count(self, sample: int | ReplaySampleRef) -> int:
-        if isinstance(sample, ReplaySampleRef):
-            return 1
+    def _sample_active_gt_count(self, sample: int) -> int:
         return int(self._replay_index.active_gt_counts.get(int(sample), 0))
 
 
@@ -825,7 +656,6 @@ def _empty_summary(
     epoch: int,
     requested_ratio: float,
     reason: str,
-    crop_enabled: bool,
 ) -> dict[str, Any]:
     return {
         "enabled": bool(enabled),
@@ -836,17 +666,13 @@ def _empty_summary(
         "replay_ratio_effective": 0.0,
         "replay_num_images": 0,
         "replay_num_active_gt": 0,
-        "replay_num_crop_candidates": 0,
         "replay_mean_image_weight": 0.0,
         "replay_mean_gt_priority": 0.0,
         "replay_samples": 0,
         "replay_unique_images": 0,
-        "image_replay_samples": 0,
-        "crop_replay_samples": 0,
         "replay_exposure_per_gt": 0.0,
         "replay_slots_per_batch": 0,
         "base_slots_per_batch": 0,
-        "crop_replay_enabled": bool(crop_enabled),
     }
 
 
@@ -888,38 +714,6 @@ def _record_uid(record: Any) -> str:
     gt_id = getattr(record, "gt_id", "")
     gt_class = getattr(record, "gt_class", "")
     return f"{image_id}:{gt_id}:{gt_class}"
-
-
-def _record_gt_id(record: Any) -> str | None:
-    value = getattr(record, "gt_id", None)
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
-
-
-def _record_bbox(record: Any) -> tuple[float, float, float, float]:
-    raw = getattr(record, "bbox_xyxy", (0.0, 0.0, 0.0, 0.0))
-    if isinstance(raw, torch.Tensor):
-        values = raw.detach().cpu().flatten().tolist()
-    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-        values = list(raw)
-    else:
-        values = [0.0, 0.0, 0.0, 0.0]
-    padded = [*values[:4], 0.0, 0.0, 0.0, 0.0]
-    return tuple(float(value) for value in padded[:4])  # type: ignore[return-value]
-
-
-def _sample_dataset_index(sample: int | ReplaySampleRef) -> int:
-    if isinstance(sample, ReplaySampleRef):
-        return int(sample.dataset_index)
-    return int(sample)
-
-
-def _sample_policy(sample: int | ReplaySampleRef) -> str:
-    if isinstance(sample, ReplaySampleRef):
-        return str(sample.policy)
-    return "image"
 
 
 def _normalize_image_id(value: Any) -> str:
