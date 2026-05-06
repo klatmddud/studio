@@ -30,7 +30,7 @@ Required runtime config fields:
 
 When `modules/cfg/hard_replay.yaml` is enabled, `build_train_dataloaders()` attaches a `HardReplayController` and uses `MixedReplayBatchSampler` instead of the normal sampler. Each epoch still walks the base training dataset once, then fills configured replay slots with images selected from ReMiss MissBank records.
 
-Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `current_epoch_only: true` to require the MissBank record's `last_epoch` to equal the replay refresh epoch. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
+Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `latest_mined_epoch_only: true` to require the MissBank record's `last_epoch` to equal the latest `last_epoch` currently stored in MissBank records. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
 
 ## Target Fields
 

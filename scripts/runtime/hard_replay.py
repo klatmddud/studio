@@ -29,7 +29,7 @@ class HardReplayConfig:
     min_miss_count: int = 1
     min_observations: int = 1
     replay_recency_window: int = 1
-    current_epoch_only: bool = False
+    latest_mined_epoch_only: bool = False
     max_replays_per_gt_per_epoch: int = 4
     arch: str | None = None
 
@@ -73,7 +73,7 @@ class HardReplayConfig:
             min_miss_count=int(merged.get("min_miss_count", 1)),
             min_observations=int(merged.get("min_observations", 1)),
             replay_recency_window=int(merged.get("replay_recency_window", 1)),
-            current_epoch_only=bool(merged.get("current_epoch_only", False)),
+            latest_mined_epoch_only=bool(merged.get("latest_mined_epoch_only", False)),
             max_replays_per_gt_per_epoch=int(merged.get("max_replays_per_gt_per_epoch", 4)),
             arch=normalized_arch,
         )
@@ -134,7 +134,7 @@ class HardReplayConfig:
             "min_miss_count": self.min_miss_count,
             "min_observations": self.min_observations,
             "replay_recency_window": self.replay_recency_window,
-            "current_epoch_only": self.current_epoch_only,
+            "latest_mined_epoch_only": self.latest_mined_epoch_only,
             "max_replays_per_gt_per_epoch": self.max_replays_per_gt_per_epoch,
             "arch": self.arch,
         }
@@ -220,6 +220,10 @@ class HardReplayPlanner:
         if not isinstance(image_ids, Sequence):
             raise TypeError("Hard Replay requires a dataset exposing a sequence-like image_ids field.")
 
+        latest_mined_epoch = None
+        if self.config.latest_mined_epoch_only:
+            latest_mined_epoch = self._latest_mined_epoch(missbank=missbank, image_ids=image_ids)
+
         image_weights: dict[str, float] = {}
         replay_gt_ids: set[str] = set()
         active_gt_counts: dict[int, int] = {}
@@ -232,6 +236,7 @@ class HardReplayPlanner:
                 missbank=missbank,
                 image_id=image_id,
                 epoch=epoch,
+                latest_mined_epoch=latest_mined_epoch,
             )
             if not records:
                 continue
@@ -268,12 +273,14 @@ class HardReplayPlanner:
             priority_sum += image_priority
 
         if not image_candidates:
-            return ReplayIndex.empty(
+            replay_index = ReplayIndex.empty(
                 enabled=True,
                 epoch=epoch,
                 requested_ratio=requested_ratio,
                 reason="no_missed_gt",
             )
+            replay_index.summary["latest_mined_epoch"] = latest_mined_epoch
+            return replay_index
 
         mean_image_weight = sum(image_weights.values()) / float(max(len(image_weights), 1))
         mean_gt_priority = priority_sum / float(max(len(replay_gt_ids), 1))
@@ -288,6 +295,7 @@ class HardReplayPlanner:
                 "active": False,
                 "replay_num_images": len(image_weights),
                 "replay_num_active_gt": len(replay_gt_ids),
+                "latest_mined_epoch": latest_mined_epoch,
                 "replay_mean_image_weight": mean_image_weight,
                 "replay_mean_gt_priority": mean_gt_priority,
             }
@@ -303,14 +311,25 @@ class HardReplayPlanner:
             summary=summary,
         )
 
-    def _select_records(self, *, missbank: Any, image_id: Any, epoch: int) -> list[Any]:
+    def _select_records(
+        self,
+        *,
+        missbank: Any,
+        image_id: Any,
+        epoch: int,
+        latest_mined_epoch: int | None,
+    ) -> list[Any]:
         get_records = getattr(missbank, "get_records", None)
         if not callable(get_records):
             return []
 
         selected: list[Any] = []
         for record in get_records(image_id):
-            if not self._record_is_eligible(record, epoch=epoch):
+            if not self._record_is_eligible(
+                record,
+                epoch=epoch,
+                latest_mined_epoch=latest_mined_epoch,
+            ):
                 continue
             selected.append(record)
         selected.sort(
@@ -323,7 +342,13 @@ class HardReplayPlanner:
         )
         return selected
 
-    def _record_is_eligible(self, record: Any, *, epoch: int) -> bool:
+    def _record_is_eligible(
+        self,
+        record: Any,
+        *,
+        epoch: int,
+        latest_mined_epoch: int | None,
+    ) -> bool:
         if not bool(getattr(record, "is_missed", False)):
             return False
         if int(getattr(record, "miss_count", 0)) < int(self.config.min_miss_count):
@@ -331,11 +356,22 @@ class HardReplayPlanner:
         if int(getattr(record, "total_seen", 0)) < int(self.config.min_observations):
             return False
         last_epoch = int(getattr(record, "last_epoch", 0))
-        if bool(self.config.current_epoch_only):
-            return last_epoch == int(epoch)
+        if bool(self.config.latest_mined_epoch_only):
+            return latest_mined_epoch is not None and last_epoch == int(latest_mined_epoch)
         if int(self.config.replay_recency_window) <= 0:
             return True
         return int(epoch) - last_epoch <= int(self.config.replay_recency_window)
+
+    def _latest_mined_epoch(self, *, missbank: Any, image_ids: Sequence[Any]) -> int | None:
+        get_records = getattr(missbank, "get_records", None)
+        if not callable(get_records):
+            return None
+        latest_epoch = None
+        for image_id in image_ids:
+            for record in get_records(image_id):
+                last_epoch = int(getattr(record, "last_epoch", 0))
+                latest_epoch = last_epoch if latest_epoch is None else max(latest_epoch, last_epoch)
+        return latest_epoch
 
     def _clipped_weight(self, priority: float) -> float:
         raw_weight = 1.0 + float(self.config.beta) * float(priority)
@@ -666,6 +702,7 @@ def _empty_summary(
         "replay_ratio_effective": 0.0,
         "replay_num_images": 0,
         "replay_num_active_gt": 0,
+        "latest_mined_epoch": None,
         "replay_mean_image_weight": 0.0,
         "replay_mean_gt_priority": 0.0,
         "replay_samples": 0,

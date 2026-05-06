@@ -11,7 +11,7 @@ replacement: true
 min_miss_count: 1
 min_observations: 1
 replay_recency_window: 1
-current_epoch_only: true
+latest_mined_epoch_only: true
 max_replays_per_gt_per_epoch: 4
 
 models:
