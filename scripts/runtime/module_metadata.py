@@ -24,11 +24,11 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
-    "remiss": {"fcos"},
+    "remiss": {"fasterrcnn", "fcos"},
     "ftmb": {"fcos"},
     "lmb": {"fcos"},
     "qg_afp": {"fcos"},
-    "hard_replay": {"fcos"},
+    "hard_replay": {"fasterrcnn", "fcos"},
     "tar": {"fcos"},
 }
 

@@ -16,7 +16,6 @@ target:
 
 models:
   fcos: {}
-  fasterrcnn:
-    enabled: false
+  fasterrcnn: {}
   dino:
     enabled: false

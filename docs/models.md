@@ -17,6 +17,7 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Two-stage region proposal detector.
 - Plain TorchVision FasterRCNN.
 - Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3.
+- Optional MissBank and Hard Replay runtime modules sit outside the detector forward path and do not change Faster R-CNN losses or inference.
 
 ### DINO (`dino.py` -> `DINOWrapper`)
 

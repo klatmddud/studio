@@ -21,7 +21,7 @@ MissBank stores per-GT recurrent missed-detection state for the ReMiss method.
 
 Key concepts:
 
-- Matching: a GT is detected only when a final prediction has the same class, score above `matching.score_threshold`, and IoU above `matching.iou_threshold`. Use `auto` to resolve these thresholds from the detector's final post-processing config. FCOS maps score to `head.score_thresh` and IoU to `head.nms_thresh`.
+- Matching: a GT is detected only when a final prediction has the same class, score above `matching.score_threshold`, and IoU above `matching.iou_threshold`. Use `auto` to resolve these thresholds from the detector's final post-processing config. FCOS maps score to `head.score_thresh` and IoU to `head.nms_thresh`; Faster R-CNN maps score to `roi_head.box_score_thresh` and IoU to `roi_head.box_nms_thresh`.
 - Mining: `mining.type: online` updates MissBank after each optimization step, while `mining.type: offline` runs a separate no-grad training-set pass after each epoch.
 - Records: `MissBankRecord` stores image ID, GT ID, class, box, region ID, consecutive `miss_count`, current missed state, last match score/IoU, best same-class score/IoU diagnostics, and aggregate seen/missed counts.
 - Regions: baseline `grid_size: 2` yields labels `0..4`, where `0` is none and `1..4` are row-major spatial cells. Larger `NxN` grids use labels `0..N^2`.
@@ -32,7 +32,7 @@ Key concepts:
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml`. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features.
+When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and remains FCOS-only. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features.
 
 ## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
 
@@ -78,9 +78,9 @@ Key concepts:
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
-| ReMiss MissBank | memory update for Hard Replay | no | no |
+| ReMiss MissBank | memory update for Hard Replay | memory update for Hard Replay | no |
 | FTMB | failure-type logging | no | no |
-| Hard Replay | MissBank-guided image sampling | no | no |
+| Hard Replay | MissBank-guided image sampling | MissBank-guided image sampling | no |
 | TAR | FTMB-guided type-aware image sampling | no | no |
 | LMB | offline mining + stability logging | no | no |
 | QG-AFP v0 | post-neck query-scale gate | no | no |

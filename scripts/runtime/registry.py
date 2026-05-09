@@ -26,6 +26,8 @@ MODEL_BUILDERS = {
     "fcos": FCOSWrapper,
 }
 
+MISSBANK_SUPPORTED_ARCHES = {"fasterrcnn", "fcos"}
+
 def normalize_arch(raw_arch: str) -> str:
     return ARCH_ALIASES.get(raw_arch.lower(), raw_arch.lower())
 
@@ -145,7 +147,7 @@ def _attach_remiss_modules(
     arch: str,
     module_config_paths: dict[str, str | Path] | None,
 ) -> None:
-    if arch != "fcos":
+    if arch not in MISSBANK_SUPPORTED_ARCHES:
         return
     if not module_config_paths:
         return
@@ -227,4 +229,12 @@ def _detector_thresholds(
                 "iou": float(head.get("nms_thresh", 0.6)),
             }
         return {"score": 0.2, "iou": 0.6}
+    if arch == "fasterrcnn":
+        roi_head = model_config.get("roi_head", {})
+        if isinstance(roi_head, Mapping):
+            return {
+                "score": float(roi_head.get("box_score_thresh", 0.05)),
+                "iou": float(roi_head.get("box_nms_thresh", 0.5)),
+            }
+        return {"score": 0.05, "iou": 0.5}
     return {"score": None, "iou": None}
