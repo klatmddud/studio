@@ -10,12 +10,20 @@ min_consecutive_count: 1
 min_total_failed: 1
 
 type_ratios:
-  loc: 0.25
-  cls: 0.15
-  both: 0.25
-  missed: 0.25
+  loc: 0.45
+  background: 0.35
+  missed: 0.10
   duplicate: 0.05
-  background: 0.05
+  cls: 0.025
+  both: 0.025
+
+replay_modes:
+  loc: failure_aware
+  cls: full_image
+  both: full_image
+  missed: full_image
+  duplicate: full_image
+  background: failure_aware
 
 models:
   fcos: {}

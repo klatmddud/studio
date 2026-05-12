@@ -32,6 +32,12 @@ When `modules/cfg/hard_replay.yaml` is enabled for FCOS or Faster R-CNN, `build_
 
 Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `latest_mined_epoch_only: true` to require the MissBank record's `last_epoch` to equal the latest `last_epoch` currently stored in MissBank records. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
 
+## Type-Aware Replay Loader Path
+
+When `modules/cfg/tar.yaml` is enabled, `build_train_dataloaders()` attaches a `TARController` and uses `TARBatchSampler` instead of Hard Replay. The sampler draws replay slots from FTMB failure candidates by `type_ratios`.
+
+Each type defaults to `full_image` replay unless overridden by `replay_modes`. `failure_aware` replay is implemented for `localization` and `background`: localization samples crop around the failing GT box and keep the target GT plus sufficiently visible neighboring GTs; background samples crop around the false-positive prediction box and can yield an empty target for hard-negative training. Other failure types fall back to full-image replay.
+
 ## Target Fields
 
 Each target dict contains:

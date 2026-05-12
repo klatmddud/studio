@@ -56,7 +56,7 @@ train.py
   -> fit()                       # engine.py -> training loop + replay refresh hooks
 ```
 
-When `modules/cfg/tar.yaml` is enabled, the train loader uses the TAR batch sampler and refreshes its epoch-level replay index from FTMB before each epoch. Otherwise, when `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler` and refreshes from ReMiss MissBank. `engine.fit()` temporarily disables replay during offline mining passes.
+When `modules/cfg/tar.yaml` is enabled, the train loader uses the TAR batch sampler and refreshes its epoch-level replay index from FTMB before each epoch. TAR can replay full images or type-aware crops according to per-type `replay_modes`. Otherwise, when `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler` and refreshes from ReMiss MissBank. `engine.fit()` temporarily disables replay during offline mining passes.
 
 ## Supported Architectures
 

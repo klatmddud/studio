@@ -37,6 +37,25 @@ DEFAULT_TYPE_RATIOS = {
     BACKGROUND: 0.05,
 }
 
+FULL_IMAGE_REPLAY = "full_image"
+FAILURE_AWARE_REPLAY = "failure_aware"
+REPLAY_MODES = (FULL_IMAGE_REPLAY, FAILURE_AWARE_REPLAY)
+
+DEFAULT_REPLAY_MODES = {
+    failure_type: FULL_IMAGE_REPLAY for failure_type in FAILURE_TYPES
+}
+
+_REPLAY_MODE_ALIASES = {
+    "full": FULL_IMAGE_REPLAY,
+    "full-image": FULL_IMAGE_REPLAY,
+    "full_image": FULL_IMAGE_REPLAY,
+    "image": FULL_IMAGE_REPLAY,
+    "failure-aware": FAILURE_AWARE_REPLAY,
+    "failure_aware": FAILURE_AWARE_REPLAY,
+    "type-aware": FAILURE_AWARE_REPLAY,
+    "type_aware": FAILURE_AWARE_REPLAY,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TARConfig:
@@ -45,6 +64,7 @@ class TARConfig:
     warmup_epochs: int = 0
     replay_ratio: float = 0.25
     type_ratios: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TYPE_RATIOS))
+    replay_modes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_REPLAY_MODES))
     max_replays_per_batch: int = 0
     replacement: bool = True
     replay_recency_window: int = 1
@@ -85,6 +105,7 @@ class TARConfig:
             warmup_epochs=int(merged.get("warmup_epochs", 0)),
             replay_ratio=float(merged.get("replay_ratio", 0.25)),
             type_ratios=_normalize_type_ratios(merged.get("type_ratios")),
+            replay_modes=_normalize_replay_modes(merged.get("replay_modes")),
             max_replays_per_batch=int(merged.get("max_replays_per_batch", 0)),
             replacement=bool(merged.get("replacement", True)),
             replay_recency_window=int(merged.get("replay_recency_window", 1)),
@@ -115,6 +136,12 @@ class TARConfig:
             raise ValueError("TAR min_consecutive_count must be >= 1.")
         if int(self.min_total_failed) < 1:
             raise ValueError("TAR min_total_failed must be >= 1.")
+        missing_modes = set(FAILURE_TYPES) - set(self.replay_modes)
+        if missing_modes:
+            raise ValueError(f"TAR replay_modes is missing failure types: {sorted(missing_modes)}")
+        unsupported_modes = set(self.replay_modes.values()) - set(REPLAY_MODES)
+        if unsupported_modes:
+            raise ValueError(f"TAR replay_modes contains unsupported values: {sorted(unsupported_modes)}")
 
     def scheduled_ratio(self, epoch: int) -> float:
         if not self.enabled:
@@ -134,6 +161,7 @@ class TARConfig:
             "warmup_epochs": self.warmup_epochs,
             "replay_ratio": self.replay_ratio,
             "type_ratios": dict(self.type_ratios),
+            "replay_modes": dict(self.replay_modes),
             "max_replays_per_batch": self.max_replays_per_batch,
             "replacement": self.replacement,
             "replay_recency_window": self.replay_recency_window,
@@ -150,6 +178,7 @@ class TARSampleRef:
     image_id: str
     failure_type: str
     source: str
+    replay_mode: str = FULL_IMAGE_REPLAY
     gt_uid: str | None = None
     gt_id: str | None = None
     class_id: int | None = None
@@ -164,6 +193,7 @@ class TARCandidate:
     source: str
     weight: float
     cap: int
+    replay_mode: str = FULL_IMAGE_REPLAY
     gt_uid: str | None = None
     gt_id: str | None = None
     class_id: int | None = None
@@ -175,6 +205,7 @@ class TARCandidate:
             image_id=str(self.image_id),
             failure_type=str(self.failure_type),
             source=str(self.source),
+            replay_mode=str(self.replay_mode),
             gt_uid=self.gt_uid,
             gt_id=self.gt_id,
             class_id=self.class_id,
@@ -252,6 +283,7 @@ class TARPlanner:
                     source="gt",
                     weight=_record_priority(record),
                     cap=int(self.config.max_replays_per_record_per_epoch),
+                    replay_mode=self.config.replay_modes.get(failure_type, FULL_IMAGE_REPLAY),
                     gt_uid=str(getattr(record, "record_key", "")),
                     gt_id=None if getattr(record, "gt_id", None) is None else str(getattr(record, "gt_id")),
                     class_id=int(getattr(record, "gt_class", 0)),
@@ -277,6 +309,7 @@ class TARPlanner:
                     source="prediction",
                     weight=_event_priority(event),
                     cap=1,
+                    replay_mode=self.config.replay_modes.get(failure_type, FULL_IMAGE_REPLAY),
                     class_id=int(event.get("pred_class", 0)),
                     bbox_xyxy=_event_bbox(event),
                 )
@@ -676,6 +709,29 @@ def _normalize_type_ratios(raw: Any) -> dict[str, float]:
             raise ValueError("TAR type_ratios values must be >= 0.")
         ratios[failure_type] = numeric
     return ratios
+
+
+def _normalize_replay_modes(raw: Any) -> dict[str, str]:
+    modes = dict(DEFAULT_REPLAY_MODES)
+    if raw is None:
+        return modes
+    if not isinstance(raw, Mapping):
+        raise TypeError("TAR replay_modes must be a mapping.")
+    for key, value in raw.items():
+        failure_type = _normalize_failure_type(key)
+        if failure_type is None:
+            raise KeyError(f"Unsupported TAR replay mode key: {key!r}")
+        mode = _normalize_replay_mode(value)
+        if mode is None:
+            raise ValueError(f"Unsupported TAR replay mode for {key!r}: {value!r}")
+        modes[failure_type] = mode
+    return modes
+
+
+def _normalize_replay_mode(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _REPLAY_MODE_ALIASES.get(str(value).lower())
 
 
 def _empty_summary(

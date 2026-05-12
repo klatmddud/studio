@@ -24,7 +24,7 @@ optimizer:
 
 scheduler:
   name: multistep
-  milestones: [133, 142]
+  milestones: [100, 133]
   gamma: 0.1
 
 train:

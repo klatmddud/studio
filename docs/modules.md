@@ -71,7 +71,8 @@ Key concepts:
 - Total budget: `replay_ratio` controls how many batch slots are replay slots.
 - Type split: `type_ratios` assigns replay slots to `loc`, `cls`, `both`, `missed`, `duplicate`, and `background`. If a requested type has no candidates, its slots are redistributed across available types.
 - Eligibility: records must satisfy `min_consecutive_count`, `min_total_failed`, and `replay_recency_window`. Prediction events use the same recency window.
-- Current replay form: full-image replay. `TARSampleRef` carries failure type, image ID, optional GT ID, class, and bbox so later type-specific crop or hard-negative policies can use the same sampler path.
+- Replay form: `replay_modes` selects `full_image` or `failure_aware` per type. `full_image` replays the original image. `failure_aware` currently gives `localization` GT-centered positive crops and `background` prediction-centered hard-negative crops; unsupported type/mode combinations fall back to full-image replay.
+- Crop targets: localization crops force-include the target GT and include other sufficiently visible GTs. Background crops use the false-positive prediction box and may produce an empty target when no sufficiently visible GT remains in the crop.
 - Config: `modules/cfg/tar.yaml`.
 
 ## Support Matrix
