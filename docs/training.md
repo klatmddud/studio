@@ -50,7 +50,7 @@ bash scripts/bash/baseline/train.bash
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to FCOS or Faster R-CNN. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config: FCOS uses `head.score_thresh` and `head.nms_thresh`, while Faster R-CNN uses `roi_head.box_score_thresh` and `roi_head.box_nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader after each epoch. MissBank does not add detector losses or feature injection.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to FCOS or Faster R-CNN. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config: FCOS uses `head.score_thresh` and `head.nms_thresh`, while Faster R-CNN uses `roi_head.box_score_thresh` and `roi_head.box_nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader on epochs that satisfy `mining.start_epoch` and `mining.interval_epoch`. On epochs where offline MissBank mining runs, `history.json` and `results.csv` include top-level `remiss_mining_time_sec`. MissBank writes epoch-level summaries under `output_dir/missbank/`. When `loss_weight.enabled: true` for FCOS, MissBank `miss_count` reweights positive classification, box regression, and centerness losses; Faster R-CNN remains logging/replay-only.
 
 When FTMB is enabled for FCOS or Faster R-CNN, `scripts/runtime/registry.py` attaches `FailureTypeMemoryBank` from `modules/cfg/ftmb.yaml` independently from ReMiss MissBank. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve from the detector's final post-processing config. FTMB uses `mining.type: online` or `offline` to record epoch-level `localization`, `classification`, `both`, `missed`, `duplicate`, and `background` counts. Runtime outputs under `output_dir/ftmb/` are count-only summaries and do not persist detailed GT records or prediction events.
 
@@ -64,7 +64,7 @@ When BCPC is enabled for FCOS, `scripts/runtime/registry.py` builds `BackgroundC
 
 BCPC metrics are aggregated through the standard train metric path. `history.json` and `results.csv` include fields such as `train_bcpc`, `train_bcpc_hard_bg`, `train_bcpc_positive`, `train_bcpc_risk_mean`, and `train_bcpc_memory_filled` when the module has run.
 
-When Hard Replay is enabled for FCOS or Faster R-CNN, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. Images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. Hard Replay epoch summaries are written under `output_dir/hard-replay/` instead of being mixed into the main `results.csv`.
+When Hard Replay is enabled for FCOS or Faster R-CNN, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. Images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. `replay_epochs_after_mining > 0` limits Hard Replay to the first N epochs after the latest MissBank mining epoch, while `0` leaves it unlimited. Hard Replay epoch summaries are written under `output_dir/hard-replay/` instead of being mixed into the main `results.csv`.
 
 When TAR is enabled for FCOS or Faster R-CNN, `scripts/runtime/data.py` uses the TAR batch sampler instead of Hard Replay. The TAR index is refreshed at epoch start from FTMB records and prediction events. `modules/cfg/tar.yaml` controls the total `replay_ratio`, the split of replay slots across `loc`, `cls`, `both`, `missed`, `duplicate`, and `background` failure types through `type_ratios`, and each type's replay form through `replay_modes`. `full_image` keeps the previous whole-image replay behavior. `failure_aware` currently maps `localization` to GT-centered positive crops and `background` to prediction-centered hard-negative crops. TAR epoch summaries are written under `output_dir/tar/` instead of being mixed into the main `results.csv`.
 
@@ -124,7 +124,7 @@ Common outputs under `output_dir`:
 
 | Path | Description |
 |---|---|
-| `history.json` | Epoch-level train and validation metrics |
+| `history.json` | Epoch-level train and validation metrics; includes `remiss_mining_time_sec` on epochs where offline MissBank mining runs |
 | `results.csv` | Flattened CSV view of `history.json` for spreadsheet-style analysis |
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
@@ -132,6 +132,8 @@ Common outputs under `output_dir`:
 | `hard-replay/hard_replay_epoch.json` | Epoch-level Hard Replay candidate and exposure summaries |
 | `hard-replay/hard_replay_epoch.csv` | Flattened CSV view of `hard_replay_epoch.json` |
 | `hard-replay/hard_replay_state.json` | Last Hard Replay replay summary |
+| `missbank/missbank_epoch.json` | Epoch-level ReMiss MissBank summary metrics accumulated as a JSON list |
+| `missbank/missbank_epoch.csv` | Flattened CSV view of `missbank_epoch.json` |
 | `tar/tar_epoch.json` | Epoch-level TAR candidate, slot, and exposure summaries |
 | `tar/tar_epoch.csv` | Flattened CSV view of `tar_epoch.json` |
 | `tar/tar_state.json` | Last TAR replay summary |

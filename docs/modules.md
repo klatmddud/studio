@@ -23,17 +23,18 @@ MissBank stores per-GT recurrent missed-detection state for the ReMiss method.
 Key concepts:
 
 - Matching: a GT is detected only when a final prediction has the same class, score above `matching.score_threshold`, and IoU above `matching.iou_threshold`. Use `auto` to resolve these thresholds from the detector's final post-processing config. FCOS maps score to `head.score_thresh` and IoU to `head.nms_thresh`; Faster R-CNN maps score to `roi_head.box_score_thresh` and IoU to `roi_head.box_nms_thresh`.
-- Mining: `mining.type: online` updates MissBank after each optimization step, while `mining.type: offline` runs a separate no-grad training-set pass after each epoch.
-- Records: `MissBankRecord` stores image ID, GT ID, class, box, region ID, consecutive `miss_count`, current missed state, last match score/IoU, best same-class score/IoU diagnostics, and aggregate seen/missed counts.
-- Regions: baseline `grid_size: 2` yields labels `0..4`, where `0` is none and `1..4` are row-major spatial cells. Larger `NxN` grids use labels `0..N^2`.
-- Targets: `get_image_targets()` and `get_batch_labels()` emit image-level hard labels. A GT contributes only when it is currently missed and `miss_count >= target.miss_threshold`.
+- Mining: `mining.type: online` updates MissBank after each optimization step, while `mining.type: offline` runs a separate no-grad training-set pass on epochs that satisfy `mining.start_epoch` and `mining.interval_epoch`.
+- Records: `MissBankRecord` stores image ID, GT ID, class, box, consecutive `miss_count`, current missed state, last match score/IoU, best same-class score/IoU diagnostics, and aggregate seen/missed counts.
+- Targets: `get_image_targets()` and `get_batch_labels()` emit binary image-level labels. `0` means no target missed GT in the image, and `1` means at least one currently missed GT satisfies `miss_count >= target.miss_threshold`.
+- Loss weighting: when `loss_weight.enabled: true` for FCOS, GTs with larger MissBank `miss_count` increase the positive classification, box regression, and centerness loss weight. Faster R-CNN remains logging/replay-only.
 - State: `get_extra_state()` and `set_extra_state()` make MissBank checkpointable.
-- Summary: `missbank.summary()` reports record counts, current missed counts, target GT counts, region histograms, class histograms, and update stats.
+- Summary: `missbank.summary()` reports record counts, current missed counts, target GT counts, class histograms, and update stats.
+- Outputs: runtime writes epoch-level MissBank summaries to `missbank/missbank_epoch.json` and `missbank/missbank_epoch.csv`.
 - Config: `modules/cfg/remiss.yaml`.
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and is available for FCOS and Faster R-CNN. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features. BCPC is configured independently through `modules/cfg/bcpc.yaml` and, when enabled for FCOS, adds a background-risk auxiliary loss and calibrates inference scores before NMS.
+When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and is available for FCOS and Faster R-CNN. These memory modules do not inject features. MissBank changes FCOS train losses only when `loss_weight.enabled: true`; Faster R-CNN remains unaffected. BCPC is configured independently through `modules/cfg/bcpc.yaml` and, when enabled for FCOS, adds a background-risk auxiliary loss and calibrates inference scores before NMS.
 
 ## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
 
@@ -56,7 +57,7 @@ Hard Replay is a data-layer policy driven by ReMiss MissBank. It does not split 
 Key concepts:
 
 - Source: current MissBank records from the previous mining/update state.
-- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `latest_mined_epoch_only: true`, `last_epoch` must equal the latest `last_epoch` currently stored in MissBank records and the recency window is ignored.
+- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `latest_mined_epoch_only: true`, `last_epoch` must equal the latest `last_epoch` currently stored in MissBank records and the recency window is ignored. `replay_epochs_after_mining > 0` additionally gates whole-epoch replay to the first N epochs after the latest MissBank mining epoch; `0` keeps the previous unlimited behavior.
 - Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
 - Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`.
 - Offline mining: ReMiss, FTMB, and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
@@ -80,7 +81,7 @@ Key concepts:
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
-| ReMiss MissBank | memory update for Hard Replay | memory update for Hard Replay | no |
+| ReMiss MissBank | memory update for Hard Replay; optional miss-count loss weighting | memory update for Hard Replay | no |
 | FTMB | failure-type logging | failure-type logging | no |
 | Hard Replay | MissBank-guided image sampling | MissBank-guided image sampling | no |
 | TAR | FTMB-guided type-aware image sampling | FTMB-guided type-aware image sampling | no |

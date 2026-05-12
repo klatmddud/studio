@@ -30,6 +30,7 @@ class HardReplayConfig:
     min_observations: int = 1
     replay_recency_window: int = 1
     latest_mined_epoch_only: bool = False
+    replay_epochs_after_mining: int = 0
     max_replays_per_gt_per_epoch: int = 4
     arch: str | None = None
 
@@ -74,6 +75,7 @@ class HardReplayConfig:
             min_observations=int(merged.get("min_observations", 1)),
             replay_recency_window=int(merged.get("replay_recency_window", 1)),
             latest_mined_epoch_only=bool(merged.get("latest_mined_epoch_only", False)),
+            replay_epochs_after_mining=int(merged.get("replay_epochs_after_mining", 0)),
             max_replays_per_gt_per_epoch=int(merged.get("max_replays_per_gt_per_epoch", 4)),
             arch=normalized_arch,
         )
@@ -105,6 +107,8 @@ class HardReplayConfig:
             raise ValueError("Hard Replay min_observations must be >= 1.")
         if int(self.replay_recency_window) < 0:
             raise ValueError("Hard Replay replay_recency_window must be >= 0.")
+        if int(self.replay_epochs_after_mining) < 0:
+            raise ValueError("Hard Replay replay_epochs_after_mining must be >= 0.")
         if int(self.max_replays_per_gt_per_epoch) < 1:
             raise ValueError("Hard Replay max_replays_per_gt_per_epoch must be >= 1.")
 
@@ -135,6 +139,7 @@ class HardReplayConfig:
             "min_observations": self.min_observations,
             "replay_recency_window": self.replay_recency_window,
             "latest_mined_epoch_only": self.latest_mined_epoch_only,
+            "replay_epochs_after_mining": self.replay_epochs_after_mining,
             "max_replays_per_gt_per_epoch": self.max_replays_per_gt_per_epoch,
             "arch": self.arch,
         }
@@ -221,8 +226,26 @@ class HardReplayPlanner:
             raise TypeError("Hard Replay requires a dataset exposing a sequence-like image_ids field.")
 
         latest_mined_epoch = None
-        if self.config.latest_mined_epoch_only:
+        if self.config.latest_mined_epoch_only or int(self.config.replay_epochs_after_mining) > 0:
             latest_mined_epoch = self._latest_mined_epoch(missbank=missbank, image_ids=image_ids)
+        epochs_since_mining = self._epochs_since_mining(
+            epoch=epoch,
+            latest_mined_epoch=latest_mined_epoch,
+        )
+        if not self._within_mining_replay_window(epochs_since_mining):
+            replay_index = ReplayIndex.empty(
+                enabled=True,
+                epoch=epoch,
+                requested_ratio=requested_ratio,
+                reason="outside_mining_window",
+            )
+            replay_index.summary.update(
+                self._mining_window_summary(
+                    latest_mined_epoch=latest_mined_epoch,
+                    epochs_since_mining=epochs_since_mining,
+                )
+            )
+            return replay_index
 
         image_weights: dict[str, float] = {}
         replay_gt_ids: set[str] = set()
@@ -280,6 +303,12 @@ class HardReplayPlanner:
                 reason="no_missed_gt",
             )
             replay_index.summary["latest_mined_epoch"] = latest_mined_epoch
+            replay_index.summary.update(
+                self._mining_window_summary(
+                    latest_mined_epoch=latest_mined_epoch,
+                    epochs_since_mining=epochs_since_mining,
+                )
+            )
             return replay_index
 
         mean_image_weight = sum(image_weights.values()) / float(max(len(image_weights), 1))
@@ -299,6 +328,12 @@ class HardReplayPlanner:
                 "replay_mean_image_weight": mean_image_weight,
                 "replay_mean_gt_priority": mean_gt_priority,
             }
+        )
+        summary.update(
+            self._mining_window_summary(
+                latest_mined_epoch=latest_mined_epoch,
+                epochs_since_mining=epochs_since_mining,
+            )
         )
         return ReplayIndex(
             enabled=True,
@@ -372,6 +407,36 @@ class HardReplayPlanner:
                 last_epoch = int(getattr(record, "last_epoch", 0))
                 latest_epoch = last_epoch if latest_epoch is None else max(latest_epoch, last_epoch)
         return latest_epoch
+
+    def _epochs_since_mining(
+        self,
+        *,
+        epoch: int,
+        latest_mined_epoch: int | None,
+    ) -> int | None:
+        if latest_mined_epoch is None:
+            return None
+        return int(epoch) - int(latest_mined_epoch)
+
+    def _within_mining_replay_window(self, epochs_since_mining: int | None) -> bool:
+        window = int(self.config.replay_epochs_after_mining)
+        if window <= 0:
+            return True
+        if epochs_since_mining is None:
+            return False
+        return 1 <= int(epochs_since_mining) <= window
+
+    def _mining_window_summary(
+        self,
+        *,
+        latest_mined_epoch: int | None,
+        epochs_since_mining: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "latest_mined_epoch": latest_mined_epoch,
+            "epochs_since_mining": epochs_since_mining,
+            "replay_epochs_after_mining": int(self.config.replay_epochs_after_mining),
+        }
 
     def _clipped_weight(self, priority: float) -> float:
         raw_weight = 1.0 + float(self.config.beta) * float(priority)
@@ -703,6 +768,8 @@ def _empty_summary(
         "replay_num_images": 0,
         "replay_num_active_gt": 0,
         "latest_mined_epoch": None,
+        "epochs_since_mining": None,
+        "replay_epochs_after_mining": None,
         "replay_mean_image_weight": 0.0,
         "replay_mean_gt_priority": 0.0,
         "replay_samples": 0,

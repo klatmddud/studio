@@ -40,6 +40,7 @@ from .lmb import (
 from .mb import (
     MissBank,
     MissBankConfig,
+    MissBankLossWeightConfig,
     MissBankMatchingConfig,
     MissBankMiningConfig,
     MissBankRecord,
@@ -88,6 +89,7 @@ __all__ = [
     "merge_lmb_epoch_snapshots",
     "MissBank",
     "MissBankConfig",
+    "MissBankLossWeightConfig",
     "MissBankMatchingConfig",
     "MissBankMiningConfig",
     "MissBankRecord",

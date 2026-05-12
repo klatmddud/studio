@@ -1,5 +1,7 @@
 # MissInjection 설계 문서
 
+> Note: 현재 runtime MissBank는 spatial region을 나누지 않고 binary image-level target을 반환한다. 이 문서의 region prototype injection 내용은 region 기반 ReMiss 확장을 다시 켤 때 참고할 legacy 설계로 남겨둔다.
+
 ## 개요
 
 MissInjection은 ReMiss에서 MissHead가 예측한 취약 spatial region에 학습 가능한 prototype embedding을 주입하는 모듈이다. 목적은 detector가 반복적으로 놓치는 위치의 feature 표현을 보정하여, 최종 detection head가 해당 영역의 object evidence를 더 잘 활용하도록 만드는 것이다.

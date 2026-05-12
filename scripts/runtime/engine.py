@@ -18,8 +18,10 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 
 from modules.nn import (
+    compute_missbank_stability_metrics,
     compute_lmb_stability_metrics,
     merge_ftmb_epoch_snapshots,
+    merge_missbank_epoch_snapshots,
     merge_lmb_epoch_snapshots,
 )
 
@@ -92,7 +94,9 @@ def fit(
     hard_replay_history: list[dict[str, Any]] = []
     tar_history: list[dict[str, Any]] = []
     ftmb_failure_history: list[dict[str, Any]] = []
+    missbank_epoch_history: list[dict[str, Any]] = []
     lmb_stability_history: list[dict[str, Any]] = []
+    previous_missbank_snapshot: dict[str, Any] | None = None
     previous_lmb_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
@@ -134,6 +138,9 @@ def fit(
             )
             ftmb_failure_history = _read_ftmb_failure_history(
                 output_dir / "ftmb",
+            )
+            missbank_epoch_history = _read_missbank_epoch_history(
+                output_dir / "missbank",
             )
             lmb_stability_history = _read_lmb_stability_history(
                 output_dir / "lmb",
@@ -182,7 +189,7 @@ def fit(
             total_epochs=total_epochs,
             distributed=distributed,
         )
-        _run_missbank_offline_mining(
+        remiss_mining_time_sec = _run_missbank_offline_mining(
             model=model,
             data_loader=train_loader,
             device=device,
@@ -214,6 +221,22 @@ def fit(
                 history=ftmb_failure_history,
                 snapshot=current_ftmb_snapshot,
             )
+        current_missbank_snapshot = _collect_missbank_epoch_snapshot(
+            model=model,
+            epoch=epoch + 1,
+            distributed=distributed,
+        )
+        if main_process and current_missbank_snapshot is not None:
+            missbank_metrics = _build_missbank_epoch_metrics(
+                current_missbank_snapshot,
+                previous_snapshot=previous_missbank_snapshot,
+            )
+            missbank_epoch_history.append(missbank_metrics)
+            _write_missbank_outputs(
+                output_dir=output_dir,
+                history=missbank_epoch_history,
+            )
+            previous_missbank_snapshot = current_missbank_snapshot
         current_lmb_snapshot = _collect_lmb_epoch_snapshot(
             model=model,
             epoch=epoch + 1,
@@ -238,6 +261,8 @@ def fit(
             "epoch": epoch + 1,
             "train": train_metrics,
         }
+        if remiss_mining_time_sec is not None:
+            record["remiss_mining_time_sec"] = remiss_mining_time_sec
         hard_replay_summary = _get_hard_replay_summary(train_loader)
         if main_process and hard_replay_summary is not None:
             hard_replay_history.append(hard_replay_summary)
@@ -831,6 +856,16 @@ def _reduce_train_metrics(
     return metrics
 
 
+def _max_distributed_float(value: float, distributed: DistributedContext | None) -> float:
+    gathered = all_gather_object(float(value), distributed)
+    values = [
+        float(item)
+        for item in gathered
+        if isinstance(item, (int, float))
+    ]
+    return max(values, default=float(value))
+
+
 def _set_data_loader_epoch(data_loader, epoch: int) -> None:
     sampler = getattr(data_loader, "sampler", None)
     set_epoch = getattr(sampler, "set_epoch", None)
@@ -1027,11 +1062,15 @@ def _run_missbank_offline_mining(
     total_epochs: int,
     log_interval: int,
     distributed: DistributedContext | None,
-) -> None:
+) -> float | None:
     missbanks = [
         missbank
         for missbank in _iter_missbanks(model)
-        if _missbank_enabled(missbank) and _missbank_mining_type(missbank) == "offline"
+        if (
+            _missbank_enabled(missbank)
+            and _missbank_mining_type(missbank) == "offline"
+            and _missbank_offline_mining_due(missbank, epoch)
+        )
     ]
     ftmbs = [
         ftmb
@@ -1039,7 +1078,7 @@ def _run_missbank_offline_mining(
         if _ftmb_enabled(ftmb) and _ftmb_mining_type(ftmb) == "offline"
     ]
     if not missbanks and not ftmbs:
-        return
+        return None
 
     was_training = model.training
     previous_base_only = _set_replay_base_only(data_loader, True)
@@ -1087,7 +1126,11 @@ def _run_missbank_offline_mining(
         _restore_replay_base_only(data_loader, previous_base_only)
         if was_training:
             model.train()
+    duration = time.perf_counter() - start_time
     barrier(distributed)
+    if not missbanks:
+        return None
+    return _max_distributed_float(duration, distributed)
 
 
 def _run_lmb_offline_mining(
@@ -1220,6 +1263,22 @@ def _collect_ftmb_epoch_snapshot(
     return merge_ftmb_epoch_snapshots(gathered)
 
 
+def _collect_missbank_epoch_snapshot(
+    *,
+    model: torch.nn.Module,
+    epoch: int,
+    distributed: DistributedContext | None,
+) -> dict[str, Any] | None:
+    missbank = _get_missbank(model)
+    snapshot = None
+    if _missbank_epoch_snapshot_due(missbank, epoch):
+        epoch_snapshot = getattr(missbank, "epoch_snapshot", None)
+        if callable(epoch_snapshot):
+            snapshot = epoch_snapshot(epoch=int(epoch))
+    gathered = all_gather_object(snapshot, distributed)
+    return merge_missbank_epoch_snapshots(gathered)
+
+
 def _collect_lmb_epoch_snapshot(
     *,
     model: torch.nn.Module,
@@ -1293,6 +1352,25 @@ def _missbank_mining_type(missbank: Any) -> str:
     return str(getattr(mining, "type", "online")).lower()
 
 
+def _missbank_epoch_snapshot_due(missbank: Any, epoch: int) -> bool:
+    if not _missbank_enabled(missbank):
+        return False
+    if _missbank_mining_type(missbank) != "offline":
+        return True
+    return _missbank_offline_mining_due(missbank, epoch)
+
+
+def _missbank_offline_mining_due(missbank: Any, epoch: int) -> bool:
+    config = getattr(missbank, "config", None)
+    mining = getattr(config, "mining", None)
+    start_epoch = int(getattr(mining, "start_epoch", 1))
+    interval_epoch = int(getattr(mining, "interval_epoch", 1))
+    epoch_value = int(epoch)
+    if epoch_value < start_epoch:
+        return False
+    return (epoch_value - start_epoch) % interval_epoch == 0
+
+
 def _ftmb_enabled(ftmb: Any) -> bool:
     if ftmb is None:
         return False
@@ -1359,12 +1437,26 @@ def _write_ftmb_failure_outputs(
     _write_json(ftmb_dir / "failure_type_state.json", {"snapshot": slim_snapshot})
 
 
+def _write_missbank_outputs(
+    *,
+    output_dir: Path,
+    history: list[dict[str, Any]],
+) -> None:
+    missbank_dir = output_dir / "missbank"
+    _write_json(missbank_dir / "missbank_epoch.json", history)
+    _write_history_csv(missbank_dir / "missbank_epoch.csv", history)
+
+
 def _read_hard_replay_history(hard_replay_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(hard_replay_dir / "hard_replay_epoch.json")
 
 
 def _read_tar_history(tar_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(tar_dir / "tar_epoch.json")
+
+
+def _read_missbank_epoch_history(missbank_dir: Path) -> list[dict[str, Any]]:
+    return _read_json_list(missbank_dir / "missbank_epoch.json")
 
 
 def _write_lmb_stability_outputs(
@@ -1403,6 +1495,44 @@ def _slim_ftmb_failure_record(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def _read_lmb_stability_history(lmb_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(lmb_dir / "lmb_stability_epoch.json")
+
+
+def _build_missbank_epoch_metrics(
+    snapshot: Mapping[str, Any],
+    *,
+    previous_snapshot: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    stability = compute_missbank_stability_metrics(
+        snapshot,
+        previous_snapshot=previous_snapshot,
+    )
+    num_seen_gts = _optional_int(snapshot.get("num_seen_gts")) or 0
+    num_missed_gts = _optional_int(stability.get("num_missed_gts")) or 0
+    num_target_gts = _optional_int(stability.get("num_target_gts")) or 0
+    num_images_seen = _optional_int(snapshot.get("num_images_seen")) or 0
+    num_images_with_miss = _optional_int(snapshot.get("num_images_with_miss")) or 0
+    num_images_with_target = _optional_int(snapshot.get("num_images_with_target")) or 0
+    return {
+        "epoch": _optional_int(stability.get("epoch")),
+        "mining_type": snapshot.get("mining_type"),
+        "num_seen_gts": num_seen_gts,
+        "num_missed_gts": num_missed_gts,
+        "num_target_gts": num_target_gts,
+        "num_images_seen": num_images_seen,
+        "num_images_with_miss": num_images_with_miss,
+        "num_images_with_target": num_images_with_target,
+        "missed_gt_ratio": _ratio(num_missed_gts, num_seen_gts),
+        "target_gt_ratio": _ratio(num_target_gts, num_seen_gts),
+        "image_miss_ratio": _ratio(num_images_with_miss, num_images_seen),
+        "image_target_ratio": _ratio(num_images_with_target, num_images_seen),
+        "mean_miss_count": _optional_float(snapshot.get("mean_miss_count")),
+        "max_miss_count": _optional_int(snapshot.get("max_miss_count")),
+        "mean_gt_miss_rate": _optional_float(snapshot.get("mean_gt_miss_rate")),
+        "miss_gt_jaccard_stability": _optional_float(stability.get("miss_gt_jaccard_stability")),
+        "miss_gt_churn_rate": _optional_float(stability.get("miss_gt_churn_rate")),
+        "new_miss_rate": _optional_float(stability.get("new_miss_rate")),
+        "persistent_miss_ratio": _optional_float(stability.get("persistent_miss_ratio")),
+    }
 
 
 def _read_json_list(path: str | Path) -> list[dict[str, Any]]:
@@ -1478,6 +1608,32 @@ def _csv_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _ratio(numerator: int | float, denominator: int | float) -> float | None:
+    denominator_value = float(denominator)
+    if denominator_value <= 0.0:
+        return None
+    return float(numerator) / denominator_value
 
 
 def _write_json(path: str | Path, payload: Any) -> None:

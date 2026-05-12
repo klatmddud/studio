@@ -6,8 +6,9 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models.detection import FCOS
-from torchvision.ops import boxes as box_ops
+from torchvision.ops import boxes as box_ops, generalized_box_iou_loss, sigmoid_focal_loss
 from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 
 from ._base import BaseDetectionWrapper, build_backbone_with_fpn, load_cfg
@@ -62,11 +63,11 @@ class FCOSWrapper(BaseDetectionWrapper):
     ):
         """Run FCOS with optional BCPC calibration."""
         self._train_metrics = {}
-        if self.bcpc is not None:
-            return self._forward_with_bcpc(images, targets)
+        if self.bcpc is not None or (self.training and _missbank_loss_weight_active(self)):
+            return self._forward_with_extensions(images, targets)
         return self.model(images, targets)
 
-    def _forward_with_bcpc(
+    def _forward_with_extensions(
         self,
         images: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None = None,
@@ -90,6 +91,10 @@ class FCOSWrapper(BaseDetectionWrapper):
                 f"expecting the last two dimensions of the Tensor to be H and W instead got {image.shape[-2:]}",
             )
             original_image_sizes.append((size[0], size[1]))
+
+        gt_loss_weights = None
+        if self.training and _missbank_loss_weight_active(self) and targets is not None:
+            gt_loss_weights = _missbank_target_loss_weights(self, targets)
 
         images, targets = self.model.transform(images, targets)
         if targets is not None:
@@ -128,20 +133,31 @@ class FCOSWrapper(BaseDetectionWrapper):
                 targets=targets,
                 num_anchors_per_level=num_anchors_per_level,
             )
-            losses = self.model.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
-            pred_boxes = self.model.box_coder.decode(
-                head_outputs["bbox_regression"],
-                torch.stack(anchors),
-            )
-            loss_bcpc = self.bcpc.loss_for_fcos(
-                cls_features=cls_features,
-                cls_logits=head_outputs["cls_logits"],
-                bbox_ctrness=head_outputs["bbox_ctrness"],
-                pred_boxes=pred_boxes,
-                targets=targets,
-                matched_idxs=matched_idxs,
-            )
-            losses["bcpc"] = loss_bcpc * float(self.bcpc.config.lambda_bg)
+            if gt_loss_weights is None:
+                losses = self.model.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
+            else:
+                losses = _compute_weighted_fcos_loss(
+                    self,
+                    targets=targets,
+                    head_outputs=head_outputs,
+                    anchors=anchors,
+                    matched_idxs=matched_idxs,
+                    gt_loss_weights=gt_loss_weights,
+                )
+            if self.bcpc is not None:
+                pred_boxes = self.model.box_coder.decode(
+                    head_outputs["bbox_regression"],
+                    torch.stack(anchors),
+                )
+                loss_bcpc = self.bcpc.loss_for_fcos(
+                    cls_features=cls_features,
+                    cls_logits=head_outputs["cls_logits"],
+                    bbox_ctrness=head_outputs["bbox_ctrness"],
+                    pred_boxes=pred_boxes,
+                    targets=targets,
+                    matched_idxs=matched_idxs,
+                )
+                losses["bcpc"] = loss_bcpc * float(self.bcpc.config.lambda_bg)
         else:
             split_head_outputs = {
                 name: list(output.split(num_anchors_per_level, dim=1))
@@ -284,6 +300,203 @@ def _match_fcos_targets(
         matched_idx[min_values < 1e-5] = -1
         matched_idxs.append(matched_idx)
     return matched_idxs
+
+
+def _compute_weighted_fcos_loss(
+    wrapper: FCOSWrapper,
+    *,
+    targets: list[dict[str, torch.Tensor]],
+    head_outputs: dict[str, torch.Tensor],
+    anchors: list[torch.Tensor],
+    matched_idxs: list[torch.Tensor],
+    gt_loss_weights: list[torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    cls_logits = head_outputs["cls_logits"]
+    bbox_regression = head_outputs["bbox_regression"]
+    bbox_ctrness = head_outputs["bbox_ctrness"]
+    anchors_tensor = torch.stack(anchors)
+
+    all_gt_classes_targets: list[torch.Tensor] = []
+    all_gt_boxes_targets: list[torch.Tensor] = []
+    all_gt_loss_weights: list[torch.Tensor] = []
+    for targets_per_image, matched_idxs_per_image, weights_per_image in zip(
+        targets,
+        matched_idxs,
+        gt_loss_weights,
+        strict=True,
+    ):
+        num_anchors = int(matched_idxs_per_image.numel())
+        labels = targets_per_image["labels"]
+        boxes = targets_per_image["boxes"]
+        weights_per_image = weights_per_image.to(device=matched_idxs_per_image.device, dtype=torch.float32)
+        if int(labels.numel()) == 0:
+            all_gt_classes_targets.append(
+                torch.full(
+                    (num_anchors,),
+                    -1,
+                    dtype=torch.long,
+                    device=matched_idxs_per_image.device,
+                )
+            )
+            all_gt_boxes_targets.append(
+                torch.zeros((num_anchors, 4), dtype=boxes.dtype, device=boxes.device)
+            )
+            all_gt_loss_weights.append(
+                torch.ones((num_anchors,), dtype=torch.float32, device=matched_idxs_per_image.device)
+            )
+            continue
+
+        safe_matched_idxs = matched_idxs_per_image.clamp(min=0)
+        gt_classes_targets = labels[safe_matched_idxs]
+        gt_boxes_targets = boxes[safe_matched_idxs]
+        gt_weights_targets = weights_per_image[safe_matched_idxs]
+        background_mask = matched_idxs_per_image < 0
+        gt_classes_targets = gt_classes_targets.clone()
+        gt_weights_targets = gt_weights_targets.clone()
+        gt_classes_targets[background_mask] = -1
+        gt_weights_targets[background_mask] = 1.0
+        all_gt_classes_targets.append(gt_classes_targets)
+        all_gt_boxes_targets.append(gt_boxes_targets)
+        all_gt_loss_weights.append(gt_weights_targets)
+
+    all_gt_classes = torch.stack(all_gt_classes_targets)
+    all_gt_boxes = torch.stack(all_gt_boxes_targets)
+    all_weights = torch.stack(all_gt_loss_weights).to(device=cls_logits.device, dtype=cls_logits.dtype)
+    foreground_mask = all_gt_classes >= 0
+    num_foreground = int(foreground_mask.sum().item())
+
+    cls_targets = torch.zeros_like(cls_logits)
+    if num_foreground > 0:
+        foreground_classes = all_gt_classes[foreground_mask]
+        torch._assert(
+            bool((foreground_classes < cls_logits.shape[-1]).all().item()),
+            "FCOS target label is outside the configured class range.",
+        )
+        cls_targets[foreground_mask, foreground_classes] = 1.0
+
+    anchor_weights = torch.ones_like(all_weights)
+    foreground_weights = all_weights[foreground_mask]
+    weighted_positive_count = int(foreground_weights.numel())
+    normalized_foreground_weights = _normalize_fcos_loss_weights(
+        wrapper,
+        foreground_weights,
+    )
+    if weighted_positive_count > 0:
+        anchor_weights[foreground_mask] = normalized_foreground_weights
+
+    loss_cls = (
+        sigmoid_focal_loss(cls_logits, cls_targets, reduction="none")
+        * anchor_weights.unsqueeze(-1)
+    ).sum() / max(1, num_foreground)
+
+    if num_foreground == 0:
+        loss_bbox_reg = bbox_regression.sum() * 0.0
+        loss_bbox_ctrness = bbox_ctrness.sum() * 0.0
+    else:
+        pred_boxes = wrapper.model.box_coder.decode(bbox_regression, anchors_tensor)
+        bbox_reg_targets = wrapper.model.box_coder.encode(anchors_tensor, all_gt_boxes)
+        positive_weights = anchor_weights[foreground_mask]
+        loss_bbox_reg = (
+            generalized_box_iou_loss(
+                pred_boxes[foreground_mask],
+                all_gt_boxes[foreground_mask],
+                reduction="none",
+            )
+            * positive_weights
+        ).sum() / max(1, num_foreground)
+        bbox_ctrness_targets = _fcos_ctrness_targets(bbox_reg_targets[foreground_mask])
+        loss_bbox_ctrness = (
+            F.binary_cross_entropy_with_logits(
+                bbox_ctrness[foreground_mask].flatten(),
+                bbox_ctrness_targets,
+                reduction="none",
+            )
+            * positive_weights
+        ).sum() / max(1, num_foreground)
+
+    _record_missbank_loss_weight_metrics(
+        wrapper,
+        raw_weights=foreground_weights,
+        used_weights=normalized_foreground_weights,
+    )
+    return {
+        "classification": loss_cls,
+        "bbox_regression": loss_bbox_reg,
+        "bbox_ctrness": loss_bbox_ctrness,
+    }
+
+
+def _normalize_fcos_loss_weights(
+    wrapper: FCOSWrapper,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    if int(weights.numel()) == 0:
+        return weights
+    config = _missbank_loss_weight_config(wrapper)
+    if config is None or not bool(getattr(config, "normalize_batch_mean", True)):
+        return weights
+    return weights / weights.mean().clamp_min(1.0e-6)
+
+
+def _fcos_ctrness_targets(bbox_reg_targets: torch.Tensor) -> torch.Tensor:
+    left_right = bbox_reg_targets[:, [0, 2]].clamp_min(0.0)
+    top_bottom = bbox_reg_targets[:, [1, 3]].clamp_min(0.0)
+    left_right_ratio = left_right.min(dim=-1).values / left_right.max(dim=-1).values.clamp_min(1.0e-6)
+    top_bottom_ratio = top_bottom.min(dim=-1).values / top_bottom.max(dim=-1).values.clamp_min(1.0e-6)
+    return torch.sqrt((left_right_ratio * top_bottom_ratio).clamp_min(0.0))
+
+
+def _missbank_loss_weight_active(wrapper: FCOSWrapper) -> bool:
+    missbank = getattr(wrapper, "missbank", None)
+    is_active = getattr(missbank, "loss_weight_active", None)
+    return callable(is_active) and bool(is_active())
+
+
+def _missbank_loss_weight_config(wrapper: FCOSWrapper):
+    missbank = getattr(wrapper, "missbank", None)
+    config = getattr(missbank, "config", None)
+    return getattr(config, "loss_weight", None)
+
+
+def _missbank_target_loss_weights(
+    wrapper: FCOSWrapper,
+    targets: list[dict[str, torch.Tensor]],
+) -> list[torch.Tensor]:
+    missbank = getattr(wrapper, "missbank", None)
+    get_weights = getattr(missbank, "get_target_loss_weights", None)
+    if not callable(get_weights):
+        return [
+            torch.ones(
+                (int(target["boxes"].shape[0]),),
+                dtype=torch.float32,
+                device=target["boxes"].device,
+            )
+            for target in targets
+        ]
+    device = targets[0]["boxes"].device if targets else None
+    return get_weights(targets, device=device)
+
+
+def _record_missbank_loss_weight_metrics(
+    wrapper: FCOSWrapper,
+    *,
+    raw_weights: torch.Tensor,
+    used_weights: torch.Tensor,
+) -> None:
+    metrics = {
+        "remiss_loss_weight_active": 1.0,
+        "remiss_loss_weight_positive": float(raw_weights.numel()),
+    }
+    if int(raw_weights.numel()) > 0:
+        metrics.update(
+            {
+                "remiss_loss_weight_raw_mean": float(raw_weights.detach().mean().cpu().item()),
+                "remiss_loss_weight_raw_max": float(raw_weights.detach().max().cpu().item()),
+                "remiss_loss_weight_used_mean": float(used_weights.detach().mean().cpu().item()),
+                "remiss_loss_weight_used_max": float(used_weights.detach().max().cpu().item()),
+            }
+        )
+    wrapper._train_metrics.update(metrics)
 
 
 def _postprocess_detections_with_bcpc(

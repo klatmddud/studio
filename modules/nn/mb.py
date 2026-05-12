@@ -83,8 +83,63 @@ class MissBankTargetConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MissBankLossWeightConfig:
+    enabled: bool = False
+    start_epoch: int | None = None
+    alpha: float = 0.5
+    max_weight: float = 2.0
+    min_miss_count: int = 1
+    min_observations: int = 1
+    normalize_batch_mean: bool = True
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any] | None = None,
+    ) -> "MissBankLossWeightConfig":
+        data = dict(raw or {})
+        start_epoch = data.get("start_epoch")
+        config = cls(
+            enabled=bool(data.get("enabled", False)),
+            start_epoch=None if start_epoch is None else int(start_epoch),
+            alpha=float(data.get("alpha", 0.5)),
+            max_weight=float(data.get("max_weight", 2.0)),
+            min_miss_count=int(data.get("min_miss_count", 1)),
+            min_observations=int(data.get("min_observations", 1)),
+            normalize_batch_mean=bool(data.get("normalize_batch_mean", True)),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.start_epoch is not None and int(self.start_epoch) < 0:
+            raise ValueError("MissBank loss_weight.start_epoch must be null or >= 0.")
+        if float(self.alpha) < 0.0:
+            raise ValueError("MissBank loss_weight.alpha must be >= 0.")
+        if float(self.max_weight) < 1.0:
+            raise ValueError("MissBank loss_weight.max_weight must be >= 1.")
+        if int(self.min_miss_count) < 1:
+            raise ValueError("MissBank loss_weight.min_miss_count must be >= 1.")
+        if int(self.min_observations) < 1:
+            raise ValueError("MissBank loss_weight.min_observations must be >= 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "start_epoch": self.start_epoch,
+            "alpha": self.alpha,
+            "max_weight": self.max_weight,
+            "min_miss_count": self.min_miss_count,
+            "min_observations": self.min_observations,
+            "normalize_batch_mean": self.normalize_batch_mean,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MissBankMiningConfig:
     type: str = "online"
+    start_epoch: int = 1
+    interval_epoch: int = 1
 
     @classmethod
     def from_mapping(
@@ -92,26 +147,38 @@ class MissBankMiningConfig:
         raw: Mapping[str, Any] | None = None,
     ) -> "MissBankMiningConfig":
         data = dict(raw or {})
-        config = cls(type=str(data.get("type", "online")).lower())
+        config = cls(
+            type=str(data.get("type", "online")).lower(),
+            start_epoch=int(data.get("start_epoch", 1)),
+            interval_epoch=int(data.get("interval_epoch", 1)),
+        )
         config.validate()
         return config
 
     def validate(self) -> None:
         if self.type not in {"online", "offline"}:
             raise ValueError("MissBank mining.type must be either 'online' or 'offline'.")
+        if int(self.start_epoch) < 1:
+            raise ValueError("MissBank mining.start_epoch must be >= 1.")
+        if int(self.interval_epoch) < 1:
+            raise ValueError("MissBank mining.interval_epoch must be >= 1.")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"type": self.type}
+        return {
+            "type": self.type,
+            "start_epoch": self.start_epoch,
+            "interval_epoch": self.interval_epoch,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class MissBankConfig:
     enabled: bool = False
-    grid_size: int = 2
     start_epoch: int = 1
     mining: MissBankMiningConfig = field(default_factory=MissBankMiningConfig)
     matching: MissBankMatchingConfig = field(default_factory=MissBankMatchingConfig)
     target: MissBankTargetConfig = field(default_factory=MissBankTargetConfig)
+    loss_weight: MissBankLossWeightConfig = field(default_factory=MissBankLossWeightConfig)
     max_records: int | None = None
     arch: str | None = None
 
@@ -143,11 +210,11 @@ class MissBankConfig:
 
         config = cls(
             enabled=bool(merged.get("enabled", False)),
-            grid_size=int(merged.get("grid_size", 2)),
             start_epoch=int(merged.get("start_epoch", 1)),
             mining=MissBankMiningConfig.from_mapping(merged.get("mining")),
             matching=MissBankMatchingConfig.from_mapping(merged.get("matching")),
             target=MissBankTargetConfig.from_mapping(merged.get("target")),
+            loss_weight=MissBankLossWeightConfig.from_mapping(merged.get("loss_weight")),
             max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
             arch=normalized_arch,
         )
@@ -155,16 +222,10 @@ class MissBankConfig:
         return config
 
     @property
-    def num_regions(self) -> int:
-        return int(self.grid_size) * int(self.grid_size)
-
-    @property
     def num_labels(self) -> int:
-        return int(self.num_regions) + 1
+        return 2
 
     def validate(self) -> None:
-        if int(self.grid_size) < 1:
-            raise ValueError("MissBank grid_size must be >= 1.")
         if int(self.start_epoch) < 0:
             raise ValueError("MissBank start_epoch must be >= 0.")
         if self.max_records is not None and int(self.max_records) < 1:
@@ -206,11 +267,11 @@ class MissBankConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "grid_size": self.grid_size,
             "start_epoch": self.start_epoch,
             "mining": self.mining.to_dict(),
             "matching": self.matching.to_dict(),
             "target": self.target.to_dict(),
+            "loss_weight": self.loss_weight.to_dict(),
             "max_records": self.max_records,
             "arch": self.arch,
         }
@@ -223,7 +284,6 @@ class MissBankRecord:
     gt_id: str | None
     gt_class: int
     bbox_xyxy: tuple[float, float, float, float]
-    region_id: int
     miss_count: int = 0
     is_missed: bool = False
     last_epoch: int = 0
@@ -243,7 +303,6 @@ class MissBankRecord:
         *,
         is_missed: bool,
         bbox_xyxy: tuple[float, float, float, float],
-        region_id: int,
         epoch: int,
         step: int,
         matched_iou: float | None,
@@ -254,7 +313,6 @@ class MissBankRecord:
         best_score_iou: float | None,
     ) -> None:
         self.bbox_xyxy = bbox_xyxy
-        self.region_id = int(region_id)
         self.is_missed = bool(is_missed)
         self.last_epoch = int(epoch)
         self.last_step = int(step)
@@ -285,7 +343,6 @@ class MissBankRecord:
             "gt_id": self.gt_id,
             "gt_class": self.gt_class,
             "bbox_xyxy": list(self.bbox_xyxy),
-            "region_id": self.region_id,
             "miss_count": self.miss_count,
             "is_missed": self.is_missed,
             "last_epoch": self.last_epoch,
@@ -313,7 +370,6 @@ class MissBankRecord:
             gt_id=None if state.get("gt_id") is None else str(state.get("gt_id")),
             gt_class=int(state.get("gt_class", 0)),
             bbox_xyxy=bbox_values,
-            region_id=int(state.get("region_id", 1)),
             miss_count=int(state.get("miss_count", 0)),
             is_missed=bool(state.get("is_missed", False)),
             last_epoch=int(state.get("last_epoch", 0)),
@@ -356,10 +412,6 @@ class MissBank(nn.Module):
         return len(self._records)
 
     @property
-    def num_regions(self) -> int:
-        return int(self.config.num_regions)
-
-    @property
     def num_labels(self) -> int:
         return int(self.config.num_labels)
 
@@ -369,6 +421,15 @@ class MissBank(nn.Module):
     def is_active(self, epoch: int | None = None) -> bool:
         epoch_value = self.current_epoch if epoch is None else int(epoch)
         return bool(self.config.enabled and int(epoch_value) >= int(self.config.start_epoch))
+
+    def loss_weight_active(self, epoch: int | None = None) -> bool:
+        if not bool(self.config.enabled and self.config.loss_weight.enabled):
+            return False
+        epoch_value = self.current_epoch if epoch is None else int(epoch)
+        start_epoch = self.config.loss_weight.start_epoch
+        if start_epoch is None:
+            start_epoch = self.config.start_epoch
+        return int(epoch_value) >= int(start_epoch)
 
     def reset(self) -> None:
         self._records.clear()
@@ -441,6 +502,17 @@ class MissBank(nn.Module):
         labels = [int(target_map[_normalize_image_id(image_id)]) for image_id in image_ids]
         return torch.tensor(labels, dtype=torch.long, device=device)
 
+    def get_target_loss_weights(
+        self,
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        device: torch.device | str | None = None,
+    ) -> list[torch.Tensor]:
+        return [
+            self._target_loss_weights(target=target, device=device)
+            for target in targets
+        ]
+
     def get_records(
         self,
         image_id: Any | None = None,
@@ -461,20 +533,13 @@ class MissBank(nn.Module):
             for record in missed_records
             if int(record.miss_count) >= int(self.config.target.miss_threshold)
         ]
-        region_histogram = Counter(
-            int(record.region_id)
-            for record in target_records
-            if int(record.region_id) > 0
-        )
         class_histogram = Counter(int(record.gt_class) for record in target_records)
         miss_sum = sum(int(record.miss_count) for record in missed_records)
         return {
             "enabled": self.config.enabled,
             "arch": self.config.arch,
             "current_epoch": self.current_epoch,
-            "grid_size": self.config.grid_size,
             "mining_type": self.config.mining.type,
-            "num_regions": self.num_regions,
             "num_labels": self.num_labels,
             "num_records": len(self._records),
             "num_images": len(self._image_index),
@@ -482,7 +547,6 @@ class MissBank(nn.Module):
             "num_target_gts": len(target_records),
             "mean_miss_count": miss_sum / float(max(len(missed_records), 1)),
             "max_miss_count": max((record.max_miss_count for record in self._records.values()), default=0),
-            "region_histogram": dict(region_histogram),
             "class_histogram": dict(class_histogram),
             "stats": {key: int(value) for key, value in self._stats.items()},
         }
@@ -492,7 +556,6 @@ class MissBank(nn.Module):
         epoch: int | None = None,
         *,
         miss_threshold: int | None = None,
-        hotspot_top_k: int = 10,
     ) -> dict[str, Any]:
         epoch_value = int(self.current_epoch if epoch is None else epoch)
         threshold = int(self.config.target.miss_threshold if miss_threshold is None else miss_threshold)
@@ -507,37 +570,29 @@ class MissBank(nn.Module):
             for record in missed_records
             if int(record.miss_count) >= threshold
         ]
-
-        missed_region_histogram = Counter(int(record.region_id) for record in missed_records)
-        target_region_histogram = Counter(int(record.region_id) for record in target_records)
-        image_region_hotspots = Counter(
-            _hotspot_key(record.image_id, int(record.region_id))
-            for record in missed_records
-        )
-        target_image_region_hotspots = Counter(
-            _hotspot_key(record.image_id, int(record.region_id))
-            for record in target_records
+        miss_count_sum = sum(int(record.miss_count) for record in missed_records)
+        gt_miss_rate_sum = sum(
+            int(record.total_missed) / float(max(int(record.total_seen), 1))
+            for record in records
         )
 
         return {
             "epoch": epoch_value,
-            "grid_size": self.config.grid_size,
             "mining_type": self.config.mining.type,
-            "num_regions": self.num_regions,
             "miss_threshold": threshold,
-            "hotspot_top_k": int(hotspot_top_k),
             "num_seen_gts": len(records),
             "num_missed_gts": len(missed_records),
             "num_target_gts": len(target_records),
             "num_images_seen": len({record.image_id for record in records}),
             "num_images_with_miss": len({record.image_id for record in missed_records}),
             "num_images_with_target": len({record.image_id for record in target_records}),
+            "miss_count_sum": miss_count_sum,
+            "mean_miss_count": miss_count_sum / float(max(len(missed_records), 1)),
+            "max_miss_count": max((int(record.miss_count) for record in missed_records), default=0),
+            "gt_miss_rate_sum": gt_miss_rate_sum,
+            "mean_gt_miss_rate": gt_miss_rate_sum / float(max(len(records), 1)),
             "missed_gt_keys": sorted(record.record_key for record in missed_records),
             "target_gt_keys": sorted(record.record_key for record in target_records),
-            "missed_region_histogram": _string_counter(missed_region_histogram),
-            "target_region_histogram": _string_counter(target_region_histogram),
-            "image_region_hotspots": _string_counter(image_region_hotspots),
-            "target_image_region_hotspots": _string_counter(target_image_region_hotspots),
         }
 
     def stability_metrics(
@@ -546,17 +601,14 @@ class MissBank(nn.Module):
         *,
         epoch: int | None = None,
         miss_threshold: int | None = None,
-        hotspot_top_k: int = 10,
     ) -> dict[str, Any]:
         current_snapshot = self.epoch_snapshot(
             epoch=epoch,
             miss_threshold=miss_threshold,
-            hotspot_top_k=hotspot_top_k,
         )
         return compute_missbank_stability_metrics(
             current_snapshot,
             previous_snapshot=previous_snapshot,
-            hotspot_top_k=hotspot_top_k,
         )
 
     def get_extra_state(self) -> dict[str, Any]:
@@ -630,12 +682,6 @@ class MissBank(nn.Module):
                 stats["invalid_gt_clamped"] += 1
                 continue
             bbox_tuple = _box_to_tuple(clamped_box)
-            region_id = _region_id_for_box(
-                bbox_tuple,
-                height=height,
-                width=width,
-                grid_size=int(self.config.grid_size),
-            )
             gt_id = gt_ids[gt_index]
             record_key = _record_key(
                 image_id=image_id,
@@ -663,7 +709,6 @@ class MissBank(nn.Module):
                     gt_id=None if gt_id is None else str(gt_id),
                     gt_class=gt_label,
                     bbox_xyxy=bbox_tuple,
-                    region_id=region_id,
                 )
                 self._records[record_key] = record
                 self._image_index[image_id].add(record_key)
@@ -671,7 +716,6 @@ class MissBank(nn.Module):
             record.update(
                 is_missed=is_missed,
                 bbox_xyxy=bbox_tuple,
-                region_id=region_id,
                 epoch=epoch,
                 step=step,
                 matched_iou=match["iou"],
@@ -694,7 +738,6 @@ class MissBank(nn.Module):
         *,
         miss_threshold: int,
     ) -> int:
-        region_scores: Counter[int] = Counter()
         for record_key in self._image_index.get(image_id, set()):
             record = self._records.get(record_key)
             if record is None:
@@ -703,11 +746,59 @@ class MissBank(nn.Module):
                 continue
             if int(record.miss_count) < int(miss_threshold):
                 continue
-            region_scores[int(record.region_id)] += int(record.miss_count)
-        if not region_scores:
-            return 0
-        max_score = max(region_scores.values())
-        return min(region for region, score in region_scores.items() if score == max_score)
+            return 1
+        return 0
+
+    def _target_loss_weights(
+        self,
+        *,
+        target: Mapping[str, Any],
+        device: torch.device | str | None,
+    ) -> torch.Tensor:
+        gt_boxes = _as_boxes_tensor(target.get("boxes"))
+        num_gts = int(gt_boxes.shape[0])
+        weights = torch.ones((num_gts,), dtype=torch.float32, device=device)
+        if num_gts == 0 or not self.loss_weight_active():
+            return weights
+
+        gt_labels = _as_int_tensor(target.get("labels"), length=num_gts)
+        height, width = _resolve_image_size(
+            target=target,
+            image_size=None,
+            boxes=gt_boxes,
+        )
+        image_id = _normalize_image_id(target.get("image_id", torch.tensor(0)))
+        gt_ids = _extract_gt_ids(target, num_gts)
+        for gt_index, gt_box in enumerate(gt_boxes):
+            if not _valid_box(gt_box):
+                continue
+            gt_label = int(gt_labels[gt_index].item())
+            clamped_box = _clamp_box(gt_box, height=height, width=width)
+            if not _valid_box(clamped_box):
+                continue
+            record_key = _record_key(
+                image_id=image_id,
+                gt_id=gt_ids[gt_index],
+                gt_class=gt_label,
+                bbox_xyxy=_box_to_tuple(clamped_box),
+                height=height,
+                width=width,
+            )
+            record = self._records.get(record_key)
+            weights[gt_index] = float(self._loss_weight_for_record(record))
+        return weights
+
+    def _loss_weight_for_record(self, record: MissBankRecord | None) -> float:
+        if record is None:
+            return 1.0
+        config = self.config.loss_weight
+        miss_count = int(record.miss_count)
+        if miss_count < int(config.min_miss_count):
+            return 1.0
+        if int(record.total_seen) < int(config.min_observations):
+            return 1.0
+        raw_weight = 1.0 + float(config.alpha) * math.log1p(float(miss_count))
+        return min(float(config.max_weight), max(1.0, raw_weight))
 
     def _enforce_max_records(self) -> None:
         max_records = self.config.max_records
@@ -781,48 +872,22 @@ def compute_missbank_stability_metrics(
     current_snapshot: Mapping[str, Any],
     *,
     previous_snapshot: Mapping[str, Any] | None = None,
-    hotspot_top_k: int = 10,
 ) -> dict[str, Any]:
     current_missed = set(_as_string_list(current_snapshot.get("missed_gt_keys")))
     current_target = set(_as_string_list(current_snapshot.get("target_gt_keys")))
-    current_region_histogram = _counter_from_mapping(
-        current_snapshot.get("missed_region_histogram")
-    )
-    current_hotspots = _counter_from_mapping(
-        current_snapshot.get("image_region_hotspots")
-    )
 
     has_previous = isinstance(previous_snapshot, Mapping)
     previous_missed: set[str] = set()
-    previous_region_histogram: Counter[str] = Counter()
-    previous_hotspots: Counter[str] = Counter()
     if has_previous and previous_snapshot is not None:
         previous_missed = set(_as_string_list(previous_snapshot.get("missed_gt_keys")))
-        previous_region_histogram = _counter_from_mapping(
-            previous_snapshot.get("missed_region_histogram")
-        )
-        previous_hotspots = _counter_from_mapping(
-            previous_snapshot.get("image_region_hotspots")
-        )
 
     jaccard = None
     churn_rate = None
     new_miss_rate = None
-    region_js_divergence = None
-    hotspot_overlap_at_k = None
     if has_previous:
         jaccard = _jaccard(current_missed, previous_missed)
         churn_rate = None if jaccard is None else 1.0 - jaccard
         new_miss_rate = _new_item_rate(current_missed, previous_missed)
-        region_js_divergence = _js_divergence(
-            current_region_histogram,
-            previous_region_histogram,
-        )
-        hotspot_overlap_at_k = _topk_overlap(
-            current_hotspots,
-            previous_hotspots,
-            k=int(hotspot_top_k),
-        )
 
     num_missed = len(current_missed)
     persistent_miss_ratio = (
@@ -843,26 +908,11 @@ def compute_missbank_stability_metrics(
         "miss_gt_churn_rate": churn_rate,
         "new_miss_rate": new_miss_rate,
         "persistent_miss_ratio": persistent_miss_ratio,
-        "miss_region_js_divergence": region_js_divergence,
-        "top1_miss_region_share": _top1_share(current_region_histogram),
-        "miss_region_entropy": _normalized_entropy(
-            current_region_histogram,
-            num_bins=_optional_int(current_snapshot.get("num_regions")),
-        ),
-        "miss_hotspot_overlap_at_k": hotspot_overlap_at_k,
-        "miss_hotspot_k": int(hotspot_top_k),
-        "missed_region_histogram": dict(sorted(current_region_histogram.items())),
-        "target_region_histogram": dict(
-            sorted(_counter_from_mapping(current_snapshot.get("target_region_histogram")).items())
-        ),
-        "top_miss_hotspots": _topk_items(current_hotspots, k=int(hotspot_top_k)),
     }
 
 
 def merge_missbank_epoch_snapshots(
     snapshots: Sequence[Mapping[str, Any] | None],
-    *,
-    hotspot_top_k: int = 10,
 ) -> dict[str, Any] | None:
     valid_snapshots = [snapshot for snapshot in snapshots if isinstance(snapshot, Mapping)]
     if not valid_snapshots:
@@ -870,17 +920,13 @@ def merge_missbank_epoch_snapshots(
 
     missed_gt_keys: set[str] = set()
     target_gt_keys: set[str] = set()
-    missed_region_histogram: Counter[str] = Counter()
-    target_region_histogram: Counter[str] = Counter()
-    image_region_hotspots: Counter[str] = Counter()
-    target_image_region_hotspots: Counter[str] = Counter()
+    miss_count_sum = 0
+    gt_miss_rate_sum = 0.0
+    max_miss_count = 0
     merged: dict[str, Any] = {
         "epoch": max(_optional_int(snapshot.get("epoch")) or 0 for snapshot in valid_snapshots),
-        "grid_size": valid_snapshots[0].get("grid_size"),
         "mining_type": valid_snapshots[0].get("mining_type"),
-        "num_regions": valid_snapshots[0].get("num_regions"),
         "miss_threshold": valid_snapshots[0].get("miss_threshold"),
-        "hotspot_top_k": int(hotspot_top_k),
         "num_seen_gts": 0,
         "num_images_seen": 0,
         "num_images_with_miss": 0,
@@ -889,25 +935,25 @@ def merge_missbank_epoch_snapshots(
     for snapshot in valid_snapshots:
         missed_gt_keys.update(_as_string_list(snapshot.get("missed_gt_keys")))
         target_gt_keys.update(_as_string_list(snapshot.get("target_gt_keys")))
-        missed_region_histogram.update(_counter_from_mapping(snapshot.get("missed_region_histogram")))
-        target_region_histogram.update(_counter_from_mapping(snapshot.get("target_region_histogram")))
-        image_region_hotspots.update(_counter_from_mapping(snapshot.get("image_region_hotspots")))
-        target_image_region_hotspots.update(_counter_from_mapping(snapshot.get("target_image_region_hotspots")))
         merged["num_seen_gts"] += _optional_int(snapshot.get("num_seen_gts")) or 0
         merged["num_images_seen"] += _optional_int(snapshot.get("num_images_seen")) or 0
         merged["num_images_with_miss"] += _optional_int(snapshot.get("num_images_with_miss")) or 0
         merged["num_images_with_target"] += _optional_int(snapshot.get("num_images_with_target")) or 0
+        miss_count_sum += _optional_int(snapshot.get("miss_count_sum")) or 0
+        gt_miss_rate_sum += float(snapshot.get("gt_miss_rate_sum") or 0.0)
+        max_miss_count = max(max_miss_count, _optional_int(snapshot.get("max_miss_count")) or 0)
 
     merged.update(
         {
             "num_missed_gts": len(missed_gt_keys),
             "num_target_gts": len(target_gt_keys),
+            "miss_count_sum": miss_count_sum,
+            "mean_miss_count": miss_count_sum / float(max(len(missed_gt_keys), 1)),
+            "max_miss_count": max_miss_count,
+            "gt_miss_rate_sum": gt_miss_rate_sum,
+            "mean_gt_miss_rate": gt_miss_rate_sum / float(max(int(merged["num_seen_gts"]), 1)),
             "missed_gt_keys": sorted(missed_gt_keys),
             "target_gt_keys": sorted(target_gt_keys),
-            "missed_region_histogram": dict(sorted(missed_region_histogram.items())),
-            "target_region_histogram": dict(sorted(target_region_histogram.items())),
-            "image_region_hotspots": dict(sorted(image_region_hotspots.items())),
-            "target_image_region_hotspots": dict(sorted(target_image_region_hotspots.items())),
         }
     )
     return merged
@@ -992,39 +1038,6 @@ def _parse_threshold(value: Any) -> float | str:
 
 def _is_auto_threshold(value: Any) -> bool:
     return isinstance(value, str) and value.lower() == "auto"
-
-
-def _region_id_for_box(
-    bbox_xyxy: tuple[float, float, float, float],
-    *,
-    height: float,
-    width: float,
-    grid_size: int,
-) -> int:
-    x1, y1, x2, y2 = bbox_xyxy
-    height = max(float(height), 1.0)
-    width = max(float(width), 1.0)
-    grid_size = max(int(grid_size), 1)
-    cell_w = width / float(grid_size)
-    cell_h = height / float(grid_size)
-    best_region = 1
-    best_area = -1.0
-    for row in range(grid_size):
-        for col in range(grid_size):
-            rx1 = float(col) * cell_w
-            ry1 = float(row) * cell_h
-            rx2 = width if col == grid_size - 1 else float(col + 1) * cell_w
-            ry2 = height if row == grid_size - 1 else float(row + 1) * cell_h
-            ix1 = max(float(x1), rx1)
-            iy1 = max(float(y1), ry1)
-            ix2 = min(float(x2), rx2)
-            iy2 = min(float(y2), ry2)
-            area = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-            region_id = row * grid_size + col + 1
-            if area > best_area:
-                best_area = area
-                best_region = region_id
-    return int(best_region)
 
 
 def _resolve_image_size(
@@ -1169,27 +1182,10 @@ def _normalize_image_id(value: Any) -> str:
     return str(value)
 
 
-def _hotspot_key(image_id: Any, region_id: int) -> str:
-    return f"{_normalize_image_id(image_id)}::{int(region_id)}"
-
-
-def _string_counter(counter: Counter[Any]) -> dict[str, int]:
-    return {
-        str(key): int(value)
-        for key, value in sorted(counter.items(), key=lambda item: str(item[0]))
-    }
-
-
 def _as_string_list(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
     return [str(item) for item in value]
-
-
-def _counter_from_mapping(value: Any) -> Counter[str]:
-    if not isinstance(value, Mapping):
-        return Counter()
-    return Counter({str(key): int(count) for key, count in value.items()})
 
 
 def _optional_int(value: Any) -> int | None:
@@ -1212,74 +1208,3 @@ def _new_item_rate(current: set[str], previous: set[str]) -> float:
     if not current:
         return 0.0
     return len(current - previous) / float(len(current))
-
-
-def _top1_share(counter: Counter[str]) -> float | None:
-    total = sum(counter.values())
-    if total <= 0:
-        return None
-    return max(counter.values()) / float(total)
-
-
-def _normalized_entropy(counter: Counter[str], *, num_bins: int | None = None) -> float | None:
-    total = sum(counter.values())
-    if total <= 0:
-        return None
-    nonzero = [count for count in counter.values() if count > 0]
-    bins = int(num_bins or len(nonzero))
-    if bins <= 1:
-        return 0.0
-    entropy = 0.0
-    for count in nonzero:
-        probability = count / float(total)
-        entropy -= probability * math.log(probability)
-    return entropy / math.log(float(bins))
-
-
-def _js_divergence(current: Counter[str], previous: Counter[str]) -> float:
-    keys = sorted(set(current) | set(previous))
-    current_total = sum(current.values())
-    previous_total = sum(previous.values())
-    if current_total <= 0 and previous_total <= 0:
-        return 0.0
-    if current_total <= 0 or previous_total <= 0:
-        return 1.0
-    p = [current[key] / float(current_total) for key in keys]
-    q = [previous[key] / float(previous_total) for key in keys]
-    m = [(p_value + q_value) * 0.5 for p_value, q_value in zip(p, q, strict=True)]
-    divergence = 0.5 * _kl_divergence(p, m) + 0.5 * _kl_divergence(q, m)
-    return divergence / math.log(2.0)
-
-
-def _kl_divergence(p: Sequence[float], q: Sequence[float]) -> float:
-    total = 0.0
-    for p_value, q_value in zip(p, q, strict=True):
-        if p_value <= 0.0:
-            continue
-        total += p_value * math.log(p_value / max(q_value, 1e-12))
-    return total
-
-
-def _topk_overlap(current: Counter[str], previous: Counter[str], *, k: int) -> float | None:
-    if k <= 0:
-        return None
-    if not current and not previous:
-        return 1.0
-    if not current or not previous:
-        return 0.0
-    current_top = {key for key, _ in _topk_pairs(current, k=k)}
-    previous_top = {key for key, _ in _topk_pairs(previous, k=k)}
-    return len(current_top & previous_top) / float(k)
-
-
-def _topk_items(counter: Counter[str], *, k: int) -> list[dict[str, Any]]:
-    return [
-        {"key": key, "count": int(count)}
-        for key, count in _topk_pairs(counter, k=k)
-    ]
-
-
-def _topk_pairs(counter: Counter[str], *, k: int) -> list[tuple[str, int]]:
-    if k <= 0:
-        return []
-    return sorted(counter.items(), key=lambda item: (-int(item[1]), str(item[0])))[:k]

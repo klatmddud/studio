@@ -1,5 +1,7 @@
 # ReMiss: Recurrent Missed-Object Memory for Spatial Prototype Injection
 
+> Note: 현재 runtime MissBank는 spatial region을 나누지 않고 binary image-level target을 반환한다. 이 문서의 spatial prototype injection 내용은 region 기반 ReMiss 확장을 다시 켤 때 참고할 legacy 방법론으로 남겨둔다.
+
 ## 개요
 
 ReMiss는 객체 검출 모델이 반복적으로 놓치는 Ground Truth(GT)를 기억하고, 해당 실패 패턴을 이용해 detector feature를 공간적으로 보정하는 방법론이다. 핵심 목표는 단순히 어려운 샘플의 loss를 키우는 것이 아니라, 연속 미검출되는 객체의 공간적 분포를 학습 신호로 사용해 모델이 취약한 이미지 영역을 인식하고 해당 영역의 feature 표현을 보강하도록 만드는 것이다.

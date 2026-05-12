@@ -9,7 +9,7 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Single-stage anchor-free detector.
 - Uses TorchVision `FCOS` directly.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
-- Optional MissBank, FTMB, Hard Replay, TAR, and LMB runtime modules sit outside the detector forward path and do not change FCOS losses or inference.
+- Optional MissBank, FTMB, Hard Replay, TAR, and LMB runtime modules usually sit outside the detector forward path. When ReMiss `loss_weight.enabled: true`, `FCOSWrapper` reweights positive FCOS losses from MissBank `miss_count`; inference is unchanged.
 - Optional QG-AFP v0 is inserted as a `post_neck` module between TorchVision FPN outputs and the FCOS head. It preserves feature keys and shapes but changes forward features when enabled.
 - Optional BCPC is attached to `FCOSWrapper` as an independent calibration module. When enabled, the wrapper uses the FCOS classification tower feature before the final class-logit convolution to add a background-risk loss and calibrate inference scores before NMS.
 

@@ -1,5 +1,7 @@
 # MissHead 설계 문서
 
+> Note: 현재 runtime MissBank는 spatial region을 나누지 않고 `0: no target miss`, `1: has target miss`의 binary image-level label을 반환한다. 이 문서의 region/5-way MissHead 내용은 region 기반 ReMiss 확장을 다시 켤 때 참고할 legacy 설계로 남겨둔다.
+
 ## 개요
 
 MissHead는 ReMiss에서 이미지 단위의 미검출 취약 영역을 예측하는 auxiliary head이다. MissBank가 누적한 반복 미검출 GT 정보를 학습 target으로 사용해, 현재 입력 이미지에서 어느 spatial region에 미검출 GT가 많을 가능성이 높은지 예측한다.
