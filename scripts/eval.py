@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the QG-AFP YAML config path.",
     )
+    parser.add_argument(
+        "--bcpc-config",
+        default=None,
+        help="Optional override for the BCPC YAML config path.",
+    )
     return parser.parse_args()
 
 
@@ -125,6 +130,7 @@ def main() -> None:
 def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str, Path]:
     overrides = {
         "qg_afp": args.qg_afp_config,
+        "bcpc": args.bcpc_config,
     }
     paths = resolve_module_config_paths(overrides, require_exists=False)
     missing = [

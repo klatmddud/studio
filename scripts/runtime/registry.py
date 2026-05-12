@@ -7,7 +7,13 @@ from typing import Any
 import torch.nn as nn
 
 from models.detection.wrapper import DINOWrapper, FCOSWrapper, FasterRCNNWrapper
-from modules.nn import build_ftmb_from_yaml, build_lmb_from_yaml, build_missbank_from_yaml, build_qg_afp_from_yaml
+from modules.nn import (
+    build_bcpc_from_yaml,
+    build_ftmb_from_yaml,
+    build_lmb_from_yaml,
+    build_missbank_from_yaml,
+    build_qg_afp_from_yaml,
+)
 
 from .config import load_yaml_file
 from .dataset_meta import infer_num_classes_from_runtime_config
@@ -27,6 +33,8 @@ MODEL_BUILDERS = {
 }
 
 MISSBANK_SUPPORTED_ARCHES = {"fasterrcnn", "fcos"}
+FTMB_SUPPORTED_ARCHES = {"fasterrcnn", "fcos"}
+
 
 def normalize_arch(raw_arch: str) -> str:
     return ARCH_ALIASES.get(raw_arch.lower(), raw_arch.lower())
@@ -56,7 +64,15 @@ def build_model_from_config(
         arch=normalized_arch,
         module_config_paths=module_config_paths,
     )
-    model = builder(model_config, post_neck=post_neck)
+    if normalized_arch == "fcos":
+        bcpc = _build_bcpc_module(
+            model_config=model_config,
+            arch=normalized_arch,
+            module_config_paths=module_config_paths,
+        )
+        model = builder(model_config, post_neck=post_neck, bcpc=bcpc)
+    else:
+        model = builder(model_config, post_neck=post_neck)
     _attach_remiss_modules(
         model,
         model_config=model_config,
@@ -101,6 +117,31 @@ def _build_post_neck_modules(
     return _FeatureDictSequential(*modules)
 
 
+def _build_bcpc_module(
+    *,
+    model_config: Mapping[str, Any],
+    arch: str,
+    module_config_paths: dict[str, str | Path] | None,
+) -> nn.Module | None:
+    if arch != "fcos":
+        return None
+    if not module_config_paths:
+        return None
+    bcpc_path = module_config_paths.get("bcpc")
+    if bcpc_path is None:
+        return None
+    neck = model_config.get("neck", {})
+    in_channels = 256
+    if isinstance(neck, Mapping):
+        in_channels = int(neck.get("out_channels", 256))
+    return build_bcpc_from_yaml(
+        bcpc_path,
+        arch=arch,
+        num_classes=int(model_config.get("num_classes", 91)),
+        in_channels=in_channels,
+    )
+
+
 class _FeatureDictSequential(nn.Sequential):
     def forward(self, features):  # type: ignore[override]
         for module in self:
@@ -117,6 +158,7 @@ class _FeatureDictSequential(nn.Sequential):
                 if isinstance(value, (int, float)):
                     metrics[str(name)] = float(value)
         return metrics
+
 
 def build_model_from_path(
     model_config_path: str | Path,
@@ -173,7 +215,7 @@ def _attach_ftmb_modules(
     arch: str,
     module_config_paths: dict[str, str | Path] | None,
 ) -> None:
-    if arch != "fcos":
+    if arch not in FTMB_SUPPORTED_ARCHES:
         return
     if not module_config_paths:
         return

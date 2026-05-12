@@ -5,7 +5,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modules.nn import load_ftmb_config, load_lmb_config, load_qg_afp_config, load_remiss_config, normalize_arch
+from modules.nn import (
+    load_bcpc_config,
+    load_ftmb_config,
+    load_lmb_config,
+    load_qg_afp_config,
+    load_remiss_config,
+    normalize_arch,
+)
 
 from .config import load_yaml_file
 from .hard_replay import load_hard_replay_config
@@ -19,17 +26,19 @@ _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "ftmb": load_ftmb_config,
     "lmb": load_lmb_config,
     "qg_afp": load_qg_afp_config,
+    "bcpc": load_bcpc_config,
     "hard_replay": load_hard_replay_config,
     "tar": load_tar_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "remiss": {"fasterrcnn", "fcos"},
-    "ftmb": {"fcos"},
+    "ftmb": {"fasterrcnn", "fcos"},
     "lmb": {"fcos"},
     "qg_afp": {"fcos"},
+    "bcpc": {"fcos"},
     "hard_replay": {"fasterrcnn", "fcos"},
-    "tar": {"fcos"},
+    "tar": {"fasterrcnn", "fcos"},
 }
 
 

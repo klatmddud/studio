@@ -27,7 +27,6 @@ replay_modes:
 
 models:
   fcos: {}
-  fasterrcnn:
-    enabled: false
+  fasterrcnn: {}
   dino:
     enabled: false

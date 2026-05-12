@@ -1,0 +1,24 @@
+enabled: false
+start_epoch: 1
+
+in_channels: 256
+prototype_dim: 256
+prototypes_per_class: 16
+momentum: 0.95
+
+tau_bg: 0.2
+tau_cls: 0.4
+lambda_bg: 0.5
+gamma: 0.5
+rho: 1.0
+
+max_hard_bg_per_image: 256
+max_pos_per_image: 256
+max_updates_per_class: 16
+
+models:
+  fcos: {}
+  fasterrcnn:
+    enabled: false
+  dino:
+    enabled: false

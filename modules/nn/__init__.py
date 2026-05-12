@@ -1,4 +1,11 @@
 from .common import normalize_arch
+from .bcpc import (
+    BCPCConfig,
+    BackgroundConfuserPrototypeCalibration,
+    build_bcpc_from_config,
+    build_bcpc_from_yaml,
+    load_bcpc_config,
+)
 from .ftmb import (
     BACKGROUND,
     BOTH,
@@ -54,6 +61,8 @@ from .qg_afp import (
 __all__ = [
     "GOOD_STATE",
     "BACKGROUND",
+    "BCPCConfig",
+    "BackgroundConfuserPrototypeCalibration",
     "BOTH",
     "CLASSIFICATION",
     "DUPLICATE",
@@ -85,12 +94,15 @@ __all__ = [
     "MissBankTargetConfig",
     "QGAFPConfig",
     "QueryGuidedScaleGate",
+    "build_bcpc_from_config",
+    "build_bcpc_from_yaml",
     "build_missbank_from_config",
     "build_missbank_from_yaml",
     "build_qg_afp_from_config",
     "build_qg_afp_from_yaml",
     "compute_missbank_stability_metrics",
     "load_ftmb_config",
+    "load_bcpc_config",
     "load_qg_afp_config",
     "load_remiss_config",
     "merge_ftmb_epoch_snapshots",

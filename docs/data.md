@@ -34,7 +34,7 @@ Replay eligibility is GT-level: a GT must be currently missed by MissBank under 
 
 ## Type-Aware Replay Loader Path
 
-When `modules/cfg/tar.yaml` is enabled, `build_train_dataloaders()` attaches a `TARController` and uses `TARBatchSampler` instead of Hard Replay. The sampler draws replay slots from FTMB failure candidates by `type_ratios`.
+When `modules/cfg/tar.yaml` is enabled for FCOS or Faster R-CNN, `build_train_dataloaders()` attaches a `TARController` and uses `TARBatchSampler` instead of Hard Replay. The sampler draws replay slots from FTMB failure candidates by `type_ratios`.
 
 Each type defaults to `full_image` replay unless overridden by `replay_modes`. `failure_aware` replay is implemented for `localization` and `background`: localization samples crop around the failing GT box and keep the target GT plus sufficiently visible neighboring GTs; background samples crop around the false-positive prediction box and can yield an empty target for hard-negative training. Other failure types fall back to full-image replay.
 

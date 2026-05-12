@@ -5,13 +5,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-MODULE_CONFIG_KEYS = ("remiss", "ftmb", "lmb", "qg_afp", "hard_replay", "tar")
+MODULE_CONFIG_KEYS = ("remiss", "ftmb", "lmb", "qg_afp", "bcpc", "hard_replay", "tar")
 
 DEFAULT_MODULE_CONFIG_PATHS = {
     "remiss": PROJECT_ROOT / "modules" / "cfg" / "remiss.yaml",
     "ftmb": PROJECT_ROOT / "modules" / "cfg" / "ftmb.yaml",
     "lmb": PROJECT_ROOT / "modules" / "cfg" / "lmb.yaml",
     "qg_afp": PROJECT_ROOT / "modules" / "cfg" / "qg_afp.yaml",
+    "bcpc": PROJECT_ROOT / "modules" / "cfg" / "bcpc.yaml",
     "hard_replay": PROJECT_ROOT / "modules" / "cfg" / "hard_replay.yaml",
     "tar": PROJECT_ROOT / "modules" / "cfg" / "tar.yaml",
 }

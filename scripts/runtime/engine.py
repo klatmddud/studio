@@ -165,6 +165,7 @@ def fit(
         _set_missbank_epoch(model, epoch + 1)
         _set_ftmb_epoch(model, epoch + 1)
         _set_lmb_epoch(model, epoch + 1)
+        _set_bcpc_epoch(model, epoch + 1)
         _refresh_tar_replay(train_loader, model, epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
 
@@ -672,7 +673,7 @@ def load_checkpoint(
 
 
 def _is_optional_checkpoint_state_key(key: str) -> bool:
-    return key in {"missbank._extra_state", "ftmb._extra_state", "lmb._extra_state"}
+    return key in {"missbank._extra_state", "ftmb._extra_state", "lmb._extra_state"} or key.startswith("bcpc.")
 
 
 def save_checkpoint(
@@ -932,6 +933,13 @@ def _set_lmb_epoch(model: torch.nn.Module, epoch: int) -> None:
         start_epoch = getattr(lmb, "start_epoch", None)
         if callable(start_epoch):
             start_epoch(int(epoch))
+
+
+def _set_bcpc_epoch(model: torch.nn.Module, epoch: int) -> None:
+    for bcpc in _iter_bcpcs(model):
+        set_epoch = getattr(bcpc, "set_epoch", None)
+        if callable(set_epoch):
+            set_epoch(int(epoch))
 
 
 def _accumulate_model_train_metrics(
@@ -1262,6 +1270,14 @@ def _iter_lmbs(model: torch.nn.Module):
         lmb = getattr(unwrapped, attr, None)
         if lmb is not None:
             yield lmb
+
+
+def _iter_bcpcs(model: torch.nn.Module):
+    unwrapped = unwrap_model(model)
+    for attr in ("bcpc",):
+        bcpc = getattr(unwrapped, attr, None)
+        if bcpc is not None:
+            yield bcpc
 
 
 def _missbank_enabled(missbank: Any) -> bool:

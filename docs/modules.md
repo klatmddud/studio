@@ -1,6 +1,6 @@
 # Research Modules
 
-The current runtime-connected research-module surface includes ReMiss MissBank, FTMB, Hard Replay, LMB, and QG-AFP. Older unrelated research-module code paths have been removed.
+The current runtime-connected research-module surface includes ReMiss MissBank, FTMB, Hard Replay, LMB, QG-AFP, and BCPC. Older unrelated research-module code paths have been removed.
 
 ## Config Resolution
 
@@ -10,6 +10,7 @@ The current runtime-connected research-module surface includes ReMiss MissBank, 
 - `--ftmb-config`
 - `--lmb-config`
 - `--qg-afp-config`
+- `--bcpc-config`
 - `--hard-replay-config`
 - `--tar-config`
 
@@ -32,7 +33,7 @@ Key concepts:
 
 ## Runtime Status
 
-When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and remains FCOS-only. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features.
+When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and is available for FCOS and Faster R-CNN. These memory modules do not alter detector forward computation, add auxiliary losses, or inject features. BCPC is configured independently through `modules/cfg/bcpc.yaml` and, when enabled for FCOS, adds a background-risk auxiliary loss and calibrates inference scores before NMS.
 
 ## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
 
@@ -80,11 +81,12 @@ Key concepts:
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update for Hard Replay | memory update for Hard Replay | no |
-| FTMB | failure-type logging | no | no |
+| FTMB | failure-type logging | failure-type logging | no |
 | Hard Replay | MissBank-guided image sampling | MissBank-guided image sampling | no |
-| TAR | FTMB-guided type-aware image sampling | no | no |
+| TAR | FTMB-guided type-aware image sampling | FTMB-guided type-aware image sampling | no |
 | LMB | offline mining + stability logging | no | no |
 | QG-AFP v0 | post-neck query-scale gate | no | no |
+| BCPC | background confuser memory + score calibration | no | no |
 
 ## Localization Memory Bank (`modules/nn/lmb.py`)
 
@@ -117,3 +119,17 @@ Key concepts:
 - Config: `modules/cfg/qg_afp.yaml`.
 
 QG-AFP v0 changes detector forward computation when enabled, but it does not add an auxiliary loss. It is currently wired only for FCOS.
+
+## BCPC (`modules/nn/bcpc.py`)
+
+BCPC stores class-conditioned background-confuser prototypes and uses them to calibrate FCOS candidate scores.
+
+Key concepts:
+
+- Mining: a dense FCOS candidate is a hard background when its best GT IoU is below `tau_bg`, its best object-class score is above `tau_cls`, and it is not assigned to a GT by FCOS matching.
+- Memory: `prototypes_per_class` L2-normalized vectors are kept per class. Updates use EMA with `momentum`; empty slots are filled before nearest-prototype updates.
+- Feature source: BCPC uses the FCOS classification tower feature immediately before the final class-logit convolution, then projects it to `prototype_dim`.
+- Risk head: selected positive candidates supervise risk target `0`, and hard background candidates supervise risk target `1`. The added loss is `lambda_bg * BCE`.
+- Inference: FCOS first forms its normal thresholded top-k candidates, then BCPC calibrates each candidate score as `score * (1 - risk) ** gamma` before thresholding and NMS. Boxes are unchanged.
+- Startup: `start_epoch` gates train-time memory updates and auxiliary loss. Evaluation uses BCPC when enabled and class prototypes are available.
+- Config: `modules/cfg/bcpc.yaml`.

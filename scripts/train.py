@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the QG-AFP YAML config path.",
     )
     parser.add_argument(
+        "--bcpc-config",
+        default=None,
+        help="Optional override for the BCPC YAML config path.",
+    )
+    parser.add_argument(
         "--hard-replay-config",
         default=None,
         help="Optional override for the Hard Replay YAML config path.",
@@ -285,6 +290,7 @@ def _resolve_module_config_paths_from_args(args: argparse.Namespace) -> dict[str
         "ftmb": args.ftmb_config,
         "lmb": args.lmb_config,
         "qg_afp": args.qg_afp_config,
+        "bcpc": args.bcpc_config,
         "hard_replay": args.hard_replay_config,
         "tar": args.tar_config,
     }
@@ -307,6 +313,7 @@ def _module_config_override_names(args: argparse.Namespace) -> list[str]:
         "ftmb": args.ftmb_config,
         "lmb": args.lmb_config,
         "qg_afp": args.qg_afp_config,
+        "bcpc": args.bcpc_config,
         "hard_replay": args.hard_replay_config,
         "tar": args.tar_config,
     }
@@ -322,7 +329,7 @@ def _print_module_config_overrides(
     if not override_names:
         return
     print("module_configs:")
-    for name in ("remiss", "ftmb", "lmb", "qg_afp", "hard_replay", "tar"):
+    for name in ("remiss", "ftmb", "lmb", "qg_afp", "bcpc", "hard_replay", "tar"):
         if name not in override_names:
             continue
         path = module_config_paths.get(name)
