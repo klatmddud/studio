@@ -9,16 +9,14 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 - Single-stage anchor-free detector.
 - Uses TorchVision `FCOS` directly.
 - Forward in train mode returns a `loss_dict`; forward in eval mode returns predictions.
-- Optional MissBank, FTMB, Hard Replay, TAR, and LMB runtime modules usually sit outside the detector forward path. When ReMiss `loss_weight.enabled: true`, `FCOSWrapper` reweights positive FCOS losses from MissBank `miss_count`; inference is unchanged.
-- Optional QG-AFP v0 is inserted as a `post_neck` module between TorchVision FPN outputs and the FCOS head. It preserves feature keys and shapes but changes forward features when enabled.
-- Optional BCPC is attached to `FCOSWrapper` as an independent calibration module. When enabled, the wrapper uses the FCOS classification tower feature before the final class-logit convolution to add a background-risk loss and calibrate inference scores before NMS.
+- Optional MissBank and Hard Replay runtime modules sit outside the detector forward path. When ReMiss `loss_weight.enabled: true`, `FCOSWrapper` reweights positive FCOS losses from MissBank `miss_count`; inference is unchanged.
 
 ### Faster R-CNN (`fasterrcnn.py`)
 
 - Two-stage region proposal detector.
 - Plain TorchVision FasterRCNN.
 - Compatible backbones: ResNet50/101 with FPN, MobileNetV2/V3.
-- Optional MissBank, FTMB, Hard Replay, and TAR runtime modules sit outside the detector forward path and do not change Faster R-CNN losses or inference.
+- Optional MissBank and Hard Replay runtime modules sit outside the detector forward path and do not change Faster R-CNN losses or inference.
 
 ### DINO (`dino.py` -> `DINOWrapper`)
 
@@ -39,14 +37,6 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 | `num_classes` | Auto-inferred from COCO JSON if not set |
 | `transform.min_size` | Shorter edge resize target |
 | `transform.max_size` | Longer edge cap |
-
-## Post-Neck Modules
-
-`models/detection/wrapper/_base.py` exposes `pre_neck` and `post_neck` extension points around TorchVision FPN. QG-AFP v0 uses the `post_neck` slot for FCOS, so it receives the FPN feature dict and returns an updated feature dict before the detection head runs.
-
-## FCOS Calibration Modules
-
-BCPC is wired only through `FCOSWrapper`. With `modules/cfg/bcpc.yaml` enabled, the wrapper keeps the baseline TorchVision FCOS path unchanged for disabled runs, but uses a BCPC-aware path for enabled runs so it can capture classification tower features, compute the auxiliary `bcpc` loss, update prototype memory, and calibrate candidate scores before NMS.
 
 ## Model Building (`scripts/runtime/registry.py`)
 

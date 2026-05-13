@@ -14,7 +14,6 @@ scripts/
     data.py                 # COCO dataset + DataLoader builders
     engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
     hard_replay.py          # MissBank-guided image replay planner and mixed batch sampler
-    tar.py                  # FTMB-guided type-aware replay planner and batch sampler
     metrics.py              # COCO evaluation via pycocotools
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
@@ -31,7 +30,7 @@ models/detection/
 
 modules/
   cfg/                      # Research module configs, disabled by default
-  nn/                       # ReMiss MissBank, LMB, QG-AFP, BCPC, and shared helpers
+  nn/                       # ReMiss MissBank and shared helpers
 
 ops/                        # Reserved for custom ops (currently empty)
 ```
@@ -52,11 +51,11 @@ ops/                        # Reserved for custom ops (currently empty)
 train.py
   -> load_runtime_config()       # merge YAML + env vars
   -> build_model_from_path()     # registry.py -> wrapper
-  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset / optional TAR or Hard Replay sampler
+  -> build_train_dataloaders()   # data.py -> CocoDetectionDataset / optional Hard Replay sampler
   -> fit()                       # engine.py -> training loop + replay refresh hooks
 ```
 
-When `modules/cfg/tar.yaml` is enabled, the train loader uses the TAR batch sampler and refreshes its epoch-level replay index from FTMB before each epoch. TAR can replay full images or type-aware crops according to per-type `replay_modes`. Otherwise, when `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler` and refreshes from ReMiss MissBank. `engine.fit()` temporarily disables replay during offline mining passes. BCPC stays inside the FCOS wrapper and does not change DataLoader construction.
+When `modules/cfg/hard_replay.yaml` is enabled, the train loader uses `MixedReplayBatchSampler` and refreshes from ReMiss MissBank. `engine.fit()` temporarily disables replay during offline MissBank mining passes.
 
 ## Supported Architectures
 

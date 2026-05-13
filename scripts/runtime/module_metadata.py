@@ -6,10 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from modules.nn import (
-    load_bcpc_config,
-    load_ftmb_config,
-    load_lmb_config,
-    load_qg_afp_config,
     load_remiss_config,
     normalize_arch,
 )
@@ -17,28 +13,17 @@ from modules.nn import (
 from .config import load_yaml_file
 from .hard_replay import load_hard_replay_config
 from .module_configs import DEFAULT_MODULE_CONFIG_PATHS, resolve_module_config_paths
-from .tar import load_tar_config
 
 MODULE_CONFIG_PATHS = DEFAULT_MODULE_CONFIG_PATHS
 
 _CONFIG_LOADERS: dict[str, Callable[..., Any]] = {
     "remiss": load_remiss_config,
-    "ftmb": load_ftmb_config,
-    "lmb": load_lmb_config,
-    "qg_afp": load_qg_afp_config,
-    "bcpc": load_bcpc_config,
     "hard_replay": load_hard_replay_config,
-    "tar": load_tar_config,
 }
 
 _ARCH_SUPPORT: dict[str, set[str] | None] = {
     "remiss": {"fasterrcnn", "fcos"},
-    "ftmb": {"fasterrcnn", "fcos"},
-    "lmb": {"fcos"},
-    "qg_afp": {"fcos"},
-    "bcpc": {"fcos"},
     "hard_replay": {"fasterrcnn", "fcos"},
-    "tar": {"fasterrcnn", "fcos"},
 }
 
 

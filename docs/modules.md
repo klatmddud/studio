@@ -1,18 +1,13 @@
 # Research Modules
 
-The current runtime-connected research-module surface includes ReMiss MissBank, FTMB, Hard Replay, LMB, QG-AFP, and BCPC. Older unrelated research-module code paths have been removed.
+The runtime-connected research-module surface is now limited to ReMiss MissBank and Hard Replay.
 
 ## Config Resolution
 
 `scripts/train.py` accepts:
 
 - `--remiss-config`
-- `--ftmb-config`
-- `--lmb-config`
-- `--qg-afp-config`
-- `--bcpc-config`
 - `--hard-replay-config`
-- `--tar-config`
 
 `scripts/runtime/module_configs.py` resolves default module config paths, and `scripts/runtime/module_metadata.py` persists enabled module snapshots to `metadata/modules.yaml` for reproducibility.
 
@@ -32,105 +27,22 @@ Key concepts:
 - Outputs: runtime writes epoch-level MissBank summaries to `missbank/missbank_epoch.json` and `missbank/missbank_epoch.csv`.
 - Config: `modules/cfg/remiss.yaml`.
 
-## Runtime Status
-
-When ReMiss is enabled, MissBank is attached to FCOS or Faster R-CNN and updated from final post-processed detections using the configured online or offline mining mode. FTMB is configured independently through `modules/cfg/ftmb.yaml` and is available for FCOS and Faster R-CNN. These memory modules do not inject features. MissBank changes FCOS train losses only when `loss_weight.enabled: true`; Faster R-CNN remains unaffected. BCPC is configured independently through `modules/cfg/bcpc.yaml` and, when enabled for FCOS, adds a background-risk auxiliary loss and calibrates inference scores before NMS.
-
-## Failure-Type Memory Bank (`modules/nn/ftmb.py`)
-
-FTMB stores detector failure types for later type-aware replay. It is attached from `modules/cfg/ftmb.yaml` independently from ReMiss MissBank. It resolves `matching.score_threshold: auto` and `matching.iou_threshold: auto` from the detector's final post-processing config, with a separate `background.iou_threshold` default of `0.1`.
-
-Key concepts:
-
-- GT failure types: `localization`, `classification`, `both`, and `missed`.
-- Prediction failure types: `duplicate` and `background`.
-- Prediction filtering: predictions below `matching.score_threshold` are removed before FTMB computes GT x prediction IoU and failure-type matches.
-- Records: `FTMBGTRecord` stores image ID, GT ID, class, box, latest failure type, type counts, consecutive type streak, and diagnostic prediction IoU/score fields.
-- Step summaries: each mining update records counts for `localization`, `classification`, `both`, `missed`, `duplicate`, and `background`.
-- Outputs: runtime writes count-only `ftmb/failure_type_epoch.json`, `ftmb/failure_type_epoch.csv`, and `ftmb/failure_type_state.json`; detailed GT records and prediction events are kept in memory for replay but are not written to these result files.
-- Config: `modules/cfg/ftmb.yaml`.
-
 ## Hard Replay (`scripts/runtime/hard_replay.py`)
 
-Hard Replay is a data-layer policy driven by ReMiss MissBank. It does not split FN into subtypes. A replay target is a GT that MissBank currently marks as missed, meaning no final prediction of the same class satisfies the configured score and IoU thresholds.
+Hard Replay is a data-layer policy driven by ReMiss MissBank. It replays images containing GTs that MissBank currently marks as missed.
 
 Key concepts:
 
 - Source: current MissBank records from the previous mining/update state.
-- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `latest_mined_epoch_only: true`, `last_epoch` must equal the latest `last_epoch` currently stored in MissBank records and the recency window is ignored. `replay_epochs_after_mining > 0` additionally gates whole-epoch replay to the first N epochs after the latest MissBank mining epoch; `0` keeps the previous unlimited behavior.
+- Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `latest_mined_epoch_only: true`, `last_epoch` must equal the latest `last_epoch` currently stored in MissBank records and the recency window is ignored. `replay_epochs_after_mining > 0` gates replay to the first N epochs after the latest MissBank mining epoch; `0` keeps unlimited replay.
 - Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
 - Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`.
-- Offline mining: ReMiss, FTMB, and LMB mining passes use base-only loader iteration so replay does not distort mining statistics.
+- Offline mining: MissBank mining uses base-only loader iteration so replay does not distort mining statistics.
 - Config: `modules/cfg/hard_replay.yaml`.
-
-## Type-Aware Replay (`scripts/runtime/tar.py`)
-
-TAR is a data-layer policy driven by FTMB. It is mutually exclusive with Hard Replay at the DataLoader level; when `modules/cfg/tar.yaml` is enabled, TAR owns the replay batch sampler and Hard Replay is not attached for that loader.
-
-Key concepts:
-
-- Source: FTMB GT records for `localization`, `classification`, `both`, and `missed`; FTMB prediction events for `duplicate` and `background`.
-- Total budget: `replay_ratio` controls how many batch slots are replay slots.
-- Type split: `type_ratios` assigns replay slots to `loc`, `cls`, `both`, `missed`, `duplicate`, and `background`. If a requested type has no candidates, its slots are redistributed across available types.
-- Eligibility: records must satisfy `min_consecutive_count`, `min_total_failed`, and `replay_recency_window`. Prediction events use the same recency window.
-- Replay form: `replay_modes` selects `full_image` or `failure_aware` per type. `full_image` replays the original image. `failure_aware` currently gives `localization` GT-centered positive crops and `background` prediction-centered hard-negative crops; unsupported type/mode combinations fall back to full-image replay.
-- Crop targets: localization crops force-include the target GT and include other sufficiently visible GTs. Background crops use the false-positive prediction box and may produce an empty target when no sufficiently visible GT remains in the crop.
-- Config: `modules/cfg/tar.yaml`.
 
 ## Support Matrix
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
 | ReMiss MissBank | memory update for Hard Replay; optional miss-count loss weighting | memory update for Hard Replay | no |
-| FTMB | failure-type logging | failure-type logging | no |
 | Hard Replay | MissBank-guided image sampling | MissBank-guided image sampling | no |
-| TAR | FTMB-guided type-aware image sampling | FTMB-guided type-aware image sampling | no |
-| LMB | offline mining + stability logging | no | no |
-| QG-AFP v0 | post-neck query-scale gate | no | no |
-| BCPC | background confuser memory + score calibration | no | no |
-
-## Localization Memory Bank (`modules/nn/lmb.py`)
-
-LMB tracks GT-level localization quality instead of missed-detection state. It is independent from ReMiss and uses `modules/cfg/lmb.yaml`.
-
-Key concepts:
-
-- Matching: for each GT, LMB finds the best final prediction above `matching.score_threshold`. `score_threshold: auto` must be resolved from the detector's final score threshold before constructing the module.
-- States: `missing` means `best_iou < low_iou_threshold` or no candidate exists; `low_iou` means `low_iou_threshold <= best_iou < good_iou_threshold`; `good` means `best_iou >= good_iou_threshold`.
-- Stability: `stability.stable_epochs` defines how many consecutive epochs a GT must remain in `low_iou` to count as stable low-IoU.
-- Regions: `grid_size` assigns each GT box to a row-major spatial region, using the region with the largest box overlap.
-- Runtime: when enabled for FCOS, LMB runs one no-grad pass over the training loader after each epoch from `start_epoch`.
-- Metrics: `epoch_snapshot()` records low-IoU counts, stable low-IoU counts, streak statistics, IoU deficit statistics, state transitions, region histograms, and image-region hotspots. Runtime writes accumulated metrics to `lmb/lmb_stability_epoch.json` and `lmb/lmb_stability_epoch.csv`.
-- State: `get_extra_state()` and `set_extra_state()` make LMB checkpointable.
-
-LMB does not alter detector forward computation, add losses, or change inference.
-
-## QG-AFP v0 (`modules/nn/qg_afp.py`)
-
-QG-AFP v0 is a FCOS post-neck feature modulation module. It keeps the TorchVision FPN feature-dict contract intact and returns the same keys and tensor shapes.
-
-Key concepts:
-
-- Query source: v0 does not reuse FCOS head logits, because that would create a head-to-neck-to-head loop. It predicts a lightweight proxy objectness map inside the post-neck module and mines top-k feature locations as query seeds.
-- Query encoding: each seed combines the local feature vector, a level embedding, normalized spatial position, and proxy score.
-- Scale routing: the query MLP predicts a soft level gate over active pyramid levels.
-- Residual feature update: query gates are aggregated per batch and level, then applied as `P_l * (1 + residual_scale * alpha_l)`.
-- Stability: `residual_scale_init: 0.0` makes the module identity-biased at startup.
-- Metrics: training logs include gate-collapse diagnostics such as `qg_afp_gate_entropy`, `qg_afp_gate_max_mean`, `qg_afp_level_usage_entropy`, `qg_afp_level_top1_share`, `qg_afp_alpha_l0`, `qg_afp_residual_scale`, and `qg_afp_query_count` when the module has run. These are emitted through the normal train metric path and are persisted in `history.json` and `results.csv`.
-- Config: `modules/cfg/qg_afp.yaml`.
-
-QG-AFP v0 changes detector forward computation when enabled, but it does not add an auxiliary loss. It is currently wired only for FCOS.
-
-## BCPC (`modules/nn/bcpc.py`)
-
-BCPC stores class-conditioned background-confuser prototypes and uses them to calibrate FCOS candidate scores.
-
-Key concepts:
-
-- Mining: a dense FCOS candidate is a hard background when its best GT IoU is below `tau_bg`, its best object-class score is above `tau_cls`, and it is not assigned to a GT by FCOS matching.
-- Memory: `prototypes_per_class` L2-normalized vectors are kept per class. Updates use EMA with `momentum`; empty slots are filled before nearest-prototype updates.
-- Feature source: BCPC uses the FCOS classification tower feature immediately before the final class-logit convolution, then projects it to `prototype_dim`.
-- Risk head: selected positive candidates supervise risk target `0`, and hard background candidates supervise risk target `1`. The added loss is `lambda_bg * BCE`.
-- Inference: FCOS first forms its normal thresholded top-k candidates, then BCPC calibrates each candidate score as `score * (1 - risk) ** gamma` before thresholding and NMS. Boxes are unchanged.
-- Startup: `start_epoch` gates train-time memory updates and auxiliary loss. Evaluation uses BCPC when enabled and class prototypes are available.
-- Config: `modules/cfg/bcpc.yaml`.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +11,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
 from .hard_replay import HardReplayController, build_hard_replay_controller_from_yaml
-from .tar import FAILURE_AWARE_REPLAY, TARController, TARSampleRef, build_tar_controller_from_yaml
-
-_LOCALIZATION = "localization"
-_BACKGROUND = "background"
-_LOCALIZATION_CROP_SCALE = 2.0
-_BACKGROUND_CROP_SCALE = 2.0
-_MIN_VISIBLE_FRACTION = 0.5
 
 
 class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
@@ -31,9 +23,7 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
     def __len__(self) -> int:
         return len(self.image_ids)
 
-    def __getitem__(self, index: int | TARSampleRef) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if isinstance(index, TARSampleRef):
-            return self._get_tar_sample(index)
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         return self._get_full_sample(int(index))
 
     def _get_full_sample(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -41,40 +31,6 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
         width, height = image.size
         image_tensor = F.to_tensor(image)
         target = _build_target(image_id, width, height, annotations)
-        return image_tensor, target
-
-    def _get_tar_sample(self, sample: TARSampleRef) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if sample.replay_mode != FAILURE_AWARE_REPLAY:
-            return self._get_full_sample(int(sample.dataset_index))
-        if sample.failure_type not in {_LOCALIZATION, _BACKGROUND} or sample.bbox_xyxy is None:
-            return self._get_full_sample(int(sample.dataset_index))
-
-        image_id, image, annotations = self._load_sample(int(sample.dataset_index))
-        width, height = image.size
-        crop_scale = _LOCALIZATION_CROP_SCALE if sample.failure_type == _LOCALIZATION else _BACKGROUND_CROP_SCALE
-        crop_box = _expanded_crop_box(sample.bbox_xyxy, width=width, height=height, scale=crop_scale)
-        if crop_box is None:
-            image_tensor = F.to_tensor(image)
-            target = _build_target(image_id, width, height, annotations)
-            return image_tensor, target
-
-        force_gt_id = sample.gt_id if sample.failure_type == _LOCALIZATION else None
-        cropped_annotations = _crop_annotations(
-            annotations,
-            crop_box=crop_box,
-            min_visible_fraction=_MIN_VISIBLE_FRACTION,
-            force_gt_id=force_gt_id,
-        )
-        if sample.failure_type == _LOCALIZATION and not cropped_annotations:
-            image_tensor = F.to_tensor(image)
-            target = _build_target(image_id, width, height, annotations)
-            return image_tensor, target
-
-        left, top, right, bottom = crop_box
-        cropped_image = image.crop((left, top, right, bottom))
-        crop_width, crop_height = cropped_image.size
-        image_tensor = F.to_tensor(cropped_image)
-        target = _build_target(image_id, crop_width, crop_height, cropped_annotations)
         return image_tensor, target
 
     def _load_sample(self, index: int) -> tuple[int, Image.Image, list[dict[str, Any]]]:
@@ -102,16 +58,7 @@ def build_train_dataloaders(
         config["data"]["train_images"],
         config["data"]["train_annotations"],
     )
-    tar = _build_tar_controller(
-        dataset=train_dataset,
-        config=config,
-        arch=arch,
-        distributed=distributed,
-        rank=rank,
-        world_size=world_size,
-        module_config_paths=module_config_paths,
-    )
-    hard_replay = None if tar is not None else _build_hard_replay_controller(
+    hard_replay = _build_hard_replay_controller(
         dataset=train_dataset,
         config=config,
         arch=arch,
@@ -121,9 +68,7 @@ def build_train_dataloaders(
         module_config_paths=module_config_paths,
     )
     sampler = None
-    replay_batch_sampler = tar.batch_sampler if tar is not None else None
-    if replay_batch_sampler is None and hard_replay is not None:
-        replay_batch_sampler = hard_replay.batch_sampler
+    replay_batch_sampler = hard_replay.batch_sampler if hard_replay is not None else None
 
     if distributed and replay_batch_sampler is None:
         sampler = DistributedSampler(
@@ -144,8 +89,6 @@ def build_train_dataloaders(
         sampler=sampler,
         batch_sampler=replay_batch_sampler,
     )
-    if tar is not None:
-        train_loader.tar_replay = tar
     if hard_replay is not None:
         train_loader.hard_replay = hard_replay
 
@@ -248,36 +191,6 @@ def _build_hard_replay_controller(
     )
 
 
-def _build_tar_controller(
-    *,
-    dataset: CocoDetectionDataset,
-    config: dict[str, Any],
-    arch: str | None,
-    distributed: bool,
-    rank: int,
-    world_size: int,
-    module_config_paths: dict[str, str | Path] | None,
-) -> TARController | None:
-    if not module_config_paths:
-        return None
-    tar_path = module_config_paths.get("tar")
-    if tar_path is None:
-        return None
-    path = Path(tar_path).expanduser().resolve()
-    if not path.is_file():
-        return None
-    return build_tar_controller_from_yaml(
-        path,
-        dataset=dataset,
-        batch_size=int(config["loader"]["batch_size"]),
-        shuffle=bool(config["loader"]["shuffle"]),
-        seed=int(config["seed"]),
-        rank=int(rank) if distributed else 0,
-        world_size=int(world_size) if distributed else 1,
-        arch=arch,
-    )
-
-
 def _resolve_image_path(images_dir: Path, file_name: str) -> Path:
     image_path = Path(file_name)
     if image_path.is_absolute():
@@ -319,88 +232,6 @@ def _strip_images_dir_prefix(images_dir: Path, image_path: Path) -> Path | None:
             return None
         return Path(*remaining_parts)
     return None
-
-
-def _expanded_crop_box(
-    bbox_xyxy: tuple[float, float, float, float],
-    *,
-    width: int,
-    height: int,
-    scale: float,
-) -> tuple[int, int, int, int] | None:
-    if width <= 0 or height <= 0:
-        return None
-    x1, y1, x2, y2 = (float(value) for value in bbox_xyxy)
-    x1 = max(0.0, min(float(width), x1))
-    y1 = max(0.0, min(float(height), y1))
-    x2 = max(0.0, min(float(width), x2))
-    y2 = max(0.0, min(float(height), y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    box_width = x2 - x1
-    box_height = y2 - y1
-    crop_width = max(1.0, box_width * float(scale))
-    crop_height = max(1.0, box_height * float(scale))
-    center_x = 0.5 * (x1 + x2)
-    center_y = 0.5 * (y1 + y2)
-
-    left = max(0.0, center_x - 0.5 * crop_width)
-    top = max(0.0, center_y - 0.5 * crop_height)
-    right = min(float(width), center_x + 0.5 * crop_width)
-    bottom = min(float(height), center_y + 0.5 * crop_height)
-
-    left_i = int(math.floor(left))
-    top_i = int(math.floor(top))
-    right_i = int(math.ceil(right))
-    bottom_i = int(math.ceil(bottom))
-    if right_i <= left_i or bottom_i <= top_i:
-        return None
-    return left_i, top_i, right_i, bottom_i
-
-
-def _crop_annotations(
-    annotations: list[dict[str, Any]],
-    *,
-    crop_box: tuple[int, int, int, int],
-    min_visible_fraction: float,
-    force_gt_id: str | None,
-) -> list[dict[str, Any]]:
-    left, top, right, bottom = crop_box
-    cropped: list[dict[str, Any]] = []
-    for annotation in annotations:
-        x, y, width, height = annotation.get("bbox", [0.0, 0.0, 0.0, 0.0])
-        x1 = float(x)
-        y1 = float(y)
-        x2 = x1 + max(0.0, float(width))
-        y2 = y1 + max(0.0, float(height))
-        original_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-        if original_area <= 0.0:
-            continue
-
-        ix1 = max(x1, float(left))
-        iy1 = max(y1, float(top))
-        ix2 = min(x2, float(right))
-        iy2 = min(y2, float(bottom))
-        visible_area = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-        if visible_area <= 0.0:
-            continue
-
-        forced = force_gt_id is not None and str(annotation.get("id")) == str(force_gt_id)
-        visible_fraction = visible_area / original_area
-        if not forced and visible_fraction < float(min_visible_fraction):
-            continue
-
-        cropped_annotation = dict(annotation)
-        cropped_annotation["bbox"] = [
-            ix1 - float(left),
-            iy1 - float(top),
-            ix2 - ix1,
-            iy2 - iy1,
-        ]
-        cropped_annotation["area"] = visible_area
-        cropped.append(cropped_annotation)
-    return cropped
 
 
 def _build_target(

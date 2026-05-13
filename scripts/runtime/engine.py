@@ -19,10 +19,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from modules.nn import (
     compute_missbank_stability_metrics,
-    compute_lmb_stability_metrics,
-    merge_ftmb_epoch_snapshots,
     merge_missbank_epoch_snapshots,
-    merge_lmb_epoch_snapshots,
 )
 
 from .config import dump_yaml_file
@@ -92,12 +89,8 @@ def fit(
 
     history: list[dict[str, Any]] = []
     hard_replay_history: list[dict[str, Any]] = []
-    tar_history: list[dict[str, Any]] = []
-    ftmb_failure_history: list[dict[str, Any]] = []
     missbank_epoch_history: list[dict[str, Any]] = []
-    lmb_stability_history: list[dict[str, Any]] = []
     previous_missbank_snapshot: dict[str, Any] | None = None
-    previous_lmb_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
 
@@ -133,20 +126,8 @@ def fit(
             hard_replay_history = _read_hard_replay_history(
                 output_dir / "hard-replay",
             )
-            tar_history = _read_tar_history(
-                output_dir / "tar",
-            )
-            ftmb_failure_history = _read_ftmb_failure_history(
-                output_dir / "ftmb",
-            )
             missbank_epoch_history = _read_missbank_epoch_history(
                 output_dir / "missbank",
-            )
-            lmb_stability_history = _read_lmb_stability_history(
-                output_dir / "lmb",
-            )
-            previous_lmb_snapshot = _read_lmb_stability_state(
-                output_dir / "lmb" / "lmb_stability_state.json"
             )
         persist_run_metadata(
             output_dir=output_dir,
@@ -170,10 +151,6 @@ def fit(
     for epoch in range(start_epoch, total_epochs):
         _set_data_loader_epoch(train_loader, epoch + 1)
         _set_missbank_epoch(model, epoch + 1)
-        _set_ftmb_epoch(model, epoch + 1)
-        _set_lmb_epoch(model, epoch + 1)
-        _set_bcpc_epoch(model, epoch + 1)
-        _refresh_tar_replay(train_loader, model, epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
 
         train_metrics = train_one_epoch(
@@ -199,28 +176,6 @@ def fit(
             log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
             distributed=distributed,
         )
-        _run_lmb_offline_mining(
-            model=model,
-            data_loader=train_loader,
-            device=device,
-            amp=runtime_config["amp"],
-            epoch=epoch + 1,
-            total_epochs=total_epochs,
-            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
-            distributed=distributed,
-        )
-        current_ftmb_snapshot = _collect_ftmb_epoch_snapshot(
-            model=model,
-            epoch=epoch + 1,
-            distributed=distributed,
-        )
-        if main_process and current_ftmb_snapshot is not None:
-            ftmb_failure_history.append(current_ftmb_snapshot)
-            _write_ftmb_failure_outputs(
-                output_dir=output_dir,
-                history=ftmb_failure_history,
-                snapshot=current_ftmb_snapshot,
-            )
         current_missbank_snapshot = _collect_missbank_epoch_snapshot(
             model=model,
             epoch=epoch + 1,
@@ -237,25 +192,6 @@ def fit(
                 history=missbank_epoch_history,
             )
             previous_missbank_snapshot = current_missbank_snapshot
-        current_lmb_snapshot = _collect_lmb_epoch_snapshot(
-            model=model,
-            epoch=epoch + 1,
-            distributed=distributed,
-        )
-        if main_process and current_lmb_snapshot is not None:
-            lmb_metrics = compute_lmb_stability_metrics(
-                current_lmb_snapshot,
-                previous_snapshot=previous_lmb_snapshot,
-                hotspot_top_k=int(current_lmb_snapshot.get("hotspot_top_k", 10)),
-            )
-            lmb_stability_history.append(lmb_metrics)
-            _write_lmb_stability_outputs(
-                output_dir=output_dir,
-                subdir="lmb",
-                history=lmb_stability_history,
-                snapshot=current_lmb_snapshot,
-            )
-            previous_lmb_snapshot = current_lmb_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
@@ -270,14 +206,6 @@ def fit(
                 output_dir=output_dir,
                 history=hard_replay_history,
                 snapshot=hard_replay_summary,
-            )
-        tar_summary = _get_tar_summary(train_loader)
-        if main_process and tar_summary is not None:
-            tar_history.append(tar_summary)
-            _write_tar_outputs(
-                output_dir=output_dir,
-                history=tar_history,
-                snapshot=tar_summary,
             )
 
         should_eval = (
@@ -348,8 +276,6 @@ def fit(
             display_record = dict(record)
             if hard_replay_summary is not None:
                 display_record["hard_replay"] = hard_replay_summary
-            if tar_summary is not None:
-                display_record["tar"] = tar_summary
             summary = format_metrics(display_record, runtime_config["metrics"]["primary"])
             print(f"[epoch {epoch + 1}/{total_epochs}] {summary}")
 
@@ -698,7 +624,7 @@ def load_checkpoint(
 
 
 def _is_optional_checkpoint_state_key(key: str) -> bool:
-    return key in {"missbank._extra_state", "ftmb._extra_state", "lmb._extra_state"} or key.startswith("bcpc.")
+    return key == "missbank._extra_state"
 
 
 def save_checkpoint(
@@ -888,17 +814,6 @@ def _refresh_hard_replay(data_loader, model: torch.nn.Module, epoch: int) -> Non
     )
 
 
-def _refresh_tar_replay(data_loader, model: torch.nn.Module, epoch: int) -> None:
-    controller = getattr(data_loader, "tar_replay", None)
-    refresh = getattr(controller, "refresh", None)
-    if not callable(refresh):
-        return
-    refresh(
-        ftmb=_get_ftmb(model),
-        epoch=int(epoch),
-    )
-
-
 def _get_hard_replay_summary(data_loader) -> dict[str, Any] | None:
     controller = getattr(data_loader, "hard_replay", None)
     summary = getattr(controller, "summary", None)
@@ -908,26 +823,16 @@ def _get_hard_replay_summary(data_loader) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
-def _get_tar_summary(data_loader) -> dict[str, Any] | None:
-    controller = getattr(data_loader, "tar_replay", None)
-    summary = getattr(controller, "summary", None)
-    if not callable(summary):
-        return None
-    value = summary()
-    return dict(value) if isinstance(value, Mapping) else None
-
-
 def _set_replay_base_only(data_loader, enabled: bool) -> dict[str, bool]:
     states: dict[str, bool] = {}
-    for attr in ("tar_replay", "hard_replay"):
-        controller = getattr(data_loader, attr, None)
-        batch_sampler = getattr(controller, "batch_sampler", None)
-        if batch_sampler is None:
-            continue
-        states[attr] = bool(getattr(batch_sampler, "base_only", False))
-        set_base_only = getattr(controller, "set_base_only", None)
-        if callable(set_base_only):
-            set_base_only(bool(enabled))
+    controller = getattr(data_loader, "hard_replay", None)
+    batch_sampler = getattr(controller, "batch_sampler", None)
+    if batch_sampler is None:
+        return states
+    states["hard_replay"] = bool(getattr(batch_sampler, "base_only", False))
+    set_base_only = getattr(controller, "set_base_only", None)
+    if callable(set_base_only):
+        set_base_only(bool(enabled))
     return states
 
 
@@ -954,27 +859,6 @@ def _set_missbank_epoch(model: torch.nn.Module, epoch: int) -> None:
         start_epoch = getattr(missbank, "start_epoch", None)
         if callable(start_epoch):
             start_epoch(int(epoch))
-
-
-def _set_ftmb_epoch(model: torch.nn.Module, epoch: int) -> None:
-    for ftmb in _iter_ftmbs(model):
-        start_epoch = getattr(ftmb, "start_epoch", None)
-        if callable(start_epoch):
-            start_epoch(int(epoch))
-
-
-def _set_lmb_epoch(model: torch.nn.Module, epoch: int) -> None:
-    for lmb in _iter_lmbs(model):
-        start_epoch = getattr(lmb, "start_epoch", None)
-        if callable(start_epoch):
-            start_epoch(int(epoch))
-
-
-def _set_bcpc_epoch(model: torch.nn.Module, epoch: int) -> None:
-    for bcpc in _iter_bcpcs(model):
-        set_epoch = getattr(bcpc, "set_epoch", None)
-        if callable(set_epoch):
-            set_epoch(int(epoch))
 
 
 def _accumulate_model_train_metrics(
@@ -1014,12 +898,7 @@ def _update_missbank_for_batch(
         for missbank in _iter_missbanks(model)
         if _missbank_enabled(missbank) and _missbank_mining_type(missbank) == "online"
     ]
-    ftmbs = [
-        ftmb
-        for ftmb in _iter_ftmbs(model)
-        if _ftmb_enabled(ftmb) and _ftmb_mining_type(ftmb) == "online"
-    ]
-    if not missbanks and not ftmbs:
+    if not missbanks:
         return
 
     was_training = model.training
@@ -1037,14 +916,6 @@ def _update_missbank_for_batch(
     for missbank in missbanks:
         _update_missbank_from_detections(
             missbank=missbank,
-            targets=targets,
-            detections=detections,
-            epoch=epoch,
-            step=step,
-        )
-    for ftmb in ftmbs:
-        _update_ftmb_from_detections(
-            ftmb=ftmb,
             targets=targets,
             detections=detections,
             epoch=epoch,
@@ -1072,12 +943,7 @@ def _run_missbank_offline_mining(
             and _missbank_offline_mining_due(missbank, epoch)
         )
     ]
-    ftmbs = [
-        ftmb
-        for ftmb in _iter_ftmbs(model)
-        if _ftmb_enabled(ftmb) and _ftmb_mining_type(ftmb) == "offline"
-    ]
-    if not missbanks and not ftmbs:
+    if not missbanks:
         return None
 
     was_training = model.training
@@ -1103,14 +969,6 @@ def _run_missbank_offline_mining(
                     epoch=epoch,
                     step=step,
                 )
-            for ftmb in ftmbs:
-                _update_ftmb_from_detections(
-                    ftmb=ftmb,
-                    targets=targets,
-                    detections=detections,
-                    epoch=epoch,
-                    step=step,
-                )
 
             should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
             if should_log:
@@ -1128,69 +986,7 @@ def _run_missbank_offline_mining(
             model.train()
     duration = time.perf_counter() - start_time
     barrier(distributed)
-    if not missbanks:
-        return None
     return _max_distributed_float(duration, distributed)
-
-
-def _run_lmb_offline_mining(
-    *,
-    model: torch.nn.Module,
-    data_loader,
-    device: torch.device,
-    amp: bool,
-    epoch: int,
-    total_epochs: int,
-    log_interval: int,
-    distributed: DistributedContext | None,
-) -> None:
-    lmbs = [
-        lmb
-        for lmb in _iter_lmbs(model)
-        if _lmb_active(lmb, epoch)
-    ]
-    if not lmbs:
-        return
-
-    was_training = model.training
-    previous_base_only = _set_replay_base_only(data_loader, True)
-    model.eval()
-    start_time = time.perf_counter()
-    total_steps = len(data_loader)
-    try:
-        for step, (images, targets) in enumerate(data_loader, start=1):
-            images = [image.to(device) for image in images]
-            targets = [_move_target_to_device(target, device) for target in targets]
-            with torch.no_grad(), torch.autocast(
-                device_type=device.type,
-                enabled=amp and device.type == "cuda",
-            ):
-                detections = model(images)
-
-            for lmb in lmbs:
-                _update_lmb_from_detections(
-                    lmb=lmb,
-                    targets=targets,
-                    detections=detections,
-                    epoch=epoch,
-                    step=step,
-                )
-
-            should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
-            if should_log:
-                elapsed = time.perf_counter() - start_time
-                avg_step_time = elapsed / max(step, 1)
-                remaining_steps = max(total_steps - step, 0)
-                epoch_eta = _format_eta(avg_step_time * remaining_steps)
-                print(
-                    f"[lmb-mining] epoch {epoch}/{total_epochs} "
-                    f"step {step}/{total_steps} epoch_eta={epoch_eta}"
-                )
-    finally:
-        _restore_replay_base_only(data_loader, previous_base_only)
-        if was_training:
-            model.train()
-    barrier(distributed)
 
 
 def _update_missbank_from_detections(
@@ -1211,58 +1007,6 @@ def _update_missbank_from_detections(
         )
 
 
-def _update_ftmb_from_detections(
-    *,
-    ftmb: Any,
-    targets: list[dict[str, torch.Tensor]],
-    detections: Any,
-    epoch: int,
-    step: int,
-) -> None:
-    update = getattr(ftmb, "update", None)
-    if callable(update):
-        update(
-            targets=targets,
-            detections=detections,
-            epoch=int(epoch),
-            step=int(step),
-        )
-
-
-def _update_lmb_from_detections(
-    *,
-    lmb: Any,
-    targets: list[dict[str, torch.Tensor]],
-    detections: Any,
-    epoch: int,
-    step: int,
-) -> None:
-    update = getattr(lmb, "update", None)
-    if callable(update):
-        update(
-            targets=targets,
-            detections=detections,
-            epoch=int(epoch),
-            step=int(step),
-        )
-
-
-def _collect_ftmb_epoch_snapshot(
-    *,
-    model: torch.nn.Module,
-    epoch: int,
-    distributed: DistributedContext | None,
-) -> dict[str, Any] | None:
-    ftmb = _get_ftmb(model)
-    snapshot = None
-    if _ftmb_enabled(ftmb):
-        epoch_snapshot = getattr(ftmb, "epoch_snapshot", None)
-        if callable(epoch_snapshot):
-            snapshot = epoch_snapshot(epoch=int(epoch))
-    gathered = all_gather_object(snapshot, distributed)
-    return merge_ftmb_epoch_snapshots(gathered)
-
-
 def _collect_missbank_epoch_snapshot(
     *,
     model: torch.nn.Module,
@@ -1279,31 +1023,7 @@ def _collect_missbank_epoch_snapshot(
     return merge_missbank_epoch_snapshots(gathered)
 
 
-def _collect_lmb_epoch_snapshot(
-    *,
-    model: torch.nn.Module,
-    epoch: int,
-    distributed: DistributedContext | None,
-) -> dict[str, Any] | None:
-    lmb = _get_lmb(model)
-    snapshot = None
-    if _lmb_active(lmb, epoch):
-        epoch_snapshot = getattr(lmb, "epoch_snapshot", None)
-        if callable(epoch_snapshot):
-            snapshot = epoch_snapshot(epoch=int(epoch))
-    gathered = all_gather_object(snapshot, distributed)
-    return merge_lmb_epoch_snapshots(gathered)
-
-
 def _get_missbank(model: torch.nn.Module, *, attr: str = "missbank"):
-    return getattr(unwrap_model(model), attr, None)
-
-
-def _get_ftmb(model: torch.nn.Module, *, attr: str = "ftmb"):
-    return getattr(unwrap_model(model), attr, None)
-
-
-def _get_lmb(model: torch.nn.Module, *, attr: str = "lmb"):
     return getattr(unwrap_model(model), attr, None)
 
 
@@ -1313,30 +1033,6 @@ def _iter_missbanks(model: torch.nn.Module):
         missbank = getattr(unwrapped, attr, None)
         if missbank is not None:
             yield missbank
-
-
-def _iter_ftmbs(model: torch.nn.Module):
-    unwrapped = unwrap_model(model)
-    for attr in ("ftmb",):
-        ftmb = getattr(unwrapped, attr, None)
-        if ftmb is not None:
-            yield ftmb
-
-
-def _iter_lmbs(model: torch.nn.Module):
-    unwrapped = unwrap_model(model)
-    for attr in ("lmb",):
-        lmb = getattr(unwrapped, attr, None)
-        if lmb is not None:
-            yield lmb
-
-
-def _iter_bcpcs(model: torch.nn.Module):
-    unwrapped = unwrap_model(model)
-    for attr in ("bcpc",):
-        bcpc = getattr(unwrapped, attr, None)
-        if bcpc is not None:
-            yield bcpc
 
 
 def _missbank_enabled(missbank: Any) -> bool:
@@ -1371,34 +1067,6 @@ def _missbank_offline_mining_due(missbank: Any, epoch: int) -> bool:
     return (epoch_value - start_epoch) % interval_epoch == 0
 
 
-def _ftmb_enabled(ftmb: Any) -> bool:
-    if ftmb is None:
-        return False
-    config = getattr(ftmb, "config", None)
-    return bool(getattr(config, "enabled", False))
-
-
-def _ftmb_mining_type(ftmb: Any) -> str:
-    config = getattr(ftmb, "config", None)
-    return str(getattr(config, "mining_type", "online")).lower()
-
-
-def _lmb_enabled(lmb: Any) -> bool:
-    if lmb is None:
-        return False
-    config = getattr(lmb, "config", None)
-    return bool(getattr(config, "enabled", False))
-
-
-def _lmb_active(lmb: Any, epoch: int) -> bool:
-    if not _lmb_enabled(lmb):
-        return False
-    is_active = getattr(lmb, "is_active", None)
-    if callable(is_active):
-        return bool(is_active(int(epoch)))
-    return True
-
-
 def _write_hard_replay_outputs(
     *,
     output_dir: Path,
@@ -1409,32 +1077,6 @@ def _write_hard_replay_outputs(
     _write_json(hard_replay_dir / "hard_replay_epoch.json", history)
     _write_history_csv(hard_replay_dir / "hard_replay_epoch.csv", history)
     _write_json(hard_replay_dir / "hard_replay_state.json", {"snapshot": snapshot})
-
-
-def _write_tar_outputs(
-    *,
-    output_dir: Path,
-    history: list[dict[str, Any]],
-    snapshot: dict[str, Any],
-) -> None:
-    tar_dir = output_dir / "tar"
-    _write_json(tar_dir / "tar_epoch.json", history)
-    _write_history_csv(tar_dir / "tar_epoch.csv", history)
-    _write_json(tar_dir / "tar_state.json", {"snapshot": snapshot})
-
-
-def _write_ftmb_failure_outputs(
-    *,
-    output_dir: Path,
-    history: list[dict[str, Any]],
-    snapshot: dict[str, Any],
-) -> None:
-    ftmb_dir = output_dir / "ftmb"
-    slim_history = [_slim_ftmb_failure_record(record) for record in history]
-    slim_snapshot = _slim_ftmb_failure_record(snapshot)
-    _write_json(ftmb_dir / "failure_type_epoch.json", slim_history)
-    _write_history_csv(ftmb_dir / "failure_type_epoch.csv", slim_history)
-    _write_json(ftmb_dir / "failure_type_state.json", {"snapshot": slim_snapshot})
 
 
 def _write_missbank_outputs(
@@ -1451,50 +1093,8 @@ def _read_hard_replay_history(hard_replay_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(hard_replay_dir / "hard_replay_epoch.json")
 
 
-def _read_tar_history(tar_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(tar_dir / "tar_epoch.json")
-
-
 def _read_missbank_epoch_history(missbank_dir: Path) -> list[dict[str, Any]]:
     return _read_json_list(missbank_dir / "missbank_epoch.json")
-
-
-def _write_lmb_stability_outputs(
-    *,
-    output_dir: Path,
-    subdir: str,
-    history: list[dict[str, Any]],
-    snapshot: dict[str, Any],
-) -> None:
-    lmb_dir = output_dir / subdir
-    _write_json(lmb_dir / "lmb_stability_epoch.json", history)
-    _write_history_csv(lmb_dir / "lmb_stability_epoch.csv", history)
-    _write_json(lmb_dir / "lmb_stability_state.json", {"snapshot": snapshot})
-
-
-def _read_ftmb_failure_history(ftmb_dir: Path) -> list[dict[str, Any]]:
-    return [
-        _slim_ftmb_failure_record(record)
-        for record in _read_json_list(ftmb_dir / "failure_type_epoch.json")
-    ]
-
-
-def _slim_ftmb_failure_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    detail_keys = {
-        "gt_failure_records",
-        "gt_failure_records_by_type",
-        "prediction_failure_events",
-        "step_summaries",
-    }
-    return {
-        str(key): value
-        for key, value in record.items()
-        if str(key) not in detail_keys
-    }
-
-
-def _read_lmb_stability_history(lmb_dir: Path) -> list[dict[str, Any]]:
-    return _read_json_list(lmb_dir / "lmb_stability_epoch.json")
 
 
 def _build_missbank_epoch_metrics(
@@ -1556,10 +1156,6 @@ def _read_missbank_stability_state(path: str | Path) -> dict[str, Any] | None:
         return None
     snapshot = payload.get("snapshot")
     return dict(snapshot) if isinstance(snapshot, Mapping) else None
-
-
-def _read_lmb_stability_state(path: str | Path) -> dict[str, Any] | None:
-    return _read_missbank_stability_state(path)
 
 
 def _write_history_outputs(output_dir: Path, history: list[dict[str, Any]]) -> None:
