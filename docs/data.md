@@ -30,7 +30,7 @@ Required runtime config fields:
 
 When `modules/cfg/hard_replay.yaml` is enabled for FCOS or Faster R-CNN, `build_train_dataloaders()` attaches a `HardReplayController` and uses `MixedReplayBatchSampler` instead of the normal sampler. Each epoch still walks the base training dataset once, then fills configured replay slots with images selected from ReMiss MissBank records.
 
-Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `latest_mined_epoch_only: true` to require the MissBank record's `last_epoch` to equal the latest `last_epoch` currently stored in MissBank records. Set `replay_epochs_after_mining` to a positive value to run Hard Replay only for the first N epochs after the latest MissBank mining epoch; `0` keeps the previous unlimited behavior. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`.
+Replay eligibility is GT-level: a GT must be currently missed by MissBank under the model's final matching thresholds, satisfy `min_miss_count` and `min_observations`, and pass `replay_recency_window`. Set `latest_mined_epoch_only: true` to require the MissBank record's `last_epoch` to equal the latest `last_epoch` currently stored in MissBank records. Set `replay_epochs_after_mining` to a positive value to run Hard Replay only for the first N epochs after the latest MissBank mining epoch; `0` keeps the previous unlimited behavior. The sampler weights each image by the summed priority of its eligible missed GTs, clips the image weight, and mixes replay samples according to `replay_ratio`. Replay slot occurrences are marked in the target so ReMiss FCOS loss weighting can restrict weighting to the replayed GTs.
 
 ## Target Fields
 
@@ -45,6 +45,8 @@ Each target dict contains:
 | `iscrowd` | `LongTensor[N]` | COCO crowd flag |
 | `annotation_ids` | `LongTensor[N]` | COCO annotation IDs, or `-1` when absent |
 | `gt_ids` | `LongTensor[N]` | Alias for per-GT modules such as ReMiss MissBank |
+| `hard_replay` | `BoolTensor[]` | Present only when this occurrence came from a Hard Replay replay slot |
+| `hard_replay_gt_keys` | `list[str]` | Present only for Hard Replay replay slots; MissBank record keys for GTs active in that replay sample |
 
 ## Dataset Selector
 

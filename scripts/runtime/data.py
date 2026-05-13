@@ -10,10 +10,14 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import functional as F
 
-from .hard_replay import HardReplayController, build_hard_replay_controller_from_yaml
+from .hard_replay import (
+    HardReplayController,
+    HardReplaySampleRef,
+    build_hard_replay_controller_from_yaml,
+)
 
 
-class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]):
+class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
     def __init__(self, images_dir: str | Path, annotations_path: str | Path) -> None:
         self.images_dir = Path(images_dir).expanduser().resolve()
         self.annotations_path = Path(annotations_path).expanduser().resolve()
@@ -23,10 +27,16 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
     def __len__(self) -> int:
         return len(self.image_ids)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def __getitem__(self, index: int | HardReplaySampleRef) -> tuple[torch.Tensor, dict[str, Any]]:
+        if isinstance(index, HardReplaySampleRef):
+            image, target = self._get_full_sample(int(index.dataset_index))
+            if bool(index.hard_replay):
+                target["hard_replay"] = torch.tensor(True, dtype=torch.bool)
+                target["hard_replay_gt_keys"] = list(index.active_gt_keys)
+            return image, target
         return self._get_full_sample(int(index))
 
-    def _get_full_sample(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_full_sample(self, index: int) -> tuple[torch.Tensor, dict[str, Any]]:
         image_id, image, annotations = self._load_sample(int(index))
         width, height = image.size
         image_tensor = F.to_tensor(image)
@@ -123,8 +133,8 @@ def build_eval_dataloader(config: dict[str, Any]) -> DataLoader[Any]:
 
 
 def collate_fn(
-    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
-) -> tuple[list[torch.Tensor], list[dict[str, torch.Tensor]]]:
+    batch: list[tuple[torch.Tensor, dict[str, Any]]],
+) -> tuple[list[torch.Tensor], list[dict[str, Any]]]:
     if not batch:
         return [], []
     images, targets = zip(*batch)

@@ -845,9 +845,9 @@ def _restore_replay_base_only(data_loader, states: Mapping[str, bool]) -> None:
 
 
 def _move_target_to_device(
-    target: dict[str, torch.Tensor],
+    target: dict[str, Any],
     device: torch.device,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     return {
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in target.items()

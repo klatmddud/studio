@@ -59,6 +59,7 @@ target:
 loss_weight:
   enabled: false
   start_epoch: null
+  hard_replay_only: true
   alpha: 0.5
   max_weight: 2.0
   min_miss_count: 1
@@ -165,6 +166,8 @@ Offline mining 시간은 해당 epoch의 `history.json` 및 `results.csv`에 `re
 이 label은 현재 detector forward에 auxiliary head로 연결되어 있지 않다.
 
 ## FCOS Loss Weighting
+
+`loss_weight.hard_replay_only: true` limits weighting to the Hard Replay replay-slot occurrence and the active MissBank GT keys carried by that replay sample. Base-pass occurrences keep weight `1.0`.
 
 `loss_weight.enabled: true`이면 FCOS wrapper가 기본 TorchVision FCOS loss path 대신 MissBank-aware path를 사용한다.
 

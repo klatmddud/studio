@@ -146,6 +146,13 @@ class HardReplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HardReplaySampleRef:
+    dataset_index: int
+    hard_replay: bool = True
+    active_gt_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayCandidate:
     dataset_index: int
     weight: float
@@ -162,6 +169,7 @@ class ReplayIndex:
     image_weights: dict[str, float] = field(default_factory=dict)
     replay_gt_ids: set[str] = field(default_factory=set)
     active_gt_counts: dict[int, int] = field(default_factory=dict)
+    active_gt_ids: dict[int, tuple[str, ...]] = field(default_factory=dict)
     image_candidates: list[ReplayCandidate] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
 
@@ -250,6 +258,7 @@ class HardReplayPlanner:
         image_weights: dict[str, float] = {}
         replay_gt_ids: set[str] = set()
         active_gt_counts: dict[int, int] = {}
+        active_gt_ids: dict[int, tuple[str, ...]] = {}
         image_candidates: list[ReplayCandidate] = []
         priority_sum = 0.0
 
@@ -274,8 +283,8 @@ class HardReplayPlanner:
             )
             if image_priority <= 0.0:
                 continue
-            for record in records:
-                replay_gt_ids.add(_record_uid(record))
+            record_uids = tuple(_record_uid(record) for record in records)
+            replay_gt_ids.update(record_uids)
 
             image_key = _normalize_image_id(image_id)
             clipped_weight = self._clipped_weight(image_priority)
@@ -284,6 +293,7 @@ class HardReplayPlanner:
 
             image_weights[image_key] = float(clipped_weight)
             active_gt_counts[int(dataset_index)] = len(records)
+            active_gt_ids[int(dataset_index)] = record_uids
             image_candidates.append(
                 ReplayCandidate(
                     dataset_index=int(dataset_index),
@@ -342,6 +352,7 @@ class HardReplayPlanner:
             image_weights=image_weights,
             replay_gt_ids=replay_gt_ids,
             active_gt_counts=active_gt_counts,
+            active_gt_ids=active_gt_ids,
             image_candidates=image_candidates,
             summary=summary,
         )
@@ -444,7 +455,7 @@ class HardReplayPlanner:
         return max(float(self.config.min_image_weight), clipped)
 
 
-class MixedReplayBatchSampler(Sampler[list[int]]):
+class MixedReplayBatchSampler(Sampler[list[Any]]):
     def __init__(
         self,
         *,
@@ -527,7 +538,8 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
             replay_slice = replay_schedule[replay_cursor : replay_cursor + replay_slots]
             replay_cursor += len(replay_slice)
 
-            batch = [*base_batch, *replay_slice]
+            replay_refs = [self._replay_sample_ref(sample) for sample in replay_slice]
+            batch = [*base_batch, *replay_refs]
             random.Random(self.seed + self.epoch * 1009 + batch_number).shuffle(batch)
             replay_samples.extend(replay_slice)
             yield batch
@@ -676,6 +688,13 @@ class MixedReplayBatchSampler(Sampler[list[int]]):
 
     def _sample_active_gt_count(self, sample: int) -> int:
         return int(self._replay_index.active_gt_counts.get(int(sample), 0))
+
+    def _replay_sample_ref(self, sample: int) -> HardReplaySampleRef:
+        dataset_index = int(sample)
+        return HardReplaySampleRef(
+            dataset_index=dataset_index,
+            active_gt_keys=self._replay_index.active_gt_ids.get(dataset_index, ()),
+        )
 
 
 class HardReplayController:

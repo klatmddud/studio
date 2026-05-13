@@ -86,6 +86,7 @@ class MissBankTargetConfig:
 class MissBankLossWeightConfig:
     enabled: bool = False
     start_epoch: int | None = None
+    hard_replay_only: bool = False
     alpha: float = 0.5
     max_weight: float = 2.0
     min_miss_count: int = 1
@@ -102,6 +103,7 @@ class MissBankLossWeightConfig:
         config = cls(
             enabled=bool(data.get("enabled", False)),
             start_epoch=None if start_epoch is None else int(start_epoch),
+            hard_replay_only=bool(data.get("hard_replay_only", False)),
             alpha=float(data.get("alpha", 0.5)),
             max_weight=float(data.get("max_weight", 2.0)),
             min_miss_count=int(data.get("min_miss_count", 1)),
@@ -127,6 +129,7 @@ class MissBankLossWeightConfig:
         return {
             "enabled": self.enabled,
             "start_epoch": self.start_epoch,
+            "hard_replay_only": self.hard_replay_only,
             "alpha": self.alpha,
             "max_weight": self.max_weight,
             "min_miss_count": self.min_miss_count,
@@ -760,6 +763,9 @@ class MissBank(nn.Module):
         weights = torch.ones((num_gts,), dtype=torch.float32, device=device)
         if num_gts == 0 or not self.loss_weight_active():
             return weights
+        hard_replay_gt_keys = _target_hard_replay_gt_keys(target)
+        if bool(self.config.loss_weight.hard_replay_only) and not hard_replay_gt_keys:
+            return weights
 
         gt_labels = _as_int_tensor(target.get("labels"), length=num_gts)
         height, width = _resolve_image_size(
@@ -784,6 +790,8 @@ class MissBank(nn.Module):
                 height=height,
                 width=width,
             )
+            if bool(self.config.loss_weight.hard_replay_only) and record_key not in hard_replay_gt_keys:
+                continue
             record = self._records.get(record_key)
             weights[gt_index] = float(self._loss_weight_for_record(record))
         return weights
@@ -1135,6 +1143,22 @@ def _extract_gt_ids(target: Mapping[str, Any], count: int) -> list[Any | None]:
         if len(flattened) == count:
             return [None if _is_invalid_gt_id(item) else item for item in flattened]
     return [None for _ in range(count)]
+
+
+def _target_hard_replay_gt_keys(target: Mapping[str, Any]) -> set[str]:
+    hard_replay = target.get("hard_replay", False)
+    if isinstance(hard_replay, torch.Tensor):
+        hard_replay = bool(hard_replay.detach().cpu().flatten().any().item())
+    if not bool(hard_replay):
+        return set()
+    value = target.get("hard_replay_gt_keys", ())
+    if isinstance(value, torch.Tensor):
+        flattened = value.detach().cpu().flatten().tolist()
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        flattened = list(value)
+    else:
+        flattened = [value]
+    return {str(item) for item in flattened if item is not None and str(item)}
 
 
 def _is_invalid_gt_id(value: Any) -> bool:
