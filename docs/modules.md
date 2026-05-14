@@ -21,7 +21,6 @@ Key concepts:
 - Mining: `mining.type: online` updates MissBank after each optimization step, while `mining.type: offline` runs a separate no-grad training-set pass on epochs that satisfy `mining.start_epoch` and `mining.interval_epoch`.
 - Records: `MissBankRecord` stores image ID, GT ID, class, box, consecutive `miss_count`, current missed state, last match score/IoU, best same-class score/IoU diagnostics, and aggregate seen/missed counts.
 - Targets: `get_image_targets()` and `get_batch_labels()` emit binary image-level labels. `0` means no target missed GT in the image, and `1` means at least one currently missed GT satisfies `miss_count >= target.miss_threshold`.
-- Loss weighting: when `loss_weight.enabled: true` for FCOS, GTs with larger MissBank `miss_count` increase the positive classification, box regression, and centerness loss weight. Set `loss_weight.hard_replay_only: true` to limit this to GTs in the current Hard Replay replay-slot sample. Faster R-CNN remains logging/replay-only.
 - State: `get_extra_state()` and `set_extra_state()` make MissBank checkpointable.
 - Summary: `missbank.summary()` reports record counts, current missed counts, target GT counts, class histograms, and update stats.
 - Outputs: runtime writes epoch-level MissBank summaries to `missbank/missbank_epoch.json` and `missbank/missbank_epoch.csv`.
@@ -36,7 +35,7 @@ Key concepts:
 - Source: current MissBank records from the previous mining/update state.
 - Eligibility: `is_missed`, `miss_count >= min_miss_count`, `total_seen >= min_observations`, and `last_epoch` inside `replay_recency_window`. When `latest_mined_epoch_only: true`, `last_epoch` must equal the latest `last_epoch` currently stored in MissBank records and the recency window is ignored. `replay_epochs_after_mining > 0` gates replay to the first N epochs after the latest MissBank mining epoch; `0` keeps unlimited replay.
 - Image-level replay: images containing eligible missed GTs receive replay candidates. Weight is `1 + beta * priority`, clipped by `min_image_weight` and `max_image_weight`, then raised by `temperature`.
-- Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`. Replay slot occurrences are marked in the returned target with `hard_replay` metadata and active MissBank GT keys.
+- Batch mixing: `MixedReplayBatchSampler` walks the base dataset once and adds replay slots according to `replay_ratio`, with optional `max_replays_per_batch`. Replay slot occurrences are marked in the returned target with `hard_replay` metadata.
 - Offline mining: MissBank mining uses base-only loader iteration so replay does not distort mining statistics.
 - Config: `modules/cfg/hard_replay.yaml`.
 
@@ -44,5 +43,5 @@ Key concepts:
 
 | Module | FCOS | Faster R-CNN | DINO |
 |---|---:|---:|---:|
-| ReMiss MissBank | memory update for Hard Replay; optional miss-count loss weighting | memory update for Hard Replay | no |
+| ReMiss MissBank | memory update for Hard Replay | memory update for Hard Replay | no |
 | Hard Replay | MissBank-guided image sampling | MissBank-guided image sampling | no |

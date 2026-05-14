@@ -15,16 +15,6 @@ target:
   miss_threshold: 2
   aggregation: miss_count
 
-loss_weight:
-  enabled: false
-  start_epoch: null
-  hard_replay_only: true
-  alpha: 0.5
-  max_weight: 2.0
-  min_miss_count: 1
-  min_observations: 1
-  normalize_batch_mean: true
-
 models:
   fcos: {}
   fasterrcnn: {}

@@ -2,7 +2,6 @@ from .common import normalize_arch
 from .mb import (
     MissBank,
     MissBankConfig,
-    MissBankLossWeightConfig,
     MissBankMatchingConfig,
     MissBankMiningConfig,
     MissBankRecord,
@@ -17,7 +16,6 @@ from .mb import (
 __all__ = [
     "MissBank",
     "MissBankConfig",
-    "MissBankLossWeightConfig",
     "MissBankMatchingConfig",
     "MissBankMiningConfig",
     "MissBankRecord",

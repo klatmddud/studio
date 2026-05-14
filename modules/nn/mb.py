@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -83,62 +82,6 @@ class MissBankTargetConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class MissBankLossWeightConfig:
-    enabled: bool = False
-    start_epoch: int | None = None
-    hard_replay_only: bool = False
-    alpha: float = 0.5
-    max_weight: float = 2.0
-    min_miss_count: int = 1
-    min_observations: int = 1
-    normalize_batch_mean: bool = True
-
-    @classmethod
-    def from_mapping(
-        cls,
-        raw: Mapping[str, Any] | None = None,
-    ) -> "MissBankLossWeightConfig":
-        data = dict(raw or {})
-        start_epoch = data.get("start_epoch")
-        config = cls(
-            enabled=bool(data.get("enabled", False)),
-            start_epoch=None if start_epoch is None else int(start_epoch),
-            hard_replay_only=bool(data.get("hard_replay_only", False)),
-            alpha=float(data.get("alpha", 0.5)),
-            max_weight=float(data.get("max_weight", 2.0)),
-            min_miss_count=int(data.get("min_miss_count", 1)),
-            min_observations=int(data.get("min_observations", 1)),
-            normalize_batch_mean=bool(data.get("normalize_batch_mean", True)),
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        if self.start_epoch is not None and int(self.start_epoch) < 0:
-            raise ValueError("MissBank loss_weight.start_epoch must be null or >= 0.")
-        if float(self.alpha) < 0.0:
-            raise ValueError("MissBank loss_weight.alpha must be >= 0.")
-        if float(self.max_weight) < 1.0:
-            raise ValueError("MissBank loss_weight.max_weight must be >= 1.")
-        if int(self.min_miss_count) < 1:
-            raise ValueError("MissBank loss_weight.min_miss_count must be >= 1.")
-        if int(self.min_observations) < 1:
-            raise ValueError("MissBank loss_weight.min_observations must be >= 1.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "start_epoch": self.start_epoch,
-            "hard_replay_only": self.hard_replay_only,
-            "alpha": self.alpha,
-            "max_weight": self.max_weight,
-            "min_miss_count": self.min_miss_count,
-            "min_observations": self.min_observations,
-            "normalize_batch_mean": self.normalize_batch_mean,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class MissBankMiningConfig:
     type: str = "online"
     start_epoch: int = 1
@@ -181,7 +124,6 @@ class MissBankConfig:
     mining: MissBankMiningConfig = field(default_factory=MissBankMiningConfig)
     matching: MissBankMatchingConfig = field(default_factory=MissBankMatchingConfig)
     target: MissBankTargetConfig = field(default_factory=MissBankTargetConfig)
-    loss_weight: MissBankLossWeightConfig = field(default_factory=MissBankLossWeightConfig)
     max_records: int | None = None
     arch: str | None = None
 
@@ -217,7 +159,6 @@ class MissBankConfig:
             mining=MissBankMiningConfig.from_mapping(merged.get("mining")),
             matching=MissBankMatchingConfig.from_mapping(merged.get("matching")),
             target=MissBankTargetConfig.from_mapping(merged.get("target")),
-            loss_weight=MissBankLossWeightConfig.from_mapping(merged.get("loss_weight")),
             max_records=None if merged.get("max_records") is None else int(merged.get("max_records")),
             arch=normalized_arch,
         )
@@ -274,7 +215,6 @@ class MissBankConfig:
             "mining": self.mining.to_dict(),
             "matching": self.matching.to_dict(),
             "target": self.target.to_dict(),
-            "loss_weight": self.loss_weight.to_dict(),
             "max_records": self.max_records,
             "arch": self.arch,
         }
@@ -425,15 +365,6 @@ class MissBank(nn.Module):
         epoch_value = self.current_epoch if epoch is None else int(epoch)
         return bool(self.config.enabled and int(epoch_value) >= int(self.config.start_epoch))
 
-    def loss_weight_active(self, epoch: int | None = None) -> bool:
-        if not bool(self.config.enabled and self.config.loss_weight.enabled):
-            return False
-        epoch_value = self.current_epoch if epoch is None else int(epoch)
-        start_epoch = self.config.loss_weight.start_epoch
-        if start_epoch is None:
-            start_epoch = self.config.start_epoch
-        return int(epoch_value) >= int(start_epoch)
-
     def reset(self) -> None:
         self._records.clear()
         self._image_index.clear()
@@ -504,17 +435,6 @@ class MissBank(nn.Module):
         target_map = self.get_image_targets(image_ids, miss_threshold=miss_threshold)
         labels = [int(target_map[_normalize_image_id(image_id)]) for image_id in image_ids]
         return torch.tensor(labels, dtype=torch.long, device=device)
-
-    def get_target_loss_weights(
-        self,
-        targets: Sequence[Mapping[str, Any]],
-        *,
-        device: torch.device | str | None = None,
-    ) -> list[torch.Tensor]:
-        return [
-            self._target_loss_weights(target=target, device=device)
-            for target in targets
-        ]
 
     def get_records(
         self,
@@ -751,62 +671,6 @@ class MissBank(nn.Module):
                 continue
             return 1
         return 0
-
-    def _target_loss_weights(
-        self,
-        *,
-        target: Mapping[str, Any],
-        device: torch.device | str | None,
-    ) -> torch.Tensor:
-        gt_boxes = _as_boxes_tensor(target.get("boxes"))
-        num_gts = int(gt_boxes.shape[0])
-        weights = torch.ones((num_gts,), dtype=torch.float32, device=device)
-        if num_gts == 0 or not self.loss_weight_active():
-            return weights
-        hard_replay_gt_keys = _target_hard_replay_gt_keys(target)
-        if bool(self.config.loss_weight.hard_replay_only) and not hard_replay_gt_keys:
-            return weights
-
-        gt_labels = _as_int_tensor(target.get("labels"), length=num_gts)
-        height, width = _resolve_image_size(
-            target=target,
-            image_size=None,
-            boxes=gt_boxes,
-        )
-        image_id = _normalize_image_id(target.get("image_id", torch.tensor(0)))
-        gt_ids = _extract_gt_ids(target, num_gts)
-        for gt_index, gt_box in enumerate(gt_boxes):
-            if not _valid_box(gt_box):
-                continue
-            gt_label = int(gt_labels[gt_index].item())
-            clamped_box = _clamp_box(gt_box, height=height, width=width)
-            if not _valid_box(clamped_box):
-                continue
-            record_key = _record_key(
-                image_id=image_id,
-                gt_id=gt_ids[gt_index],
-                gt_class=gt_label,
-                bbox_xyxy=_box_to_tuple(clamped_box),
-                height=height,
-                width=width,
-            )
-            if bool(self.config.loss_weight.hard_replay_only) and record_key not in hard_replay_gt_keys:
-                continue
-            record = self._records.get(record_key)
-            weights[gt_index] = float(self._loss_weight_for_record(record))
-        return weights
-
-    def _loss_weight_for_record(self, record: MissBankRecord | None) -> float:
-        if record is None:
-            return 1.0
-        config = self.config.loss_weight
-        miss_count = int(record.miss_count)
-        if miss_count < int(config.min_miss_count):
-            return 1.0
-        if int(record.total_seen) < int(config.min_observations):
-            return 1.0
-        raw_weight = 1.0 + float(config.alpha) * math.log1p(float(miss_count))
-        return min(float(config.max_weight), max(1.0, raw_weight))
 
     def _enforce_max_records(self) -> None:
         max_records = self.config.max_records
@@ -1143,22 +1007,6 @@ def _extract_gt_ids(target: Mapping[str, Any], count: int) -> list[Any | None]:
         if len(flattened) == count:
             return [None if _is_invalid_gt_id(item) else item for item in flattened]
     return [None for _ in range(count)]
-
-
-def _target_hard_replay_gt_keys(target: Mapping[str, Any]) -> set[str]:
-    hard_replay = target.get("hard_replay", False)
-    if isinstance(hard_replay, torch.Tensor):
-        hard_replay = bool(hard_replay.detach().cpu().flatten().any().item())
-    if not bool(hard_replay):
-        return set()
-    value = target.get("hard_replay_gt_keys", ())
-    if isinstance(value, torch.Tensor):
-        flattened = value.detach().cpu().flatten().tolist()
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        flattened = list(value)
-    else:
-        flattened = [value]
-    return {str(item) for item in flattened if item is not None and str(item)}
 
 
 def _is_invalid_gt_id(value: Any) -> bool:

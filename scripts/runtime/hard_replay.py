@@ -149,7 +149,6 @@ class HardReplayConfig:
 class HardReplaySampleRef:
     dataset_index: int
     hard_replay: bool = True
-    active_gt_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +168,6 @@ class ReplayIndex:
     image_weights: dict[str, float] = field(default_factory=dict)
     replay_gt_ids: set[str] = field(default_factory=set)
     active_gt_counts: dict[int, int] = field(default_factory=dict)
-    active_gt_ids: dict[int, tuple[str, ...]] = field(default_factory=dict)
     image_candidates: list[ReplayCandidate] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
 
@@ -258,7 +256,6 @@ class HardReplayPlanner:
         image_weights: dict[str, float] = {}
         replay_gt_ids: set[str] = set()
         active_gt_counts: dict[int, int] = {}
-        active_gt_ids: dict[int, tuple[str, ...]] = {}
         image_candidates: list[ReplayCandidate] = []
         priority_sum = 0.0
 
@@ -293,7 +290,6 @@ class HardReplayPlanner:
 
             image_weights[image_key] = float(clipped_weight)
             active_gt_counts[int(dataset_index)] = len(records)
-            active_gt_ids[int(dataset_index)] = record_uids
             image_candidates.append(
                 ReplayCandidate(
                     dataset_index=int(dataset_index),
@@ -352,7 +348,6 @@ class HardReplayPlanner:
             image_weights=image_weights,
             replay_gt_ids=replay_gt_ids,
             active_gt_counts=active_gt_counts,
-            active_gt_ids=active_gt_ids,
             image_candidates=image_candidates,
             summary=summary,
         )
@@ -690,11 +685,7 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
         return int(self._replay_index.active_gt_counts.get(int(sample), 0))
 
     def _replay_sample_ref(self, sample: int) -> HardReplaySampleRef:
-        dataset_index = int(sample)
-        return HardReplaySampleRef(
-            dataset_index=dataset_index,
-            active_gt_keys=self._replay_index.active_gt_ids.get(dataset_index, ()),
-        )
+        return HardReplaySampleRef(dataset_index=int(sample))
 
 
 class HardReplayController:

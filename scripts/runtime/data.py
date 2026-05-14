@@ -32,7 +32,6 @@ class CocoDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
             image, target = self._get_full_sample(int(index.dataset_index))
             if bool(index.hard_replay):
                 target["hard_replay"] = torch.tensor(True, dtype=torch.bool)
-                target["hard_replay_gt_keys"] = list(index.active_gt_keys)
             return image, target
         return self._get_full_sample(int(index))
 
