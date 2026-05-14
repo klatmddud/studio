@@ -550,13 +550,16 @@ def train_one_epoch(
         if not torch.isfinite(total_loss):
             raise RuntimeError(f"Non-finite loss encountered: {float(total_loss.item())}")
 
+        optimizer_step_ran = True
         if scaler.is_enabled():
+            scale_before_step = float(scaler.get_scale())
             scaler.scale(total_loss).backward()
             if grad_clip_norm is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_ran = float(scaler.get_scale()) >= scale_before_step
         else:
             total_loss.backward()
             if grad_clip_norm is not None:
@@ -583,7 +586,7 @@ def train_one_epoch(
             step=step,
         )
 
-        if scheduler is not None:
+        if scheduler is not None and optimizer_step_ran:
             scheduler.step()
 
         global_iteration = int(start_iteration) + int(num_batches)
