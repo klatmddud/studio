@@ -71,11 +71,14 @@ train:
   eval_every_iterations: 1000
 ```
 
-`history.json` and `results.csv` include an `iteration` column when iteration-budget training is active. Mid-epoch validation records are written at the triggering iteration, while epoch-end records continue to capture epoch-level train summaries and module outputs.
+`history.json` and `results.csv` keep the combined training log for backward compatibility.
+When iteration-budget training is active, iteration validation records are also written
+to `history_iteration.json` and `results_iteration.csv`, while epoch-end summaries are
+written to `history_epoch.json` and `results_epoch.csv`.
 
 ## Module Configs
 
-When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to FCOS or Faster R-CNN. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config: FCOS uses `head.score_thresh` and `head.nms_thresh`, while Faster R-CNN uses `roi_head.box_score_thresh` and `roi_head.box_nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader on epochs that satisfy `mining.start_epoch` and `mining.interval_epoch`. On epochs where offline MissBank mining runs, `history.json` and `results.csv` include top-level `remiss_mining_time_sec`. MissBank writes epoch-level summaries under `output_dir/missbank/`. When `loss_weight.enabled: true` for FCOS, MissBank `miss_count` reweights positive classification, box regression, and centerness losses; Faster R-CNN remains logging/replay-only. Set `loss_weight.hard_replay_only: true` to apply weights only to GTs in the current Hard Replay replay-slot sample.
+When ReMiss is enabled, `scripts/runtime/registry.py` attaches MissBank to FCOS or Faster R-CNN. `matching.score_threshold: auto` and `matching.iou_threshold: auto` resolve matching from the detector's final post-processing config: FCOS uses `head.score_thresh` and `head.nms_thresh`, while Faster R-CNN uses `roi_head.box_score_thresh` and `roi_head.box_nms_thresh`. `modules/cfg/remiss.yaml` controls mining with `mining.type: online` or `mining.type: offline`. Online mining runs an eval-style no-grad detection pass after each optimization step. Offline mining skips per-step updates and runs one additional no-grad pass over the training loader on epochs that satisfy `mining.start_epoch` and `mining.interval_epoch`. On epochs where offline MissBank mining runs, `history_epoch.json` and `results_epoch.csv` include top-level `remiss_mining_time_sec`; the combined `history.json` and `results.csv` include the same epoch summary record. MissBank writes epoch-level summaries under `output_dir/missbank/`. When `loss_weight.enabled: true` for FCOS, MissBank `miss_count` reweights positive classification, box regression, and centerness losses; Faster R-CNN remains logging/replay-only. Set `loss_weight.hard_replay_only: true` to apply weights only to GTs in the current Hard Replay replay-slot sample.
 
 When Hard Replay is enabled for FCOS or Faster R-CNN, `scripts/runtime/data.py` replaces the normal train sampler with a mixed replay batch sampler. The replay index is refreshed at epoch start from ReMiss MissBank records. A GT is a replay target when MissBank says it is currently missed under the detector's final class/score/IoU matching thresholds, with no FN subtype split. Images containing eligible missed GTs are sampled into replay slots with priority based on missed-GT count and streak diagnostics. Replay slot samples carry `hard_replay` metadata and the active MissBank GT keys so FCOS loss weighting can distinguish replay occurrences from the base pass. `replay_epochs_after_mining > 0` limits Hard Replay to the first N epochs after the latest MissBank mining epoch, while `0` leaves it unlimited. Hard Replay epoch summaries are written under `output_dir/hard-replay/` instead of being mixed into the main `results.csv`.
 
@@ -152,8 +155,12 @@ Common outputs under `output_dir`:
 
 | Path | Description |
 |---|---|
-| `history.json` | Train and validation metrics by epoch and, when enabled, global iteration; includes `remiss_mining_time_sec` on epochs where offline MissBank mining runs |
-| `results.csv` | Flattened CSV view of `history.json` for spreadsheet-style analysis |
+| `history.json` | Combined train and validation records; includes both iteration eval and epoch summary records |
+| `results.csv` | Flattened CSV view of `history.json` for backward-compatible spreadsheet analysis |
+| `history_iteration.json` | Iteration-triggered validation records, keyed by global optimizer update |
+| `results_iteration.csv` | Flattened CSV view of `history_iteration.json` |
+| `history_epoch.json` | Epoch-end train summaries and module timing records |
+| `results_epoch.csv` | Flattened CSV view of `history_epoch.json` |
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
 | `checkpoints/epoch_0020.pt` | Periodic checkpoint example written by `checkpoint.save_every_epochs: 20` |

@@ -202,6 +202,7 @@ def fit(
                     total_epochs=total_epochs,
                 )
                 record: dict[str, Any] = {
+                    "record_type": "iteration_eval",
                     "epoch": epoch + 1,
                     "iteration": int(global_iteration),
                     "train": train_snapshot,
@@ -280,6 +281,7 @@ def fit(
                 previous_missbank_snapshot = current_missbank_snapshot
 
         record: dict[str, Any] = {
+            "record_type": "epoch_summary",
             "epoch": epoch + 1,
             "iteration": int(global_iteration),
             "train": train_metrics,
@@ -1359,20 +1361,44 @@ def _read_missbank_stability_state(path: str | Path) -> dict[str, Any] | None:
 def _write_history_outputs(output_dir: Path, history: list[dict[str, Any]]) -> None:
     _write_json(output_dir / "history.json", history)
     _write_history_csv(output_dir / "results.csv", history)
+    iteration_history, epoch_history = _split_history_records(history)
+    _write_json(output_dir / "history_iteration.json", iteration_history)
+    _write_history_csv(output_dir / "results_iteration.csv", iteration_history)
+    _write_json(output_dir / "history_epoch.json", epoch_history)
+    _write_history_csv(output_dir / "results_epoch.csv", epoch_history)
 
 
 def _write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
     rows = [_flatten_history_record(record) for record in history]
-    if not rows:
-        return
-    fieldnames = _history_csv_fieldnames(rows)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        output_path.write_text("", encoding="utf-8")
+        return
+    fieldnames = _history_csv_fieldnames(rows)
     with open(output_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow({key: _csv_value(row.get(key)) for key in fieldnames})
+
+
+def _split_history_records(
+    history: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    iteration_history: list[dict[str, Any]] = []
+    epoch_history: list[dict[str, Any]] = []
+    for record in history:
+        record_type = record.get("record_type")
+        if record_type == "iteration_eval":
+            iteration_history.append(record)
+        elif record_type == "epoch_summary":
+            epoch_history.append(record)
+        elif "val" in record and "iteration" in record:
+            iteration_history.append(record)
+        else:
+            epoch_history.append(record)
+    return iteration_history, epoch_history
 
 
 def _flatten_history_record(
