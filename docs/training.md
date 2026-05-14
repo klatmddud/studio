@@ -41,7 +41,37 @@ bash scripts/bash/baseline/train.bash
 2. Moves the model to the selected device and wraps it in DDP when multiple CUDA devices are requested.
 3. Builds optimizer, scheduler, and AMP scaler.
 4. Resumes checkpoint state when `checkpoint.resume` is set.
-5. For each epoch, runs `train_one_epoch()`, scheduled validation, `history.json` updates, and checkpoint writes.
+5. For each epoch, runs `train_one_epoch()`, scheduled validation, `history.json` updates, and checkpoint writes. If `train.max_iterations` is set, training stops after that many optimizer updates even if `train.epochs` has not been exhausted.
+
+## Iteration-Budget Training
+
+The training loop supports both epoch-budget and iteration-budget runs.
+
+| Field | Description |
+|---|---|
+| `train.epochs` | Maximum epoch count. Still acts as a safety cap when `max_iterations` is set. |
+| `train.max_iterations` | Optional global optimizer-step budget. Set to `null` for pure epoch-based training. |
+| `train.eval_every_epochs` | Optional epoch validation interval. Set to `null` when validation should be iteration-only. |
+| `train.eval_every_iterations` | Optional global optimizer-step validation interval. |
+| `scheduler.unit` | `epoch` steps the scheduler after each epoch; `iteration` steps it after each optimizer update. |
+
+For iteration-based PASCAL-style comparisons, use iteration milestones:
+
+```yaml
+scheduler:
+  name: multistep
+  unit: iteration
+  milestones: [20000, 27000]
+  gamma: 0.1
+
+train:
+  epochs: 200
+  max_iterations: 30000
+  eval_every_epochs: null
+  eval_every_iterations: 1000
+```
+
+`history.json` and `results.csv` include an `iteration` column when iteration-budget training is active. Mid-epoch validation records are written at the triggering iteration, while epoch-end records continue to capture epoch-level train summaries and module outputs.
 
 ## Module Configs
 
@@ -65,6 +95,7 @@ Checkpoint fields:
 | Field | Description |
 |---|---|
 | `epoch` | Last completed epoch |
+| `iteration` | Last completed optimizer update |
 | `best_metric` | Best monitored metric so far |
 | `model_state_dict` | Model state |
 | `optimizer_state_dict` | Optimizer state |
@@ -90,17 +121,38 @@ checkpoint:
   reset_optimizer_lr: true
 ```
 
-When `resume_scheduler: false`, the fresh scheduler is aligned to the resumed global epoch, so a `multistep` milestone `143` still takes effect after epoch 143 and affects epoch 144 onward.
+When `resume_scheduler: false`, the fresh scheduler is aligned to the resumed global epoch for `scheduler.unit: epoch`, or to the resumed global optimizer update for `scheduler.unit: iteration`.
 
 When resuming a baseline checkpoint with ReMiss MissBank newly enabled, `missbank._extra_state` is allowed to be missing. MissBank starts from its configured initial state. Detector weights, epoch, and `best_metric` are restored from the checkpoint; optimizer and scheduler state follow the resume controls above.
 
 ## Metrics And Outputs
 
+`metrics.type` controls the validation metric family while the dataset loader remains
+COCO-format:
+
+| `metrics.type` | Primary metric | Description |
+|---|---|---|
+| `voc_detection` | `voc_mAP_50` | PASCAL VOC-style mAP at IoU 0.5 using the VOC 2007 11-point AP rule. Per-class AP is written as `voc_AP_50_<class_name>`. |
+| `coco_detection` | `bbox_mAP_50_95` | COCOeval bbox metrics including AP50:95, AP50, AP75, and size-specific AP/AR. |
+
+For PASCAL VOC 2007 runs, set both the monitored checkpoint metric and the primary
+metric to VOC mAP:
+
+```yaml
+checkpoint:
+  monitor: voc_mAP_50
+
+metrics:
+  type: voc_detection
+  iou_types: [bbox]
+  primary: voc_mAP_50
+```
+
 Common outputs under `output_dir`:
 
 | Path | Description |
 |---|---|
-| `history.json` | Epoch-level train and validation metrics; includes `remiss_mining_time_sec` on epochs where offline MissBank mining runs |
+| `history.json` | Train and validation metrics by epoch and, when enabled, global iteration; includes `remiss_mining_time_sec` on epochs where offline MissBank mining runs |
 | `results.csv` | Flattened CSV view of `history.json` for spreadsheet-style analysis |
 | `checkpoints/last.pt` | Last checkpoint when `checkpoint.save_last` is enabled |
 | `checkpoints/best.pt` | Best monitored checkpoint when `checkpoint.save_best` is enabled |
@@ -110,10 +162,11 @@ Common outputs under `output_dir`:
 | `hard-replay/hard_replay_state.json` | Last Hard Replay replay summary |
 | `missbank/missbank_epoch.json` | Epoch-level ReMiss MissBank summary metrics accumulated as a JSON list |
 | `missbank/missbank_epoch.csv` | Flattened CSV view of `missbank_epoch.json` |
-| `best_val_metrics.json` | Best-checkpoint epoch and validation metrics |
+| `last_val_metrics.json` | Last-checkpoint epoch, iteration, and validation metrics |
+| `best_val_metrics.json` | Best-checkpoint epoch, iteration, and validation metrics |
 | `figures/loss.png` | Training loss curves |
 | `figures/map.png` | Validation mAP curves |
-| `figures/confusion_matrix.png` | COCO prediction confusion matrix |
+| `figures/confusion_matrix.png` | COCO-format prediction confusion matrix |
 | `metadata/run.json` | Resolved run metadata |
 | `metadata/modules.yaml` | Enabled module config snapshots |
 

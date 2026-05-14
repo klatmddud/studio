@@ -8,7 +8,7 @@ import random
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ from .distributed import (
     is_main_process,
     unwrap_model,
 )
-from .metrics import evaluate_coco_detection, save_predictions
+from .metrics import evaluate_detection, save_predictions
 from .module_metadata import collect_enabled_module_configs
 from .visualize import (
     build_confusion_matrix,
@@ -77,11 +77,15 @@ def fit(
         )
 
     optimizer = build_optimizer(model, runtime_config["optimizer"])
+    total_epochs = runtime_config["train"]["epochs"]
+    max_iterations = runtime_config["train"].get("max_iterations")
     scheduler = build_scheduler(
         optimizer,
         runtime_config["scheduler"],
-        runtime_config["train"]["epochs"],
+        total_epochs,
+        total_iterations=max_iterations,
     )
+    scheduler_unit = _scheduler_step_unit(runtime_config["scheduler"])
     scaler = _build_grad_scaler(
         enabled=runtime_config["amp"] and device.type == "cuda",
         device_type=device.type,
@@ -93,6 +97,7 @@ def fit(
     previous_missbank_snapshot: dict[str, Any] | None = None
     best_metric = _initial_best(runtime_config["checkpoint"]["mode"])
     start_epoch = 0
+    global_iteration = 0
 
     resume_path = runtime_config["checkpoint"].get("resume")
     if resume_path:
@@ -107,6 +112,7 @@ def fit(
             map_location=device,
         )
         start_epoch = int(checkpoint.get("epoch", 0))
+        global_iteration = int(checkpoint.get("iteration", 0))
         best_metric = float(
             checkpoint.get("best_metric", _initial_best(runtime_config["checkpoint"]["mode"]))
         )
@@ -116,10 +122,10 @@ def fit(
                 lr=float(runtime_config["optimizer"]["lr"]),
             )
         if scheduler is not None and not resume_scheduler:
-            _align_scheduler_to_epoch(
-                scheduler,
-                epoch=start_epoch,
-            )
+            if scheduler_unit == "iteration":
+                _align_scheduler_to_step(scheduler, step=global_iteration)
+            else:
+                _align_scheduler_to_step(scheduler, step=start_epoch)
 
     if main_process:
         if resume_path:
@@ -143,19 +149,92 @@ def fit(
         )
     barrier(distributed)
 
-    total_epochs = runtime_config["train"]["epochs"]
-    eval_every = runtime_config["train"]["eval_every_epochs"]
+    eval_every_epochs = runtime_config["train"].get("eval_every_epochs")
+    eval_every_iterations = runtime_config["train"].get("eval_every_iterations")
     monitor = runtime_config["checkpoint"]["monitor"]
     mode = runtime_config["checkpoint"]["mode"]
+    last_eval_iteration = -1
 
     for epoch in range(start_epoch, total_epochs):
+        if max_iterations is not None and global_iteration >= int(max_iterations):
+            break
+
         _set_data_loader_epoch(train_loader, epoch + 1)
         _set_missbank_epoch(model, epoch + 1)
         _refresh_hard_replay(train_loader, model, epoch + 1)
 
+        remaining_iterations = None
+        if max_iterations is not None:
+            remaining_iterations = max(int(max_iterations) - int(global_iteration), 0)
+        max_steps = remaining_iterations if remaining_iterations is not None else None
+        if max_steps is not None and max_steps <= 0:
+            break
+        epoch_step_count = len(train_loader)
+        epoch_completed = max_steps is None or int(max_steps) >= int(epoch_step_count)
+
+        def handle_iteration(iteration: int, train_snapshot: dict[str, float]) -> None:
+            nonlocal best_metric, global_iteration, last_eval_iteration
+            global_iteration = int(iteration)
+            if eval_every_iterations is None or val_loader is None:
+                return
+            reached_max = (
+                max_iterations is not None
+                and int(global_iteration) >= int(max_iterations)
+            )
+            should_eval_iteration = (
+                int(global_iteration) % int(eval_every_iterations) == 0
+                or reached_max
+            )
+            if not should_eval_iteration or last_eval_iteration == int(global_iteration):
+                return
+
+            barrier(distributed)
+            if main_process:
+                val_metrics, _ = evaluate(
+                    model=unwrap_model(model),
+                    runtime_config=runtime_config,
+                    data_loader=val_loader,
+                    device=device,
+                    output_dir=None,
+                    log_interval=runtime_config["train"]["log_interval"],
+                    stage_label=f"val@iter {global_iteration}",
+                    epoch_index=epoch,
+                    total_epochs=total_epochs,
+                )
+                record: dict[str, Any] = {
+                    "epoch": epoch + 1,
+                    "iteration": int(global_iteration),
+                    "train": train_snapshot,
+                    "val": val_metrics,
+                }
+                current_value = val_metrics.get(monitor)
+                if current_value is None:
+                    raise KeyError(
+                        f"Monitored metric {monitor!r} was not found in validation output."
+                    )
+                if _is_better(current_value, best_metric, mode):
+                    best_metric = current_value
+                    if runtime_config["checkpoint"]["save_best"]:
+                        save_checkpoint(
+                            checkpoint_dir / "best.pt",
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            epoch=epoch + 1,
+                            iteration=global_iteration,
+                            best_metric=best_metric,
+                        )
+                history.append(record)
+                _write_history_outputs(output_dir, history)
+                summary = format_metrics(record, runtime_config["metrics"]["primary"])
+                print(f"[iter {global_iteration}] {summary}")
+                last_eval_iteration = int(global_iteration)
+            barrier(distributed)
+
         train_metrics = train_one_epoch(
             model=model,
             optimizer=optimizer,
+            scheduler=scheduler if scheduler_unit == "iteration" else None,
             data_loader=train_loader,
             device=device,
             amp=runtime_config["amp"],
@@ -164,42 +243,50 @@ def fit(
             grad_clip_norm=runtime_config["train"]["grad_clip_norm"],
             epoch_index=epoch,
             total_epochs=total_epochs,
+            max_steps=max_steps,
+            start_iteration=global_iteration,
+            total_iterations=max_iterations,
+            on_iteration=handle_iteration,
             distributed=distributed,
         )
-        remiss_mining_time_sec = _run_missbank_offline_mining(
-            model=model,
-            data_loader=train_loader,
-            device=device,
-            amp=runtime_config["amp"],
-            epoch=epoch + 1,
-            total_epochs=total_epochs,
-            log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
-            distributed=distributed,
-        )
-        current_missbank_snapshot = _collect_missbank_epoch_snapshot(
-            model=model,
-            epoch=epoch + 1,
-            distributed=distributed,
-        )
-        if main_process and current_missbank_snapshot is not None:
-            missbank_metrics = _build_missbank_epoch_metrics(
-                current_missbank_snapshot,
-                previous_snapshot=previous_missbank_snapshot,
+
+        remiss_mining_time_sec = None
+        if epoch_completed:
+            remiss_mining_time_sec = _run_missbank_offline_mining(
+                model=model,
+                data_loader=train_loader,
+                device=device,
+                amp=runtime_config["amp"],
+                epoch=epoch + 1,
+                total_epochs=total_epochs,
+                log_interval=runtime_config["train"]["log_interval"] if main_process else 0,
+                distributed=distributed,
             )
-            missbank_epoch_history.append(missbank_metrics)
-            _write_missbank_outputs(
-                output_dir=output_dir,
-                history=missbank_epoch_history,
+            current_missbank_snapshot = _collect_missbank_epoch_snapshot(
+                model=model,
+                epoch=epoch + 1,
+                distributed=distributed,
             )
-            previous_missbank_snapshot = current_missbank_snapshot
+            if main_process and current_missbank_snapshot is not None:
+                missbank_metrics = _build_missbank_epoch_metrics(
+                    current_missbank_snapshot,
+                    previous_snapshot=previous_missbank_snapshot,
+                )
+                missbank_epoch_history.append(missbank_metrics)
+                _write_missbank_outputs(
+                    output_dir=output_dir,
+                    history=missbank_epoch_history,
+                )
+                previous_missbank_snapshot = current_missbank_snapshot
 
         record: dict[str, Any] = {
             "epoch": epoch + 1,
+            "iteration": int(global_iteration),
             "train": train_metrics,
         }
         if remiss_mining_time_sec is not None:
             record["remiss_mining_time_sec"] = remiss_mining_time_sec
-        hard_replay_summary = _get_hard_replay_summary(train_loader)
+        hard_replay_summary = _get_hard_replay_summary(train_loader) if epoch_completed else None
         if main_process and hard_replay_summary is not None:
             hard_replay_history.append(hard_replay_summary)
             _write_hard_replay_outputs(
@@ -208,10 +295,20 @@ def fit(
                 snapshot=hard_replay_summary,
             )
 
-        should_eval = (
-            val_loader is not None
-            and ((epoch + 1) % eval_every == 0 or (epoch + 1) == total_epochs)
+        reached_max_iterations = (
+            max_iterations is not None
+            and int(global_iteration) >= int(max_iterations)
         )
+        reached_final_epoch = epoch + 1 == total_epochs
+        should_eval = val_loader is not None and last_eval_iteration != int(global_iteration)
+        if should_eval and eval_every_epochs is not None:
+            should_eval = (
+                (epoch + 1) % int(eval_every_epochs) == 0
+                or reached_final_epoch
+                or reached_max_iterations
+            )
+        elif should_eval:
+            should_eval = reached_final_epoch or reached_max_iterations
         if should_eval and main_process:
             val_metrics, _ = evaluate(
                 model=unwrap_model(model),
@@ -238,8 +335,10 @@ def fit(
                         optimizer=optimizer,
                         scheduler=scheduler,
                         epoch=epoch + 1,
+                        iteration=global_iteration,
                         best_metric=best_metric,
                     )
+            last_eval_iteration = int(global_iteration)
         barrier(distributed)
 
         if main_process and runtime_config["checkpoint"]["save_last"]:
@@ -249,6 +348,7 @@ def fit(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 epoch=epoch + 1,
+                iteration=global_iteration,
                 best_metric=best_metric,
             )
         save_every_epochs = runtime_config["checkpoint"].get("save_every_epochs")
@@ -263,10 +363,11 @@ def fit(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 epoch=epoch + 1,
+                iteration=global_iteration,
                 best_metric=best_metric,
             )
 
-        if scheduler is not None:
+        if scheduler is not None and scheduler_unit == "epoch":
             scheduler.step()
 
         if main_process:
@@ -277,22 +378,55 @@ def fit(
             if hard_replay_summary is not None:
                 display_record["hard_replay"] = hard_replay_summary
             summary = format_metrics(display_record, runtime_config["metrics"]["primary"])
-            print(f"[epoch {epoch + 1}/{total_epochs}] {summary}")
+            if max_iterations is not None:
+                progress = f"iter {global_iteration}/{int(max_iterations)}"
+            else:
+                progress = f"epoch {epoch + 1}/{total_epochs}"
+            print(f"[{progress}] {summary}")
+
+    last_pt = checkpoint_dir / "last.pt"
+    if main_process and val_loader is not None and last_pt.is_file():
+        print(f"[last_val] Loading last checkpoint: {last_pt}")
+        last_checkpoint = load_checkpoint(last_pt, model=unwrap_model(model), map_location=device)
+        last_epoch = int(last_checkpoint.get("epoch", 0))
+        last_val_metrics, _ = evaluate_detection(
+            model=unwrap_model(model),
+            data_loader=val_loader,
+            device=device,
+            amp=runtime_config["amp"],
+            metrics_type=runtime_config["metrics"]["type"],
+            log_interval=runtime_config["train"]["log_interval"],
+            stage_label="last_val",
+        )
+        last_val_payload: dict[str, Any] = {"epoch": last_epoch}
+        if "iteration" in last_checkpoint:
+            last_val_payload["iteration"] = int(last_checkpoint["iteration"])
+        last_val_payload.update(last_val_metrics)
+        _write_json(output_dir / "last_val_metrics.json", last_val_payload)
+        primary = runtime_config["metrics"]["primary"]
+        print(
+            f"[last_val] epoch={last_epoch} "
+            f"{primary}={last_val_metrics.get(primary, float('nan')):.4f} "
+            f"saved to {output_dir / 'last_val_metrics.json'}"
+        )
 
     best_pt = checkpoint_dir / "best.pt"
     if main_process and val_loader is not None and best_pt.is_file():
         print(f"[best_val] Loading best checkpoint: {best_pt}")
         best_checkpoint = load_checkpoint(best_pt, model=unwrap_model(model), map_location=device)
         best_epoch = int(best_checkpoint.get("epoch", 0))
-        best_val_metrics, best_val_predictions = evaluate_coco_detection(
+        best_val_metrics, best_val_predictions = evaluate_detection(
             model=unwrap_model(model),
             data_loader=val_loader,
             device=device,
             amp=runtime_config["amp"],
+            metrics_type=runtime_config["metrics"]["type"],
             log_interval=runtime_config["train"]["log_interval"],
             stage_label="best_val",
         )
         best_val_payload: dict[str, Any] = {"epoch": best_epoch}
+        if "iteration" in best_checkpoint:
+            best_val_payload["iteration"] = int(best_checkpoint["iteration"])
         best_val_payload.update(best_val_metrics)
         _write_json(output_dir / "best_val_metrics.json", best_val_payload)
         primary = runtime_config["metrics"]["primary"]
@@ -332,11 +466,12 @@ def evaluate(
         load_checkpoint(checkpoint_path, model=model, map_location=device)
 
     model.to(device)
-    metrics, predictions = evaluate_coco_detection(
+    metrics, predictions = evaluate_detection(
         model=model,
         data_loader=data_loader,
         device=device,
         amp=runtime_config["amp"],
+        metrics_type=runtime_config["metrics"]["type"],
         log_interval=log_interval,
         stage_label=stage_label,
         epoch_index=epoch_index,
@@ -367,6 +502,7 @@ def evaluate(
 def train_one_epoch(
     model: torch.nn.Module,
     optimizer: optim.Optimizer,
+    scheduler,
     data_loader,
     device: torch.device,
     amp: bool,
@@ -375,6 +511,10 @@ def train_one_epoch(
     grad_clip_norm: float | None,
     epoch_index: int,
     total_epochs: int,
+    max_steps: int | None = None,
+    start_iteration: int = 0,
+    total_iterations: int | None = None,
+    on_iteration: Callable[[int, dict[str, float]], None] | None = None,
     distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     model.train()
@@ -384,8 +524,13 @@ def train_one_epoch(
     num_batches = 0
     start_time = time.perf_counter()
     total_steps = len(data_loader)
+    if max_steps is not None:
+        total_steps = min(total_steps, int(max_steps))
 
     for step, (images, targets) in enumerate(data_loader, start=1):
+        if max_steps is not None and step > int(max_steps):
+            break
+
         images = [image.to(device) for image in images]
         targets = [_move_target_to_device(target, device) for target in targets]
 
@@ -436,6 +581,23 @@ def train_one_epoch(
             step=step,
         )
 
+        if scheduler is not None:
+            scheduler.step()
+
+        global_iteration = int(start_iteration) + int(num_batches)
+        if on_iteration is not None:
+            on_iteration(
+                global_iteration,
+                _current_train_metrics(
+                    loss_sums=loss_sums,
+                    metric_sums=metric_sums,
+                    metric_counts=metric_counts,
+                    num_batches=num_batches,
+                    lr=float(optimizer.param_groups[0]["lr"]),
+                    duration=time.perf_counter() - start_time,
+                ),
+            )
+
         should_log = log_interval > 0 and (step % log_interval == 0 or step == total_steps)
         if should_log:
             elapsed = time.perf_counter() - start_time
@@ -447,9 +609,12 @@ def train_one_epoch(
                 f"{name}={loss_sums[name] / num_batches:.4f}"
                 for name in sorted(loss_dict)
             )
+            iteration_label = ""
+            if total_iterations is not None:
+                iteration_label = f" iter {global_iteration}/{int(total_iterations)}"
             message = (
                 f"[train] epoch {epoch_index + 1}/{total_epochs} "
-                f"step {step}/{total_steps} "
+                f"step {step}/{total_steps}{iteration_label} "
                 f"epoch_eta={epoch_eta} "
                 f"total_loss={mean_total_loss:.4f}"
             )
@@ -509,10 +674,12 @@ def build_scheduler(
     optimizer: optim.Optimizer,
     config: dict[str, Any],
     total_epochs: int,
+    total_iterations: int | None = None,
 ):
     name = config["name"].lower()
     if name == "none":
         return None
+    total_steps = int(total_iterations) if total_iterations is not None else int(total_epochs)
     if name == "multistep":
         return optim.lr_scheduler.MultiStepLR(
             optimizer,
@@ -528,11 +695,18 @@ def build_scheduler(
     if name == "cosine":
         return optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=config.get("t_max", total_epochs),
+            T_max=config.get("t_max", total_steps),
             eta_min=config.get("eta_min", 0.0),
         )
 
     raise ValueError(f"Unsupported scheduler.name: {config['name']!r}")
+
+
+def _scheduler_step_unit(config: Mapping[str, Any]) -> str:
+    unit = str(config.get("unit", "epoch")).lower()
+    if unit not in {"epoch", "iteration"}:
+        raise ValueError("scheduler.unit must be either 'epoch' or 'iteration'.")
+    return unit
 
 
 def _reset_optimizer_lr(optimizer: optim.Optimizer, *, lr: float) -> None:
@@ -540,28 +714,28 @@ def _reset_optimizer_lr(optimizer: optim.Optimizer, *, lr: float) -> None:
         group["lr"] = float(lr)
 
 
-def _align_scheduler_to_epoch(scheduler, *, epoch: int) -> None:
-    """Align a fresh scheduler to the global completed epoch after resume."""
-    epoch_value = int(max(epoch, 0))
+def _align_scheduler_to_step(scheduler, *, step: int) -> None:
+    """Align a fresh scheduler to a completed epoch or iteration count after resume."""
+    step_value = int(max(step, 0))
     optimizer = getattr(scheduler, "optimizer", None)
     param_groups = [] if optimizer is None else list(getattr(optimizer, "param_groups", []))
     base_lrs = list(getattr(scheduler, "base_lrs", []))
     if not param_groups or not base_lrs:
         return
 
-    lrs = _scheduler_lrs_at_epoch(scheduler, epoch=epoch_value, base_lrs=base_lrs)
+    lrs = _scheduler_lrs_at_step(scheduler, step=step_value, base_lrs=base_lrs)
     for group, base_lr, lr in zip(param_groups, base_lrs, lrs, strict=False):
         group["initial_lr"] = float(base_lr)
         group["lr"] = float(lr)
-    scheduler.last_epoch = epoch_value
+    scheduler.last_epoch = step_value
     if hasattr(scheduler, "_last_lr"):
         scheduler._last_lr = [float(lr) for lr in lrs]
 
 
-def _scheduler_lrs_at_epoch(
+def _scheduler_lrs_at_step(
     scheduler,
     *,
-    epoch: int,
+    step: int,
     base_lrs: list[float],
 ) -> list[float]:
     if isinstance(scheduler, optim.lr_scheduler.MultiStepLR):
@@ -570,20 +744,20 @@ def _scheduler_lrs_at_epoch(
         decay_count = sum(
             int(count)
             for milestone, count in milestones.items()
-            if int(milestone) <= int(epoch)
+            if int(milestone) <= int(step)
         )
         factor = gamma ** decay_count
         return [float(base_lr) * factor for base_lr in base_lrs]
     if isinstance(scheduler, optim.lr_scheduler.StepLR):
         step_size = int(getattr(scheduler, "step_size", 1))
         gamma = float(getattr(scheduler, "gamma", 0.1))
-        decay_count = int(epoch) // max(step_size, 1)
+        decay_count = int(step) // max(step_size, 1)
         factor = gamma ** decay_count
         return [float(base_lr) * factor for base_lr in base_lrs]
     if isinstance(scheduler, optim.lr_scheduler.CosineAnnealingLR):
         t_max = max(int(getattr(scheduler, "T_max", 1)), 1)
         eta_min = float(getattr(scheduler, "eta_min", 0.0))
-        cosine = (1.0 + math.cos(math.pi * float(epoch) / float(t_max))) * 0.5
+        cosine = (1.0 + math.cos(math.pi * float(step) / float(t_max))) * 0.5
         return [eta_min + (float(base_lr) - eta_min) * cosine for base_lr in base_lrs]
     return [float(group["lr"]) for group in scheduler.optimizer.param_groups]
 
@@ -633,10 +807,12 @@ def save_checkpoint(
     optimizer: optim.Optimizer,
     scheduler,
     epoch: int,
+    iteration: int,
     best_metric: float,
 ) -> None:
     checkpoint = {
         "epoch": epoch,
+        "iteration": int(iteration),
         "best_metric": best_metric,
         "model_state_dict": unwrap_model(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -723,6 +899,28 @@ def format_metrics(record: dict[str, Any], primary_metric: str = "bbox_mAP_50_95
         parts.append(f"tar_ratio={float(tar.get('replay_ratio_effective', 0.0)):.3f}")
 
     return " ".join(parts)
+
+
+def _current_train_metrics(
+    *,
+    loss_sums: Mapping[str, float],
+    metric_sums: Mapping[str, float],
+    metric_counts: Mapping[str, int],
+    num_batches: int,
+    lr: float,
+    duration: float,
+) -> dict[str, float]:
+    metrics = {
+        key: value / max(num_batches, 1)
+        for key, value in loss_sums.items()
+    }
+    for key, value in metric_sums.items():
+        count = int(metric_counts.get(key, 0))
+        if count > 0:
+            metrics[key] = value / float(count)
+    metrics["lr"] = float(lr)
+    metrics["epoch_time_sec"] = float(duration)
+    return metrics
 
 
 def _reduce_train_metrics(
@@ -1194,10 +1392,14 @@ def _flatten_history_record(
 
 def _history_csv_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
     keys = sorted({key for row in rows for key in row})
+    leading: list[str] = []
     if "epoch" in keys:
         keys.remove("epoch")
-        return ["epoch", *keys]
-    return keys
+        leading.append("epoch")
+    if "iteration" in keys:
+        keys.remove("iteration")
+        leading.append("iteration")
+    return [*leading, *keys]
 
 
 def _csv_value(value: Any) -> Any:

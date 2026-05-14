@@ -14,7 +14,7 @@ scripts/
     data.py                 # COCO dataset + DataLoader builders
     engine.py               # fit(), evaluate(), train_one_epoch(), checkpointing
     hard_replay.py          # MissBank-guided image replay planner and mixed batch sampler
-    metrics.py              # COCO evaluation via pycocotools
+    metrics.py              # COCOeval and VOC-style detection metrics
     registry.py             # Builds model from YAML (arch dispatch)
     dataset_meta.py         # Infers num_classes from COCO JSON
   utils/
@@ -40,7 +40,7 @@ ops/                        # Reserved for custom ops (currently empty)
 | Component | Library |
 |---|---|
 | Deep learning | PyTorch 2.11+, TorchVision 0.26+ |
-| Evaluation | pycocotools (COCOeval) |
+| Evaluation | pycocotools (COCOeval), NumPy VOC-style AP |
 | Config | PyYAML + python-dotenv |
 | Package manager | uv (`uv sync` to install) |
 | Python | 3.12+ |

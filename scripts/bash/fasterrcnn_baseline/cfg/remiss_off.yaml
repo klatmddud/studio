@@ -1,11 +1,11 @@
 enabled: false
-start_epoch: 6
+start_epoch: 1
 max_records: null
 
 mining:
   type: offline
-  start_epoch: 6
-  interval_epoch: 5
+  start_epoch: 1
+  interval_epoch: 1
 
 matching:
   score_threshold: auto

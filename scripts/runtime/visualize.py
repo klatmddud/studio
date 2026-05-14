@@ -17,6 +17,8 @@ import seaborn as sns
 _LOSS_SKIP = frozenset({"lr", "epoch_time_sec"})
 
 _MAP_KEYS = [
+    ("voc_mAP_50", "VOC mAP50"),
+    ("voc_mAP_50_integral", "VOC mAP50 integral"),
     ("bbox_mAP_50_95", "mAP50:95"),
     ("bbox_mAP_50", "mAP50"),
     ("bbox_mAP_75", "mAP75"),
@@ -32,14 +34,15 @@ def plot_loss_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
         all_keys.update(key for key in record["train"] if key not in _LOSS_SKIP)
     sorted_keys = sorted(all_keys, key=lambda key: (key != "loss", key))
 
-    epochs = [record["epoch"] for record in records]
+    x_key = _history_x_key(records)
+    x_values = [_history_x_value(record, x_key) for record in records]
     fig, ax = plt.subplots(figsize=(10, 6))
     for key in sorted_keys:
         values = [record["train"].get(key, float("nan")) for record in records]
         label = "total_loss" if key == "loss" else key
-        ax.plot(epochs, values, label=label, linewidth=2.0 if key == "loss" else 1.2)
+        ax.plot(x_values, values, label=label, linewidth=2.0 if key == "loss" else 1.2)
 
-    ax.set_xlabel("Epoch")
+    ax.set_xlabel(_history_x_label(x_key))
     ax.set_ylabel("Loss")
     ax.set_title("Training Loss")
     ax.legend(loc="upper right", fontsize=8)
@@ -53,13 +56,16 @@ def plot_map_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
     if not records:
         return
 
-    epochs = [record["epoch"] for record in records]
+    x_key = _history_x_key(records)
+    x_values = [_history_x_value(record, x_key) for record in records]
     fig, ax = plt.subplots(figsize=(10, 6))
     for key, label in _MAP_KEYS:
+        if not any(key in record["val"] for record in records):
+            continue
         values = [record["val"].get(key, float("nan")) for record in records]
-        ax.plot(epochs, values, label=label, linewidth=1.8, marker="o", markersize=3)
+        ax.plot(x_values, values, label=label, linewidth=1.8, marker="o", markersize=3)
 
-    ax.set_xlabel("Epoch")
+    ax.set_xlabel(_history_x_label(x_key))
     ax.set_ylabel("mAP")
     ax.set_title("Validation mAP")
     ax.set_ylim(0, 1)
@@ -67,6 +73,24 @@ def plot_map_curves(history: list[dict[str, Any]], output_dir: Path) -> None:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     _save_figure(fig, output_dir / "figures" / "map.png")
+
+
+def _history_x_key(records: list[dict[str, Any]]) -> str:
+    if any("iteration" in record for record in records):
+        return "iteration"
+    return "epoch"
+
+
+def _history_x_label(key: str) -> str:
+    if key == "iteration":
+        return "Iteration"
+    return "Epoch"
+
+
+def _history_x_value(record: dict[str, Any], key: str) -> Any:
+    if key in record:
+        return record[key]
+    return record["epoch"]
 
 
 def build_confusion_matrix(

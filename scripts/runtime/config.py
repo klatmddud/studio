@@ -11,7 +11,7 @@ import torch
 import yaml
 from dotenv import load_dotenv
 
-from .metrics import BOX_METRIC_NAMES
+from .metrics import BOX_METRIC_NAMES, VOC_METRIC_NAMES
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}")
@@ -59,14 +59,17 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     },
     "scheduler": {
         "name": "multistep",
+        "unit": "epoch",
         "milestones": [8, 11],
         "gamma": 0.1,
     },
     "train": {
         "epochs": 12,
+        "max_iterations": None,
         "grad_clip_norm": None,
         "log_interval": 20,
         "eval_every_epochs": 1,
+        "eval_every_iterations": None,
     },
     "checkpoint": {
         "dir": "checkpoints",
@@ -278,10 +281,21 @@ def _validate_train_config(config: dict[str, Any]) -> None:
     if not data.get("train_images") or not data.get("train_annotations"):
         raise ValueError("train_images and train_annotations are required for training.")
 
-    if config["train"]["epochs"] < 1:
+    train_config = config["train"]
+    if train_config["epochs"] < 1:
         raise ValueError("train.epochs must be >= 1.")
-    if config["train"]["eval_every_epochs"] < 1:
-        raise ValueError("train.eval_every_epochs must be >= 1.")
+    max_iterations = train_config.get("max_iterations")
+    if max_iterations is not None:
+        if not isinstance(max_iterations, int) or max_iterations < 1:
+            raise ValueError("train.max_iterations must be null or an integer >= 1.")
+    eval_every_epochs = train_config.get("eval_every_epochs")
+    if eval_every_epochs is not None:
+        if not isinstance(eval_every_epochs, int) or eval_every_epochs < 1:
+            raise ValueError("train.eval_every_epochs must be null or an integer >= 1.")
+    eval_every_iterations = train_config.get("eval_every_iterations")
+    if eval_every_iterations is not None:
+        if not isinstance(eval_every_iterations, int) or eval_every_iterations < 1:
+            raise ValueError("train.eval_every_iterations must be null or an integer >= 1.")
     checkpoint = config["checkpoint"]
     for key in ("resume_optimizer", "resume_scheduler", "reset_optimizer_lr"):
         if key in checkpoint and not isinstance(checkpoint[key], bool):
@@ -290,19 +304,19 @@ def _validate_train_config(config: dict[str, Any]) -> None:
     if save_every_epochs is not None:
         if not isinstance(save_every_epochs, int) or save_every_epochs < 1:
             raise ValueError("checkpoint.save_every_epochs must be null or an integer >= 1.")
-    metrics = config["metrics"]
     if checkpoint["mode"] not in {"max", "min"}:
         raise ValueError("checkpoint.mode must be either 'max' or 'min'.")
-    if checkpoint["monitor"] not in BOX_METRIC_NAMES:
+    metrics = config["metrics"]
+    metric_names = _metric_names_for_type(metrics["type"])
+    if checkpoint["monitor"] not in metric_names:
         raise ValueError(
-            f"checkpoint.monitor must be one of {list(BOX_METRIC_NAMES)}; "
+            f"checkpoint.monitor must be one of {list(metric_names)} for "
+            f"metrics.type={metrics['type']!r}; "
             f"got {checkpoint['monitor']!r}."
         )
-    if metrics["primary"] not in BOX_METRIC_NAMES:
-        raise ValueError(
-            f"metrics.primary must be one of {list(BOX_METRIC_NAMES)}; "
-            f"got {metrics['primary']!r}."
-        )
+    scheduler_unit = str(config["scheduler"].get("unit", "epoch")).lower()
+    if scheduler_unit not in {"epoch", "iteration"}:
+        raise ValueError("scheduler.unit must be either 'epoch' or 'iteration'.")
     if checkpoint["save_best"] and (
         not data.get("val_images") or not data.get("val_annotations")
     ):
@@ -331,12 +345,25 @@ def _validate_common_config(config: dict[str, Any]) -> None:
         raise ValueError("loader.num_workers must be >= 0.")
 
     metrics = config["metrics"]
-    if metrics["type"] != "coco_detection":
-        raise ValueError("Only metrics.type='coco_detection' is supported right now.")
+    metric_names = _metric_names_for_type(metrics["type"])
+    if metrics["primary"] not in metric_names:
+        raise ValueError(
+            f"metrics.primary must be one of {list(metric_names)} for "
+            f"metrics.type={metrics['type']!r}; "
+            f"got {metrics['primary']!r}."
+        )
 
     iou_types = tuple(metrics.get("iou_types", []))
     if iou_types != ("bbox",):
         raise ValueError("Only metrics.iou_types=['bbox'] is supported right now.")
+
+
+def _metric_names_for_type(metrics_type: str) -> tuple[str, ...]:
+    if metrics_type == "coco_detection":
+        return BOX_METRIC_NAMES
+    if metrics_type == "voc_detection":
+        return VOC_METRIC_NAMES
+    raise ValueError("metrics.type must be either 'coco_detection' or 'voc_detection'.")
 
 
 def _coerce_device_values(raw: str | Sequence[str]) -> list[str]:

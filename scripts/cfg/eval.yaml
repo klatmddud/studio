@@ -16,9 +16,9 @@ checkpoint:
   path: runs/train/checkpoints/best.pt
 
 metrics:
-  type: coco_detection
+  type: voc_detection
   iou_types: [bbox]
-  primary: bbox_mAP_50_95
+  primary: voc_mAP_50
 
 eval:
   log_interval: 20
