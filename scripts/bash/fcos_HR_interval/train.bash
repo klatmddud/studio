@@ -8,9 +8,7 @@ DATA="kitti"
 MODEL="fcos"
 BACKBONE="resnet50"
 PWD="scripts/bash/fcos_HR_interval"
-
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-
 DEVICE="${DEVICE:-cuda:0}"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I1"

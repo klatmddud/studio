@@ -8,9 +8,7 @@ DATA="kitti"
 MODEL="fasterrcnn"
 BACKBONE="resnet50"
 PWD="scripts/bash/fasterrcnn_HR_cap"
-
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-
 DEVICE="${DEVICE:-cuda:1}"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-cap2"
