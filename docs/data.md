@@ -50,4 +50,13 @@ Each target dict contains:
 
 ## Dataset Selector
 
-`--data kitti` selects dataset-specific environment variables such as `KITTI_TRAIN_IMAGES` and `KITTI_TRAIN_ANNOTATIONS`. Omit `--data` when runtime YAML contains direct paths.
+`--data kitti` selects dataset-specific environment variables such as `KITTI_TRAIN_IMAGES` and `KITTI_TRAIN_ANNOTATIONS`. The selector works by rewriting the dataset prefix of data placeholders, so `--data visdrone` resolves `VISDRONE_TRAIN_IMAGES`, `VISDRONE_TRAIN_ANNOTATIONS`, `VISDRONE_VAL_IMAGES`, and `VISDRONE_VAL_ANNOTATIONS`. Omit `--data` when runtime YAML contains direct paths.
+
+Configured local VisDrone paths:
+
+| Env var | Path |
+|---|---|
+| `VISDRONE_TRAIN_IMAGES` | `C:/Users/user1/datasets/visdrone/images/train` |
+| `VISDRONE_TRAIN_ANNOTATIONS` | `C:/Users/user1/datasets/visdrone/annotations/instances_train.json` |
+| `VISDRONE_VAL_IMAGES` | `C:/Users/user1/datasets/visdrone/images/val` |
+| `VISDRONE_VAL_ANNOTATIONS` | `C:/Users/user1/datasets/visdrone/annotations/instances_val.json` |

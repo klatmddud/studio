@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional dataset selector for runtime data env vars "
-            "(for example: kitti, bdd100k, bdd10k)."
+            "(for example: kitti, pascal, visdrone, bdd100k, bdd10k)."
         ),
     )
     parser.add_argument(
