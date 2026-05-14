@@ -13,7 +13,7 @@ MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 
 DEVICE="${DEVICE:-cuda:0}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I1"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
@@ -26,6 +26,8 @@ uv run scripts/train.py \
   --hard-replay-config "$PWD/cfg/HR_I1.yaml" \
   2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-I1/train.log"
 
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I2"
+
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
   --model "$MODEL_CFG" \
@@ -36,6 +38,8 @@ uv run scripts/train.py \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I2.yaml" \
   2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-I2/train.log"
+
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I3"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
@@ -48,6 +52,8 @@ uv run scripts/train.py \
   --hard-replay-config "$PWD/cfg/HR_I3.yaml" \
   2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-I3/train.log"
 
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I4"
+
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
   --model "$MODEL_CFG" \
@@ -58,6 +64,8 @@ uv run scripts/train.py \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I4.yaml" \
   2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-I4/train.log"
+
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-I5"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \

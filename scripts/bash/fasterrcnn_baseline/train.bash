@@ -13,7 +13,7 @@ MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 
 DEVICE="${DEVICE:-cuda:1}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/baseline"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
@@ -25,6 +25,8 @@ uv run scripts/train.py \
   --remiss-config "$PWD/cfg/remiss_off.yaml" \
   --hard-replay-config "$PWD/cfg/hard_replay.yaml" \
   2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/baseline/train.log"
+
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/missbank"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \

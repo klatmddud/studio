@@ -8,13 +8,12 @@ MOD="baseline"
 DATA="kitti"
 MODEL="fcos"
 BACKBONE="resnet50"
-
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 
 DEVICE="${DEVICE:-cuda:0}"
 LOG_DIR="scripts/bash/$MOD/logs"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/"
 
 uv run scripts/train.py \
   --config scripts/cfg/train.yaml \
