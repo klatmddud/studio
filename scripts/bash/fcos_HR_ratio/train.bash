@@ -4,12 +4,12 @@ set -u
 set -o pipefail
 export PYTHONUNBUFFERED=1
 
-DATA="kitti"
+DATA="pascal"
 MODEL="fcos"
 BACKBONE="resnet50"
 PWD="scripts/bash/fcos_HR_ratio"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-DEVICE="${DEVICE:-cuda:0}"
+DEVICE="cuda:0 cuda:1"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-R0125"
 
