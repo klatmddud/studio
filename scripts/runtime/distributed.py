@@ -57,7 +57,7 @@ def setup_process_group(context: DistributedContext | None) -> None:
         init_method=f"tcp://{context.master_addr}:{context.master_port}",
         rank=context.rank,
         world_size=context.world_size,
-        deivce_id=context.device,
+        device_id=context.device,
     )
 
 
