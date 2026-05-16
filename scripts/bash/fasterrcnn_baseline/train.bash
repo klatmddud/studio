@@ -9,7 +9,7 @@ MODEL="fasterrcnn"
 BACKBONE="resnet50"
 PWD="scripts/bash/fasterrcnn_baseline"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-DEVICE="${cuda:0 cuda:1}"
+DEVICE="cuda:0 cuda:1"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/baseline"
 
