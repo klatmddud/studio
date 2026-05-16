@@ -262,6 +262,8 @@ def _plot_single_cm(
 
 def _save_figure(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[visualize] saved -> {path}")

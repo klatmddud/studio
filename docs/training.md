@@ -75,6 +75,9 @@ train:
 When iteration-budget training is active, iteration validation records are also written
 to `history_iteration.json` and `results_iteration.csv`, while epoch-end summaries are
 written to `history_epoch.json` and `results_epoch.csv`.
+For iteration validation records, `train_epoch_time_sec` reports the elapsed training
+time since the previous iteration validation record, or since training start/resume
+for the first record. Epoch summary records keep epoch-level timing.
 
 ## Module Configs
 
@@ -152,6 +155,8 @@ metrics:
 ```
 
 Common outputs under `output_dir`:
+
+When a training output file already exists, the runtime deletes the existing file before writing the new file with the same name.
 
 | Path | Description |
 |---|---|

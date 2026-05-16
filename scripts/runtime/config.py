@@ -133,6 +133,8 @@ def load_yaml_file(path: str | Path) -> dict[str, Any]:
 def dump_yaml_file(path: str | Path, data: dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
     with open(output_path, "w", encoding="utf-8") as handle:
         yaml.safe_dump(data, handle, sort_keys=False)
 

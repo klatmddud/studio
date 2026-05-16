@@ -154,6 +154,7 @@ def fit(
     monitor = runtime_config["checkpoint"]["monitor"]
     mode = runtime_config["checkpoint"]["mode"]
     last_eval_iteration = -1
+    iteration_train_timer_start = time.perf_counter()
 
     for epoch in range(start_epoch, total_epochs):
         if max_iterations is not None and global_iteration >= int(max_iterations):
@@ -174,6 +175,7 @@ def fit(
 
         def handle_iteration(iteration: int, train_snapshot: dict[str, float]) -> None:
             nonlocal best_metric, global_iteration, last_eval_iteration
+            nonlocal iteration_train_timer_start
             global_iteration = int(iteration)
             if eval_every_iterations is None or val_loader is None:
                 return
@@ -188,8 +190,15 @@ def fit(
             if not should_eval_iteration or last_eval_iteration == int(global_iteration):
                 return
 
+            iteration_train_time_sec = time.perf_counter() - iteration_train_timer_start
+            iteration_train_time_sec = _max_distributed_float(
+                iteration_train_time_sec,
+                distributed,
+            )
             barrier(distributed)
             if main_process:
+                iteration_train_snapshot = dict(train_snapshot)
+                iteration_train_snapshot["epoch_time_sec"] = float(iteration_train_time_sec)
                 val_metrics, _ = evaluate(
                     model=unwrap_model(model),
                     runtime_config=runtime_config,
@@ -205,7 +214,7 @@ def fit(
                     "record_type": "iteration_eval",
                     "epoch": epoch + 1,
                     "iteration": int(global_iteration),
-                    "train": train_snapshot,
+                    "train": iteration_train_snapshot,
                     "val": val_metrics,
                 }
                 current_value = val_metrics.get(monitor)
@@ -231,6 +240,7 @@ def fit(
                 print(f"[iter {global_iteration}] {summary}")
                 last_eval_iteration = int(global_iteration)
             barrier(distributed)
+            iteration_train_timer_start = time.perf_counter()
 
         train_metrics = train_one_epoch(
             model=model,
@@ -834,6 +844,8 @@ def save_checkpoint(
     temp_path = Path(temp_name)
     try:
         torch.save(checkpoint, temp_path)
+        if target.exists():
+            target.unlink()
         os.replace(temp_path, target)
     finally:
         if temp_path.exists():
@@ -1375,6 +1387,8 @@ def _write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
     rows = [_flatten_history_record(record) for record in history]
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
     if not rows:
         output_path.write_text("", encoding="utf-8")
         return
@@ -1466,6 +1480,8 @@ def _ratio(numerator: int | float, denominator: int | float) -> float | None:
 def _write_json(path: str | Path, payload: Any) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
 

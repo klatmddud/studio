@@ -14,7 +14,7 @@ DEVICE="cuda:0 cuda:1"
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-cap2"
 
 uv run scripts/train.py \
-  --config scripts/cfg/train.yaml \
+  --config "$PWD/cfg/train.yaml" \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
@@ -27,7 +27,7 @@ uv run scripts/train.py \
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-cap4"
 
 uv run scripts/train.py \
-  --config scripts/cfg/train.yaml \
+  --config "$PWD/cfg/train.yaml" \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
@@ -40,7 +40,7 @@ uv run scripts/train.py \
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-cap8"
 
 uv run scripts/train.py \
-  --config scripts/cfg/train.yaml \
+  --config "$PWD/cfg/train.yaml" \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \

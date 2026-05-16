@@ -200,6 +200,8 @@ def evaluate_detection(
 def save_predictions(path: str | Path, predictions: list[dict[str, Any]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
     output_path.write_text(_to_json(predictions), encoding="utf-8")
 
 
