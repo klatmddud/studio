@@ -9,7 +9,7 @@ MODEL="fasterrcnn"
 BACKBONE="resnet50"
 PWD="scripts/bash/fasterrcnn_HR_ratio"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-DEVICE="cuda:0 cuda:1"
+DEVICE="${DEVICE:-cuda:0 cuda:1}"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-R0125"
 

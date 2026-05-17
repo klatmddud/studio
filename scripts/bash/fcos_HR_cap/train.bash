@@ -9,7 +9,7 @@ MODEL="fcos"
 BACKBONE="resnet50"
 PWD="scripts/bash/fcos_HR_cap"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
-DEVICE="cuda:0 cuda:1"
+DEVICE="${DEVICE:-cuda:0 cuda:1}"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-cap2"
 
