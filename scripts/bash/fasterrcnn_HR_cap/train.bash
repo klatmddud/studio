@@ -4,7 +4,7 @@ set -u
 set -o pipefail
 export PYTHONUNBUFFERED=1
 
-DATA="pascal"
+DATA="${DATA:-kitti}"
 MODEL="fasterrcnn"
 BACKBONE="resnet50"
 PWD="scripts/bash/fasterrcnn_HR_cap"
