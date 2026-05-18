@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 start_epoch: 6
 max_records: null
 
@@ -6,6 +6,7 @@ mining:
   type: offline
   start_epoch: 6
   interval_epoch: 5
+  easy_sample_replacement: true
 
 matching:
   score_threshold: auto

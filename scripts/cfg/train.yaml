@@ -17,7 +17,7 @@ loader:
 
 optimizer:
   name: sgd
-  lr: 0.02
+  lr: 0.01
   momentum: 0.9
   weight_decay: 0.0001
   nesterov: false
@@ -25,16 +25,16 @@ optimizer:
 scheduler:
   name: multistep
   unit: iteration
-  milestones: [20000, 27000]
+  milestones: [40000, 53333]
   gamma: 0.1
 
 train:
   epochs: 200
-  max_iterations: 30000
+  max_iterations: 60000
   grad_clip_norm: 1.0
   log_interval: 20
-  eval_every_epochs: null
-  eval_every_iterations: 1000
+  eval_every_epochs: 1
+  eval_every_iterations: null
 
 checkpoint:
   dir: checkpoints
@@ -45,10 +45,10 @@ checkpoint:
   save_last: true
   save_best: true
   save_every_epochs: 20
-  monitor: voc_mAP_50 # for coco: bbox_mAP_50_95, for voc: voc_mAP_50
+  monitor: bbox_mAP_50_95 # for coco: bbox_mAP_50_95, for voc: voc_mAP_50
   mode: max
 
 metrics:
-  type: voc_detection # for coco: coco_detection, for voc: voc_detection
+  type: coco_detection # for coco: coco_detection, for voc: voc_detection
   iou_types: [bbox]
-  primary: voc_mAP_50 # for coco: bbox_mAP_50_95, for voc: voc_mAP_50
+  primary: bbox_mAP_50_95 # for coco: bbox_mAP_50_95, for voc: voc_mAP_50

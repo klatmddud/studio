@@ -169,6 +169,8 @@ class ReplayIndex:
     replay_gt_ids: set[str] = field(default_factory=set)
     active_gt_counts: dict[int, int] = field(default_factory=dict)
     image_candidates: list[ReplayCandidate] = field(default_factory=list)
+    easy_sample_replacement: bool = False
+    easy_scores: dict[int, float] = field(default_factory=dict)
     summary: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -257,15 +259,31 @@ class HardReplayPlanner:
         replay_gt_ids: set[str] = set()
         active_gt_counts: dict[int, int] = {}
         image_candidates: list[ReplayCandidate] = []
+        easy_sample_replacement = _missbank_easy_sample_replacement(missbank)
+        easy_scores: dict[int, float] = {}
         priority_sum = 0.0
 
         score_threshold, iou_threshold = _missbank_thresholds(missbank)
+        target_threshold = _missbank_target_threshold(missbank)
         for dataset_index, image_id in enumerate(image_ids):
+            all_records = self._records_for_image(missbank=missbank, image_id=image_id)
+            if easy_sample_replacement:
+                easy_score = _image_easy_score(
+                    all_records,
+                    score_threshold=score_threshold,
+                    iou_threshold=iou_threshold,
+                    target_threshold=target_threshold,
+                    latest_mined_epoch=latest_mined_epoch,
+                )
+                if easy_score is not None:
+                    easy_scores[int(dataset_index)] = float(easy_score)
+
             records = self._select_records(
                 missbank=missbank,
                 image_id=image_id,
                 epoch=epoch,
                 latest_mined_epoch=latest_mined_epoch,
+                records=all_records,
             )
             if not records:
                 continue
@@ -333,6 +351,10 @@ class HardReplayPlanner:
                 "latest_mined_epoch": latest_mined_epoch,
                 "replay_mean_image_weight": mean_image_weight,
                 "replay_mean_gt_priority": mean_gt_priority,
+                "easy_sample_replacement": bool(easy_sample_replacement),
+                "easy_drop_candidates": len(easy_scores),
+                "easy_score_mean": _mean(easy_scores.values()),
+                "easy_score_max": max(easy_scores.values(), default=0.0),
             }
         )
         summary.update(
@@ -349,8 +371,21 @@ class HardReplayPlanner:
             replay_gt_ids=replay_gt_ids,
             active_gt_counts=active_gt_counts,
             image_candidates=image_candidates,
+            easy_sample_replacement=bool(easy_sample_replacement),
+            easy_scores=easy_scores,
             summary=summary,
         )
+
+    def _records_for_image(
+        self,
+        *,
+        missbank: Any,
+        image_id: Any,
+    ) -> list[Any]:
+        get_records = getattr(missbank, "get_records", None)
+        if not callable(get_records):
+            return []
+        return list(get_records(image_id))
 
     def _select_records(
         self,
@@ -359,13 +394,11 @@ class HardReplayPlanner:
         image_id: Any,
         epoch: int,
         latest_mined_epoch: int | None,
+        records: Sequence[Any] | None = None,
     ) -> list[Any]:
-        get_records = getattr(missbank, "get_records", None)
-        if not callable(get_records):
-            return []
-
         selected: list[Any] = []
-        for record in get_records(image_id):
+        source_records = self._records_for_image(missbank=missbank, image_id=image_id) if records is None else records
+        for record in source_records:
             if not self._record_is_eligible(
                 record,
                 epoch=epoch,
@@ -503,6 +536,8 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
         self._last_summary = self._summary_with_slot_plan(replay_index)
 
     def __len__(self) -> int:
+        if self._easy_sample_replacement_active():
+            return int(math.ceil(self._rank_base_sample_count() / float(self.batch_size)))
         base_count = max(1, self.batch_size - self._active_replay_slots())
         return int(math.ceil(self._rank_base_sample_count() / float(base_count)))
 
@@ -520,28 +555,66 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
             return
 
         base_count = self.batch_size - replay_slots
-        num_batches = int(math.ceil(len(base_indices) / float(base_count)))
-        replay_schedule = self._build_replay_schedule(
-            self._replay_index.image_candidates,
-            total_samples=num_batches * replay_slots,
-            seed_offset=17,
-        )
-
-        replay_cursor = 0
+        dropped_easy_scores: list[float] = []
         replay_samples: list[int] = []
-        for batch_number, base_batch in enumerate(_chunks(base_indices, base_count), start=1):
-            replay_slice = replay_schedule[replay_cursor : replay_cursor + replay_slots]
-            replay_cursor += len(replay_slice)
 
-            replay_refs = [self._replay_sample_ref(sample) for sample in replay_slice]
-            batch = [*base_batch, *replay_refs]
-            random.Random(self.seed + self.epoch * 1009 + batch_number).shuffle(batch)
-            replay_samples.extend(replay_slice)
-            yield batch
+        if self._easy_sample_replacement_active():
+            num_batches = int(math.ceil(len(base_indices) / float(self.batch_size)))
+            replay_schedule = self._build_replay_schedule(
+                self._replay_index.image_candidates,
+                total_samples=num_batches * replay_slots,
+                seed_offset=17,
+            )
+            target_base_samples = min(
+                len(base_indices),
+                max(0, num_batches * self.batch_size - len(replay_schedule)),
+            )
+            base_indices, dropped_easy_scores = self._drop_easy_base_indices(
+                base_indices,
+                keep_count=target_base_samples,
+            )
+
+            base_cursor = 0
+            replay_cursor = 0
+            for batch_number in range(1, num_batches + 1):
+                replay_slice = replay_schedule[replay_cursor : replay_cursor + replay_slots]
+                replay_cursor += len(replay_slice)
+                base_take = min(
+                    max(0, len(base_indices) - base_cursor),
+                    max(0, self.batch_size - len(replay_slice)),
+                )
+                base_batch = base_indices[base_cursor : base_cursor + base_take]
+                base_cursor += len(base_batch)
+                if not base_batch and not replay_slice:
+                    continue
+
+                replay_refs = [self._replay_sample_ref(sample) for sample in replay_slice]
+                batch = [*base_batch, *replay_refs]
+                random.Random(self.seed + self.epoch * 1009 + batch_number).shuffle(batch)
+                replay_samples.extend(replay_slice)
+                yield batch
+        else:
+            num_batches = int(math.ceil(len(base_indices) / float(base_count)))
+            replay_schedule = self._build_replay_schedule(
+                self._replay_index.image_candidates,
+                total_samples=num_batches * replay_slots,
+                seed_offset=17,
+            )
+            replay_cursor = 0
+            for batch_number, base_batch in enumerate(_chunks(base_indices, base_count), start=1):
+                replay_slice = replay_schedule[replay_cursor : replay_cursor + replay_slots]
+                replay_cursor += len(replay_slice)
+
+                replay_refs = [self._replay_sample_ref(sample) for sample in replay_slice]
+                batch = [*base_batch, *replay_refs]
+                random.Random(self.seed + self.epoch * 1009 + batch_number).shuffle(batch)
+                replay_samples.extend(replay_slice)
+                yield batch
 
         self._finalize_summary(
             total_base_samples=len(base_indices),
             replay_samples=replay_samples,
+            dropped_easy_scores=dropped_easy_scores,
         )
 
     def _active_replay_slots(self) -> int:
@@ -568,6 +641,13 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
     def _has_candidates(self) -> bool:
         return bool(self._replay_index.image_candidates)
 
+    def _easy_sample_replacement_active(self) -> bool:
+        return (
+            not self.base_only
+            and bool(self._replay_index.easy_sample_replacement)
+            and self._active_replay_slots() > 0
+        )
+
     def _build_base_indices(self) -> list[int]:
         indices = list(range(self.dataset_size))
         if self.shuffle:
@@ -587,6 +667,35 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
         if self.world_size <= 1:
             return self.dataset_size
         return int(math.ceil(self.dataset_size / float(self.world_size)))
+
+    def _drop_easy_base_indices(
+        self,
+        indices: Sequence[int],
+        *,
+        keep_count: int,
+    ) -> tuple[list[int], list[float]]:
+        drop_count = max(0, len(indices) - int(keep_count))
+        if drop_count <= 0:
+            return list(indices), []
+
+        rng = random.Random(self.seed + self.epoch * 104729 + self.rank * 65537)
+        scored = [
+            (
+                -float(self._replay_index.easy_scores.get(int(index), 0.0)),
+                rng.random(),
+                position,
+                int(index),
+            )
+            for position, index in enumerate(indices)
+        ]
+        scored.sort()
+        dropped_positions = {position for _, _, position, _ in scored[:drop_count]}
+        dropped_scores = [
+            float(self._replay_index.easy_scores.get(index, 0.0))
+            for _, _, _, index in scored[:drop_count]
+        ]
+        kept = [int(index) for position, index in enumerate(indices) if position not in dropped_positions]
+        return kept, dropped_scores
 
     def _build_replay_schedule(
         self,
@@ -639,6 +748,7 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
                 "active": False,
                 "replay_slots_per_batch": int(replay_slots),
                 "base_slots_per_batch": int(self.batch_size - replay_slots),
+                "epoch_size_policy": "fixed" if self._easy_sample_replacement_active() else "expand",
             }
         )
         return summary
@@ -648,6 +758,7 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
         *,
         total_base_samples: int,
         replay_samples: Sequence[int],
+        dropped_easy_scores: Sequence[float] | None = None,
     ) -> None:
         replay_counts: dict[int, int] = {}
         gt_exposure_count = 0
@@ -670,6 +781,7 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
             else 0.0
         )
         replay_slots = self._active_replay_slots()
+        dropped_scores = list(dropped_easy_scores or [])
         self._last_summary = {
             **dict(self._replay_index.summary),
             "active": bool(total_replay_samples > 0),
@@ -679,6 +791,11 @@ class MixedReplayBatchSampler(Sampler[list[Any]]):
             "replay_exposure_per_gt": replay_exposure_per_gt,
             "replay_slots_per_batch": int(replay_slots),
             "base_slots_per_batch": int(self.batch_size - replay_slots),
+            "base_samples": int(total_base_samples),
+            "easy_drop_samples": int(len(dropped_scores)),
+            "easy_drop_mean_score": _mean(dropped_scores),
+            "easy_drop_max_score": max(dropped_scores, default=0.0),
+            "epoch_size_policy": "fixed" if self._easy_sample_replacement_active() else "expand",
         }
 
     def _sample_active_gt_count(self, sample: int) -> int:
@@ -787,6 +904,15 @@ def _empty_summary(
         "replay_exposure_per_gt": 0.0,
         "replay_slots_per_batch": 0,
         "base_slots_per_batch": 0,
+        "base_samples": 0,
+        "easy_sample_replacement": False,
+        "easy_drop_candidates": 0,
+        "easy_drop_samples": 0,
+        "easy_score_mean": 0.0,
+        "easy_score_max": 0.0,
+        "easy_drop_mean_score": 0.0,
+        "easy_drop_max_score": 0.0,
+        "epoch_size_policy": "expand",
     }
 
 
@@ -818,6 +944,80 @@ def _missbank_thresholds(missbank: Any) -> tuple[float, float]:
     score = float(getattr(matching, "score_threshold", 0.0))
     iou = float(getattr(matching, "iou_threshold", 0.5))
     return score, iou
+
+
+def _missbank_target_threshold(missbank: Any) -> int:
+    config = getattr(missbank, "config", None)
+    target = getattr(config, "target", None)
+    return int(getattr(target, "miss_threshold", 1))
+
+
+def _missbank_easy_sample_replacement(missbank: Any) -> bool:
+    config = getattr(missbank, "config", None)
+    mining = getattr(config, "mining", None)
+    return bool(getattr(mining, "easy_sample_replacement", False))
+
+
+def _image_easy_score(
+    records: Sequence[Any],
+    *,
+    score_threshold: float,
+    iou_threshold: float,
+    target_threshold: int,
+    latest_mined_epoch: int | None,
+) -> float | None:
+    current_records = [
+        record
+        for record in records
+        if int(getattr(record, "last_epoch", 0)) > 0
+        and (latest_mined_epoch is None or int(getattr(record, "last_epoch", 0)) == int(latest_mined_epoch))
+    ]
+    if not current_records:
+        return None
+
+    target_misses = [
+        record
+        for record in current_records
+        if bool(getattr(record, "is_missed", False))
+        and int(getattr(record, "miss_count", 0)) >= int(target_threshold)
+    ]
+    if target_misses:
+        return None
+
+    detected_records = [record for record in current_records if not bool(getattr(record, "is_missed", False))]
+    if not detected_records:
+        return None
+
+    total_count = len(current_records)
+    detected_ratio = len(detected_records) / float(max(total_count, 1))
+    missed_ratio = 1.0 - detected_ratio
+    score_margin = _mean(
+        (float(getattr(record, "last_score", 0.0) or 0.0) - float(score_threshold))
+        for record in detected_records
+    )
+    iou_margin = _mean(
+        (float(getattr(record, "last_iou", 0.0) or 0.0) - float(iou_threshold))
+        for record in detected_records
+    )
+    detect_streak_bonus = _mean(
+        math.log1p(max(0, int(getattr(record, "consecutive_detect_count", 0))))
+        for record in detected_records
+    )
+    missed_gt_penalty = 2.0 * missed_ratio
+    return (
+        float(detected_ratio)
+        + float(score_margin)
+        + float(iou_margin)
+        + 0.25 * float(detect_streak_bonus)
+        - float(missed_gt_penalty)
+    )
+
+
+def _mean(values: Sequence[float] | Any) -> float:
+    items = [float(value) for value in values]
+    if not items:
+        return 0.0
+    return sum(items) / float(len(items))
 
 
 def _record_uid(record: Any) -> str:

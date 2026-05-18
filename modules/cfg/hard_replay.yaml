@@ -1,5 +1,5 @@
-enabled: false
-start_epoch: 2
+enabled: true
+start_epoch: 6
 warmup_epochs: 0
 replay_ratio: 0.25
 max_replays_per_batch: 0

@@ -86,6 +86,7 @@ class MissBankMiningConfig:
     type: str = "online"
     start_epoch: int = 1
     interval_epoch: int = 1
+    easy_sample_replacement: bool = False
 
     @classmethod
     def from_mapping(
@@ -97,6 +98,7 @@ class MissBankMiningConfig:
             type=str(data.get("type", "online")).lower(),
             start_epoch=int(data.get("start_epoch", 1)),
             interval_epoch=int(data.get("interval_epoch", 1)),
+            easy_sample_replacement=bool(data.get("easy_sample_replacement", False)),
         )
         config.validate()
         return config
@@ -114,6 +116,7 @@ class MissBankMiningConfig:
             "type": self.type,
             "start_epoch": self.start_epoch,
             "interval_epoch": self.interval_epoch,
+            "easy_sample_replacement": self.easy_sample_replacement,
         }
 
 
@@ -240,6 +243,7 @@ class MissBankRecord:
     total_seen: int = 0
     total_missed: int = 0
     max_miss_count: int = 0
+    consecutive_detect_count: int = 0
 
     def update(
         self,
@@ -268,10 +272,12 @@ class MissBankRecord:
             self.miss_count += 1
             self.total_missed += 1
             self.max_miss_count = max(int(self.max_miss_count), int(self.miss_count))
+            self.consecutive_detect_count = 0
             self.last_iou = None
             self.last_score = None
         else:
             self.miss_count = 0
+            self.consecutive_detect_count += 1
             self.last_iou = None if matched_iou is None else float(matched_iou)
             self.last_score = None if matched_score is None else float(matched_score)
 
@@ -299,6 +305,7 @@ class MissBankRecord:
             "total_seen": self.total_seen,
             "total_missed": self.total_missed,
             "max_miss_count": self.max_miss_count,
+            "consecutive_detect_count": self.consecutive_detect_count,
         }
 
     @classmethod
@@ -326,6 +333,7 @@ class MissBankRecord:
             total_seen=int(state.get("total_seen", 0)),
             total_missed=int(state.get("total_missed", 0)),
             max_miss_count=int(state.get("max_miss_count", 0)),
+            consecutive_detect_count=int(state.get("consecutive_detect_count", 0)),
         )
 
 
