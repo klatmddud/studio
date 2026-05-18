@@ -7,7 +7,7 @@ export PYTHONUNBUFFERED=1
 DATA="${DATA:-kitti}"
 MODEL="fasterrcnn"
 BACKBONE="resnet50"
-PWD="scripts/bash/fasterrcnn_HR_interval"
+PWD="scripts/bash/200epochs/fasterrcnn_HR_interval"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 DEVICE="${DEVICE:-cuda:1}"
 
