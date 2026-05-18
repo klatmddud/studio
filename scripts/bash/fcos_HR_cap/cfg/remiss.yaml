@@ -6,6 +6,7 @@ mining:
   type: offline
   start_epoch: 6
   interval_epoch: 5
+  easy_sample_replacement: false
 
 matching:
   score_threshold: auto
