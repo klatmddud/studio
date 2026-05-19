@@ -9,11 +9,45 @@
 
 ## 1. 환경 준비
 
+### uv
+
 의존성 설치:
 
 ```powershell
 uv sync
 ```
+
+이후 명령은 README 예시처럼 `uv run ...` 형식으로 실행합니다.
+
+### pip
+
+가상환경 생성 및 의존성 설치: CUDA 버전은 본인의 환경에 맞게 조절해야 합니다.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+`pip` 환경에서는 이후 명령의 `uv run`을 빼고 `python`으로 실행합니다.
+
+```powershell
+python scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fcos.yaml --data kitti
+```
+
+### conda
+
+Conda 환경 생성 및 의존성 설치: CUDA 버전은 본인의 환경에 맞게 조절해야 합니다.
+
+```powershell
+conda create -n studio python=3.12 -y
+conda activate studio
+python -m pip install --upgrade pip
+python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+`conda` 환경에서도 이후 명령의 `uv run`을 빼고 `python`으로 실행합니다.
 
 학습/평가 런타임 설정은 프로젝트 루트의 `.env` 파일을 자동으로 읽습니다.
 `scripts/cfg/train.yaml`, `scripts/cfg/eval.yaml`에서 `${VAR_NAME}` 형태로 참조한 경로는 `.env`에 정의해 두면 됩니다.
@@ -85,9 +119,12 @@ uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection
 | --- | --- |
 | `--config` | 학습 런타임 YAML 경로. 필수 |
 | `--model` | 모델 YAML 경로. 필수 |
-| `--data` | 데이터셋 env prefix 선택. 예: `kitti`, `bdd100k`, `bdd10k` |
+| `--data` | 데이터셋 env prefix 선택. 예: `kitti`, `pascal`, `visdrone`, `bdd100k`, `bdd10k` |
 | `--output-dir` | `train.yaml`의 `output_dir`를 CLI에서 덮어씀 |
-| `--device` | `runtime.device`를 CLI에서 덮어씀. 예: `auto`, `cpu`, `cuda`, `mps` |
+| `--seed` | `train.yaml`의 `seed`를 CLI에서 덮어씀. 0 이상의 정수 |
+| `--device` | `train.yaml`의 `device`를 CLI에서 덮어씀. 단일 장치 또는 DDP용 복수 CUDA 장치 지정. 예: `auto`, `cpu`, `cuda`, `mps`, `cuda:0 cuda:1` |
+| `--remiss-config` | ReMiss YAML 설정 경로를 CLI에서 덮어씀 |
+| `--hard-replay-config` | Hard Replay YAML 설정 경로를 CLI에서 덮어씀 |
 
 ### 학습 커맨드 예시
 
@@ -103,7 +140,7 @@ Faster R-CNN 학습 결과를 별도 폴더에 저장:
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/fasterrcnn.yaml --data kitti --output-dir runs/fasterrcnn_kitti --device cuda
 ```
 
-DINO 학습:
+DINO 학습: DINO는 아직 미구현
 
 ```powershell
 uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection/cfg/dino.yaml --data bdd10k
@@ -117,10 +154,26 @@ uv run scripts/train.py --config scripts/cfg/train.yaml --model models/detection
 | `data` | `train_images`, `train_annotations`, `val_images`, `val_annotations` | 학습/검증 이미지 폴더와 COCO annotation 경로 |
 | `loader` | `batch_size`, `num_workers`, `pin_memory`, `shuffle` | DataLoader 설정 |
 | `optimizer` | `name`, `lr`, `momentum`, `weight_decay`, `nesterov`, `betas`, `eps` | 현재 `sgd`, `adamw` 지원 |
-| `scheduler` | `name`, `milestones`, `gamma`, `step_size`, `t_max`, `eta_min` | 현재 `none`, `multistep`, `step`, `cosine` 지원 |
-| `train` | `epochs`, `grad_clip_norm`, `log_interval`, `eval_every_epochs` | 학습 epoch 수, gradient clipping, 로그 주기, 검증 주기 |
+| `scheduler` | `name`, `unit`, `milestones`, `gamma`, `step_size`, `t_max`, `eta_min` | 현재 `none`, `multistep`, `step`, `cosine` 지원. `unit`은 `epoch` 또는 `iteration` |
+| `train` | `epochs`, `max_iterations`, `grad_clip_norm`, `log_interval`, `eval_every_epochs`, `eval_every_iterations` | 학습 epoch 수, iteration budget, gradient clipping, 로그 주기, 검증 주기 |
 | `checkpoint` | `dir`, `resume`, `save_last`, `save_best`, `monitor`, `mode` | 체크포인트 저장 경로, 재시작 경로, best/last 저장 여부 |
 | `metrics` | `type`, `iou_types`, `primary` | 현재 `coco_detection`, `bbox`만 지원 |
+
+Iteration 기준 스케줄을 사용하려면 `scheduler.unit: iteration`으로 설정하고, `scheduler.milestones`에는 global optimizer step 기준 값을 넣습니다. `train.max_iterations`가 설정되어 있으면 해당 iteration 수에서 학습이 종료됩니다.
+
+```yaml
+scheduler:
+  name: multistep
+  unit: iteration
+  milestones: [60000, 80000]
+  gamma: 0.1
+
+train:
+  epochs: 300
+  max_iterations: 90000
+  eval_every_epochs: 1
+  eval_every_iterations: 3000
+```
 
 체크포인트 재시작은 CLI 옵션이 아니라 YAML에서 설정합니다.
 
