@@ -20,7 +20,7 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
+  --device "${DEVICE}" \
   --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-I1" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I1.yaml" \
@@ -33,7 +33,7 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
+  --device "${DEVICE}" \
   --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-I2" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I2.yaml" \
@@ -46,7 +46,7 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
+  --device "${DEVICE}" \
   --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-I3" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I3.yaml" \
@@ -59,7 +59,7 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
+  --device "${DEVICE}" \
   --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-I4" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I4.yaml" \
@@ -72,7 +72,7 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
+  --device "${DEVICE}" \
   --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-I5" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_I5.yaml" \

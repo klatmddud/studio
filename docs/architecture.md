@@ -22,6 +22,8 @@ scripts/
 
 models/detection/
   cfg/                      # Per-architecture YAML (fcos/fasterrcnn/dino)
+  backends/
+    idea_dino.py            # IDEA-DINO backend adapter for DINOWrapper
   wrapper/
     _base.py                # Backbone + FPN builder
     fcos.py                 # FCOS wrapper

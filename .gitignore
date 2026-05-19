@@ -14,5 +14,6 @@ wheels/
 runs
 logs
 __pycache__
+checkpoints
 
 .claude

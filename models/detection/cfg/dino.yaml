@@ -1,3 +1,14 @@
+backend:
+  builder: models.detection.backends.idea_dino:build_idea_dino_components
+  kwargs:
+    dino_root: third-party/DINO
+    config_file: config/DINO/DINO_4scale.py
+    checkpoint: checkpoints/dino/checkpoint0011_4scale.pth
+    finetune_ignore:
+      - label_enc.weight
+      - class_embed
+    disable_torchvision_pretrained_backbone: true
+
 backbone:
   name: resnet50
   pretrained: DEFAULT

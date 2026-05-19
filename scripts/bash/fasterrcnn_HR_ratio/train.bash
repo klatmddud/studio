@@ -11,6 +11,7 @@ PWD="scripts/bash/fasterrcnn_HR_ratio"
 MODEL_CFG="models/detection/cfg/$MODEL.yaml"
 TRAIN_CFG="scripts/bash/cfg/fasterrcnn_train.yaml"
 DEVICE="${DEVICE:-cuda:0 cuda:1}"
+MODE="${MODE:-90K}"
 
 mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-R0125"
 
@@ -19,34 +20,34 @@ uv run scripts/train.py \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
-  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/HR-R0125" \
+  --device "${DEVICE}" \
+  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R0125" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_0125.yaml" \
-  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-R0125/train.log"
+  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R0125/train.log"
 
-mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-R025"
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R025"
 
 uv run scripts/train.py \
   --config "$TRAIN_CFG" \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
-  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/HR-R025" \
+  --device "${DEVICE}" \
+  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R025" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_025.yaml" \
-  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-R025/train.log"
+  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R025/train.log"
 
-mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/HR-R05"
+mkdir -p "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R05"
 
 uv run scripts/train.py \
   --config "$TRAIN_CFG" \
   --model "$MODEL_CFG" \
   --data "$DATA" \
   --seed 42 \
-  --device ${DEVICE} \
-  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/HR-R05" \
+  --device "${DEVICE}" \
+  --output-dir "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R05" \
   --remiss-config "$PWD/cfg/remiss.yaml" \
   --hard-replay-config "$PWD/cfg/HR_05.yaml" \
-  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/HR-R05/train.log"
+  2>&1 | tee -a "runs/train/$DATA/$MODEL/$BACKBONE/$MODE/HR-R05/train.log"

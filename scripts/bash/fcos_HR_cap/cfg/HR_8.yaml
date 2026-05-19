@@ -1,7 +1,7 @@
 enabled: true
 start_epoch: 6
 warmup_epochs: 0
-replay_ratio: 0.25
+replay_ratio: 0.125
 max_replays_per_batch: 0
 beta: 1.0
 temperature: 1.0

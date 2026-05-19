@@ -22,6 +22,13 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 
 - Transformer-based detector adapter.
 - Uses an external backend builder via the `backend.builder` YAML field.
+- `models.detection.backends.idea_dino:build_idea_dino_components` adapts the
+  IDEA-DINO checkout in `third-party/DINO` by loading its Python config,
+  building `(model, criterion, postprocessors)`, and optionally partial-loading
+  a pretrained checkpoint with shape-incompatible heads skipped.
+- The IDEA-DINO backend requires the `MultiScaleDeformableAttention` extension
+  from `third-party/DINO/models/dino/ops` to be built before training or
+  inference.
 
 ## Model Config Fields
 
@@ -37,6 +44,9 @@ All wrappers inherit from `_base.py`, which builds the backbone + FPN via TorchV
 | `num_classes` | Auto-inferred from COCO JSON if not set |
 | `transform.min_size` | Shorter edge resize target |
 | `transform.max_size` | Longer edge cap |
+| `backend.builder` | Optional external backend builder for adapters such as IDEA-DINO |
+| `backend.kwargs.config_file` | IDEA-DINO Python config path, relative to `third-party/DINO` |
+| `backend.kwargs.checkpoint` | Optional IDEA-DINO checkpoint for partial pretrained loading |
 
 ## Model Building (`scripts/runtime/registry.py`)
 
